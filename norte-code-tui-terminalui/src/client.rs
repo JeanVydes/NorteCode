@@ -122,6 +122,18 @@ pub(crate) enum UiCommand {
     },
     /// Run a plugin operation on the host; completion re-lists the plugins.
     Plugin(PluginOp),
+    /// Rename a session in the host's list.
+    RenameSession {
+        /// The session to rename.
+        session: norte_code_wire::SessionKey,
+        /// The new title.
+        title: String,
+    },
+    /// Delete a session in the host's list.
+    DeleteSession {
+        /// The session to delete.
+        session: norte_code_wire::SessionKey,
+    },
 }
 
 /// A plugin operation the host can do for us.
@@ -154,6 +166,91 @@ pub(crate) enum PluginOp {
 }
 
 const RETRY_BASE_MS: u64 = 400;
+
+enum BackgroundOp {
+    /// A plugin operation.
+    Plugin(PluginOp),
+    /// A session rename.
+    Rename {
+        /// The session to rename.
+        session: norte_code_wire::SessionKey,
+        /// The new title.
+        title: String,
+    },
+    /// A session delete.
+    Delete {
+        /// The session to delete.
+        session: norte_code_wire::SessionKey,
+    },
+}
+
+/// Spawn a host operation without blocking the command loop.
+fn spawn_host_op(kind: BackgroundOp, api: Arc<RestClient>, events: Sender<ClientEvent>) {
+    tokio::spawn(async move {
+        match kind {
+            BackgroundOp::Plugin(op) => run_plugin_op(&api, op, &events).await,
+            BackgroundOp::Rename { session, title } => {
+                rename_session(&api, &session, &title, &events).await;
+            }
+            BackgroundOp::Delete { session } => delete_session(&api, &session, &events).await,
+        }
+    });
+}
+
+/// Rename a session; on any outcome re-list the sessions.
+async fn rename_session(
+    api: &Arc<RestClient>,
+    session: &norte_code_wire::SessionKey,
+    title: &str,
+    events: &Sender<ClientEvent>,
+) {
+    match api.rename_session(session.as_str(), title).await {
+        Ok(()) => {
+            let _ = events
+                .send(ClientEvent::Notice {
+                    text: format!("session renamed · {title}"),
+                })
+                .await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: format!("rename session failed · {error}"),
+                })
+                .await;
+        }
+    }
+    if let Ok(sessions) = api.sessions().await {
+        let _ = events.send(ClientEvent::Sessions(sessions)).await;
+    }
+}
+
+/// Delete a session; on any outcome re-list the sessions.
+async fn delete_session(
+    api: &Arc<RestClient>,
+    session: &norte_code_wire::SessionKey,
+    events: &Sender<ClientEvent>,
+) {
+    match api.delete_session(session.as_str()).await {
+        Ok(()) => {
+            let _ = events
+                .send(ClientEvent::Notice {
+                    text: "session deleted".to_string(),
+                })
+                .await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: format!("delete session failed · {error}"),
+                })
+                .await;
+        }
+    }
+    if let Ok(sessions) = api.sessions().await {
+        let _ = events.send(ClientEvent::Sessions(sessions)).await;
+    }
+}
 
 /// Run one plugin operation and re-list the plugins afterwards.
 async fn run_plugin_op(api: &Arc<RestClient>, op: PluginOp, events: &Sender<ClientEvent>) {
@@ -331,10 +428,40 @@ async fn connection(
     }
 }
 
+/// Send a user message on the session's stream.
+async fn send_prompt(api: &Arc<RestClient>, target: &SessionKey, text: String, queue_mode: String) {
+    let _ = api
+        .send_prompt(
+            target.as_str(),
+            Some(&text),
+            None::<Vec<UserInputPart>>,
+            None,
+            &queue_mode,
+        )
+        .await;
+}
+
+/// Answer the question the turn is parked on.
+async fn answer_question(
+    api: &Arc<RestClient>,
+    events: &Sender<ClientEvent>,
+    target: &SessionKey,
+    question: String,
+    answer: String,
+) {
+    if let Err(error) = api
+        .answer_question(target.as_str(), &question, &answer)
+        .await
+    {
+        let _ = events
+            .send(ClientEvent::SendFailed {
+                reason: format!("answer refused: {error}"),
+            })
+            .await;
+    }
+}
+
 /// Send the attachment frames for a session.
-///
-/// History and views are not filled here: the host refuses them until the
-/// session is actually attached, which only happens once the stream opens.
 async fn attach_shared(
     client: &Arc<RemoteClient>,
     events: &Sender<ClientEvent>,
@@ -470,22 +597,24 @@ async fn drive_stream(
                         return StreamOutcome::Switch(summary);
                     }
                     UiCommand::Plugin(op) => {
-                        let api = Arc::clone(api);
-                        let events = events.clone();
-                        tokio::spawn(async move {
-                            run_plugin_op(&api, op, &events).await;
-                        });
+                        spawn_host_op(BackgroundOp::Plugin(op), Arc::clone(api), events.clone());
+                    }
+                    UiCommand::RenameSession { session, title } => {
+                        spawn_host_op(
+                            BackgroundOp::Rename { session, title },
+                            Arc::clone(api),
+                            events.clone(),
+                        );
+                    }
+                    UiCommand::DeleteSession { session } => {
+                        spawn_host_op(
+                            BackgroundOp::Delete { session },
+                            Arc::clone(api),
+                            events.clone(),
+                        );
                     }
                     UiCommand::Send { session: target, text, queue_mode } => {
-                        let _ = api
-                            .send_prompt(
-                                target.as_str(),
-                                Some(&text),
-                                None::<Vec<UserInputPart>>,
-                                None,
-                                &queue_mode,
-                            )
-                            .await;
+                        send_prompt(api, &target, text, queue_mode).await;
                     }
                     UiCommand::Refresh => {
                         if let Ok(sessions) = client.list_sessions().await {
@@ -497,16 +626,7 @@ async fn drive_stream(
                         question,
                         answer,
                     } => {
-                        if let Err(error) = api
-                            .answer_question(target.as_str(), &question, &answer)
-                            .await
-                        {
-                            let _ = events
-                                .send(ClientEvent::SendFailed {
-                                    reason: format!("answer refused: {error}"),
-                                })
-                                .await;
-                        }
+                        answer_question(api, events, &target, question, answer).await;
                     }
                     UiCommand::RefreshViews => {
                         Box::pin(fetch_views(api, session.as_str(), events)).await;

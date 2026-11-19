@@ -19,8 +19,6 @@ use crate::ui_model::{SessionAttachmentState, Tab, TurnState, UiModel};
 
 use norte_code_wire::ServerEventKind;
 
-use crate::ui::Inspector;
-
 const POLL_MS: u64 = 16;
 
 /// Entry point. `run` renders the north star until the user quits.
@@ -115,6 +113,7 @@ fn poll_event(
             drain_tab_request(tree, model);
             drain_models_actions(tree, commands, model);
             drain_plugins_actions(tree, commands);
+            drain_sessions_actions(tree, commands, model);
             ui::sync_views(tree, model);
             Ok(false)
         }
@@ -196,12 +195,9 @@ fn handle_key(
             } else if model.tab == Tab::Chat {
                 send_current_prompt(tree, commands, model);
                 pass_to_tree = false;
-            } else if model.tab == Tab::Sessions {
-                handle_enter(tree, commands, model);
-                pass_to_tree = false;
             }
-            // Other tabs let Enter fall through to the tree, which routes
-            // it to the page's own handler (models, plugins, ...).
+            // Every other tab lets Enter fall through to the tree, which
+            // routes it to the page's own handler (models, sessions, ...).
         }
         (KeyModifiers::CONTROL | KeyModifiers::ALT, KeyCode::Char(digit)) => {
             if let Some(tab) = Tab::from_digit(digit) {
@@ -227,6 +223,7 @@ fn handle_key(
     }
     drain_question_answer(tree, commands, model);
     drain_models_actions(tree, commands, model);
+    drain_sessions_actions(tree, commands, model);
     drain_plugins_actions(tree, commands);
     sync_selectors(tree, commands, model);
     drain_tab_request(tree, model);
@@ -359,37 +356,6 @@ fn send_current_prompt(
     }
 }
 
-fn handle_enter(
-    tree: &mut terminalui::Tree,
-    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
-    model: &mut UiModel,
-) {
-    if model.tab == Tab::Sessions {
-        handle_sessions_enter(tree, commands, model);
-    }
-}
-
-fn handle_sessions_enter(
-    tree: &mut terminalui::Tree,
-    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
-    model: &mut UiModel,
-) {
-    let index = tree
-        .find::<Inspector>("sessions")
-        .and_then(Inspector::selected);
-    let Some(summary) = index.and_then(|index| model.sessions.get(index)).cloned() else {
-        return;
-    };
-    let Some(commands) = commands.as_ref() else {
-        return;
-    };
-    let _ = commands.try_send(UiCommand::OpenSession {
-        session: Box::new(summary),
-    });
-    model.tab = Tab::Chat;
-    ui::sync_views(tree, model);
-}
-
 fn key_intent_for(provider: String, model_id: Option<String>) -> crate::ui::KeyIntent {
     match model_id {
         Some(model) => crate::ui::KeyIntent::SwitchModel { provider, model },
@@ -441,6 +407,52 @@ fn open_key_prompt(
             env_keys,
             key_intent_for(provider.to_owned(), model_id),
         );
+    }
+}
+
+/// Drain the sessions page's pending actions into the client.
+fn drain_sessions_actions(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) {
+    let Some(page) = tree.find_mut::<ui::SessionsPage>("sessions") else {
+        return;
+    };
+    for action in page.take_pending() {
+        match action {
+            ui::SessionsAction::Attach { session } => {
+                if let Some(commands) = commands.as_ref() {
+                    let _ = commands.try_send(UiCommand::OpenSession { session });
+                }
+                model.tab = Tab::Chat;
+                ui::sync_views(tree, model);
+            }
+            ui::SessionsAction::Rename { session, title } => {
+                if let Some(commands) = commands.as_ref() {
+                    let _ = commands.try_send(UiCommand::RenameSession { session, title });
+                }
+            }
+            ui::SessionsAction::Delete { session } => {
+                let own = model
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.as_str() == session.as_str());
+                if own {
+                    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                        stream.push(ui::Item::Notice {
+                            text: "cannot delete the attached session; attach to another one first"
+                                .to_string(),
+                            tone: ui::Tone::Warn,
+                        });
+                    }
+                    continue;
+                }
+                if let Some(commands) = commands.as_ref() {
+                    let _ = commands.try_send(UiCommand::DeleteSession { session });
+                }
+            }
+        }
     }
 }
 

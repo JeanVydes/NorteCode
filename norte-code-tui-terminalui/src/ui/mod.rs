@@ -13,6 +13,7 @@ mod plugins_page;
 mod question_prompt;
 mod rail;
 mod selector;
+mod sessions_page;
 mod transcript;
 
 use ratatui::layout::Constraint;
@@ -20,13 +21,14 @@ use terminalui::Pane;
 
 pub(crate) use composer::Composer;
 pub(crate) use header::Header;
-pub(crate) use inspector::Inspector;
+
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
 pub(crate) use plugins_page::{PluginsAction, PluginsPage};
 pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::Rail;
 pub(crate) use selector::Selector;
+pub(crate) use sessions_page::{SessionsAction, SessionsPage};
 pub(crate) use transcript::{Item, Tone, ToolState, Transcript};
 
 use crate::theme;
@@ -72,7 +74,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
         "middle",
         Pane::new(vec![
             chat,
-            node("sessions", pages::session(model)),
+            node("sessions", sessions_page::SessionsPage::new()),
             node("models", models_page::ModelsPage::new()),
             node("plans", pages::plans(model)),
             node("jobs", pages::jobs(model)),
@@ -193,6 +195,13 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     }
 }
 
+fn update_sessions(tree: &mut Tree, model: &UiModel) {
+    let active = model.active.as_ref().map(|key| key.as_str().to_string());
+    if let Some(page) = tree.find_mut::<sessions_page::SessionsPage>("sessions") {
+        page.set_data(model.sessions.clone(), active);
+    }
+}
+
 fn update_models(tree: &mut Tree, model: &UiModel) {
     let mut key_status = std::collections::HashMap::new();
     if let Some(catalog) = model.catalog.as_ref() {
@@ -226,9 +235,7 @@ fn update_plugins(tree: &mut Tree, model: &UiModel) {
 
 /// Refresh the inspectors from the latest model snapshot; called after data arrives.
 pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
-    if let Some(inspector) = tree.find_mut::<inspector::Inspector>("sessions") {
-        *inspector = pages::session(model);
-    }
+    update_sessions(tree, model);
     update_models(tree, model);
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("plans") {
         *inspector = pages::plans(model);

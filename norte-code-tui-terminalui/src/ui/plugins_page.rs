@@ -385,6 +385,7 @@ impl View for PluginsPage {
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _cx: &mut Context, theme: &Theme) {
         self.area = area;
+        buf.set_style(area, Style::default().bg(theme.background));
         self.paint_toolbar(area, buf, theme);
         match self.mode {
             Mode::Repository => {
