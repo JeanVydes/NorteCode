@@ -17,7 +17,7 @@ fn rail_text(usage: ContextUsage) -> String {
     let mut buf = Buffer::empty(area);
     tree.render(area, &mut buf, &theme);
     let mut out = String::new();
-    for y in 1..16 {
+    for y in 1..19 {
         for x in 0..28 {
             out.push_str(buf[(x, y)].symbol());
         }
@@ -33,16 +33,17 @@ fn the_rail_shows_context_usage_and_the_compact_button() {
         window: Some(128),
     });
     assert!(text.contains("CONTEXT"), "{text}");
-    assert!(text.contains("64/128"), "{text}");
-    assert!(text.contains("compact 115"), "{text}");
+    assert!(text.contains("64 / 128"), "{text}");
+    assert!(text.contains("compact at 115"), "{text}");
     assert!(text.contains('█') || text.contains('░'), "{text}");
     assert!(text.contains("compact"), "{text}");
 }
 
 #[test]
-fn a_session_without_a_window_says_so() {
+fn a_session_without_a_window_marks_it_unknown() {
     let text = rail_text(ContextUsage::default());
-    assert!(text.contains("no context reported"), "{text}");
+    assert!(text.contains("0 / ?"), "{text}");
+    assert!(text.contains("compact at ?"), "{text}");
 }
 
 #[test]

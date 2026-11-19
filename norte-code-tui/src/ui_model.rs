@@ -318,6 +318,32 @@ impl Tab {
 }
 
 impl UiModel {
+    /// The context to show: reported usage, with the window filled from the
+    /// active model when the host never sent session stats.
+    pub(crate) fn effective_context(&self) -> ContextUsage {
+        let mut usage = self.context;
+        if usage.window.is_none() {
+            usage.window = self
+                .active_model
+                .as_ref()
+                .and_then(|agent| {
+                    self.models
+                        .iter()
+                        .find(|info| {
+                            info.model == agent.id
+                                && self
+                                    .active_provider
+                                    .as_ref()
+                                    .is_none_or(|provider| provider == &info.provider)
+                        })
+                        .or_else(|| self.models.iter().find(|info| info.model == agent.id))
+                })
+                .and_then(|info| info.max_context)
+                .filter(|window| *window > 0);
+        }
+        usage
+    }
+
     /// Whether the attached session has a model configured.
     pub(crate) fn active_session_has_model(&self) -> bool {
         if let Some(active) = self.active.as_ref()
@@ -366,3 +392,7 @@ impl UiModel {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ui_model_tests.rs"]
+mod tests;

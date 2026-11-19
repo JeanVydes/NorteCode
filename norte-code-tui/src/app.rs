@@ -885,6 +885,12 @@ fn fold_compaction_event(kind: &ServerEventKind, tree: &mut terminalui::Tree, mo
                 window: *context_window,
             };
         }
+        ServerEventKind::RequestReconstructed { usage, .. } => {
+            let spent = usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0);
+            if spent > 0 {
+                model.context.used = spent;
+            }
+        }
         ServerEventKind::CompactionStarted { reason } => {
             notice(tree, compact_notice::started(*reason), ui::Tone::Neutral);
             set_compact_loading(tree, true);
@@ -1307,7 +1313,7 @@ fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
         rail.set_session(model.active.as_ref().map(|key| key.as_str().to_string()));
         rail.model = model.active_model.as_ref().map(|model| model.id.clone());
         rail.provider.clone_from(&model.active_provider);
-        rail.set_context(model.context);
+        rail.set_context(model.effective_context());
         rail.set_compact_enabled(model.active.is_some());
     }
 }
