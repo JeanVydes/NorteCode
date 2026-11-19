@@ -41,7 +41,17 @@ impl ChatLayout {
     /// Split the area into the rail rect and the stream rect.
     fn split(&self, area: Rect) -> (Option<Rect>, Rect) {
         match self.position {
-            RailPosition::Hide => (None, area),
+            // A zero-sized strip off the bottom keeps the rail's focusable
+            // button in the tree's render walk without drawing anything.
+            RailPosition::Hide => (
+                Some(Rect {
+                    x: area.x,
+                    y: area.y + area.height,
+                    width: 0,
+                    height: 0,
+                }),
+                area,
+            ),
             RailPosition::Left => {
                 let width = SIDE.min(area.width);
                 (

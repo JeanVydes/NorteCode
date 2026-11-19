@@ -1,8 +1,7 @@
-//! The left rail: what the session is, and whether it is attached.
+//! The rail: session identity, connection state and context usage.
 //!
-//! Sections, top to bottom: SESSION (identity) and CONNECTION
-//! (the attachment state, in plain words). No placeholder content is
-//! shown; a section appears only when the client has the data for it.
+//! The context section owns a gauge and a compact button as children, so
+//! the tree routes focus and clicks to them like any other view.
 
 use std::any::Any;
 
@@ -11,9 +10,12 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::{Deserialize, Serialize};
 
+use terminalui::components::button::{Button, ButtonVariant};
 use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius, draw_box};
-use terminalui::{Context, InputEvent, Outcome, Theme, View};
+use terminalui::components::gauge::{Gauge, GaugeStyle};
+use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
+use crate::context::{ContextUsage, compaction_threshold, human_count};
 use crate::ui_model::SessionAttachmentState;
 
 const RAIL_WIDTH: u16 = 26;
@@ -59,8 +61,8 @@ impl RailPosition {
     }
 }
 
-/// The fixed rail.
-#[derive(Debug, Clone, Serialize)]
+/// The rail, with the context gauge and compact button as children.
+#[derive(Serialize)]
 pub(crate) struct Rail {
     /// Where the connection stands right now.
     pub(crate) attachment: SessionAttachmentState,
@@ -70,22 +72,130 @@ pub(crate) struct Rail {
     pub(crate) provider: Option<String>,
     /// The model id, when the host reported one.
     pub(crate) model: Option<String>,
+    /// The context the session last reported.
+    context: ContextUsage,
+    children: Vec<Node>,
 }
 
 impl Rail {
     /// Creates a rail for a never-attached session.
     pub(crate) fn detached() -> Self {
+        let gauge = Gauge::new(0.0).with_style(GaugeStyle {
+            warn_above: Some(compaction_threshold()),
+            ..GaugeStyle::default()
+        });
         Self {
             attachment: SessionAttachmentState::Disconnected,
             session: None,
             provider: None,
             model: None,
+            context: ContextUsage::default(),
+            children: vec![
+                node("context_gauge", gauge),
+                node("compact", Button::new(ButtonVariant::Ghost, "compact")),
+            ],
         }
     }
 
     /// Replace the session shown; `None` clears the id line.
     pub(crate) fn set_session(&mut self, session: Option<String>) {
         self.session = session;
+    }
+
+    /// Replace the context the gauge reports.
+    pub(crate) fn set_context(&mut self, context: ContextUsage) {
+        self.context = context;
+    }
+
+    /// Enable or disable the compact button from the host's state.
+    pub(crate) fn set_compact_enabled(&mut self, enabled: bool) {
+        if let Some(button) = self
+            .children
+            .get_mut(1)
+            .and_then(|node| node.view.as_any().downcast_mut::<Button>())
+        {
+            button.set_disabled(!enabled);
+        }
+    }
+
+    fn paint_context(
+        &mut self,
+        inner: Rect,
+        y: u16,
+        buf: &mut Buffer,
+        cx: &mut Context,
+        theme: &Theme,
+    ) {
+        let usage = self.context;
+        let start = y + 1;
+        let bottom = inner.y + inner.height;
+        let room = start + 2 < bottom;
+        if !room {
+            // No space to draw, but the tree still dispatches focus to the
+            // button; advance the slot here too so both walks agree.
+            let focusable = self
+                .children
+                .get(1)
+                .and_then(|node| node.view.as_any_ref().downcast_ref::<Button>())
+                .is_some_and(|button| !button.state.disabled && !button.state.loading);
+            if focusable {
+                let _ = cx.is_focused();
+            }
+            return;
+        }
+        let dim = Style::default().fg(theme.muted).bg(theme.background);
+
+        buf.set_stringn(
+            inner.x + 1,
+            start,
+            "CONTEXT",
+            8,
+            dim.add_modifier(Modifier::BOLD),
+        );
+        let detail = match usage.window.filter(|window| *window > 0) {
+            Some(window) => format!(
+                "{}/{} · compact {}",
+                human_count(usage.used),
+                human_count(window),
+                human_count(usage.compaction_limit())
+            ),
+            None => "no context reported".to_owned(),
+        };
+        let color = if usage.over_limit() {
+            theme.warning
+        } else {
+            theme.foreground
+        };
+        buf.set_stringn(
+            inner.x + 1,
+            start + 2,
+            &detail,
+            detail.chars().count(),
+            Style::default().fg(color).bg(theme.background),
+        );
+
+        let bar_y = start + 1;
+        let gauge_rect = Rect {
+            x: inner.x + 1,
+            y: bar_y,
+            width: 12,
+            height: 1,
+        };
+        let button_rect = Rect {
+            x: gauge_rect.x + 13,
+            y: bar_y,
+            width: 9,
+            height: 1,
+        };
+        if let Some(node) = self.children.first_mut() {
+            if let Some(gauge) = node.view.as_any().downcast_mut::<Gauge>() {
+                gauge.value = usage.fraction();
+            }
+            node.view.render(gauge_rect, buf, cx, theme);
+        }
+        if let Some(node) = self.children.get_mut(1) {
+            node.view.render(button_rect, buf, cx, theme);
+        }
     }
 }
 
@@ -103,10 +213,18 @@ impl View for Rail {
     }
 
     fn measure(&self) -> Option<(u16, u16)> {
-        Some((RAIL_WIDTH, 1))
+        Some((RAIL_WIDTH, 12))
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _cx: &mut Context, theme: &Theme) {
+    fn children(&self) -> &[Node] {
+        &self.children
+    }
+
+    fn children_mut(&mut self) -> &mut [Node] {
+        &mut self.children
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
         let chrome = Chrome {
             border: Some(Border {
                 set: BorderSet::Rounded,
@@ -123,21 +241,21 @@ impl View for Rail {
             fill_gradient: None,
         };
         let inner = draw_box(buf, area, &chrome, theme);
-        if inner.width < 10 {
-            return;
-        }
         let mut y = inner.y + 1;
 
-        y = paint_session(buf, inner, y, self.session.as_deref(), theme);
-        y = paint_model(
-            buf,
-            inner,
-            y,
-            self.model.as_deref(),
-            self.provider.as_deref(),
-            theme,
-        );
-        paint_connection(buf, inner, y, &self.attachment, theme);
+        if inner.width >= 10 {
+            y = paint_session(buf, inner, y, self.session.as_deref(), theme);
+            y = paint_model(
+                buf,
+                inner,
+                y,
+                self.model.as_deref(),
+                self.provider.as_deref(),
+                theme,
+            );
+            y = paint_connection(buf, inner, y, &self.attachment, theme);
+        }
+        self.paint_context(inner, y, buf, cx, theme);
     }
 
     fn handle_event(&mut self, _event: &InputEvent, _cx: &mut Context) -> Outcome {
@@ -234,7 +352,7 @@ fn paint_connection(
     y: u16,
     attachment: &SessionAttachmentState,
     theme: &Theme,
-) {
+) -> u16 {
     let dim = Style::default().fg(theme.muted).bg(theme.background);
     buf.set_stringn(
         inner.x + 1,
@@ -282,6 +400,8 @@ fn paint_connection(
                 .take(usize::from(inner.width.saturating_sub(3)))
                 .collect();
             buf.set_stringn(inner.x + 1, y + 1, &detail, detail.len(), dim);
+            return y + 3;
         }
     }
+    y + 2
 }

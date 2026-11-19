@@ -21,7 +21,8 @@ fn split(position: RailPosition) -> (Option<Rect>, Rect) {
 #[test]
 fn hidden_rail_gives_the_stream_everything() {
     let (rail, stream) = split(RailPosition::Hide);
-    assert!(rail.is_none());
+    let rail = rail.expect("rail still renders off-screen for focus");
+    assert_eq!((rail.width, rail.height), (0, 0));
     assert_eq!(stream, area());
 }
 

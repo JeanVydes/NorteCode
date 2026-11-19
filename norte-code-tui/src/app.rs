@@ -9,9 +9,12 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::style::Style;
+use terminalui::components::button::Button;
 
 use crate::client::{ClientEvent, UiCommand, start};
+use crate::compact_notice;
 use crate::config::ClientConfig;
+use crate::context::ContextUsage;
 use crate::diff::{Diff, EditArgs};
 use crate::shell::ShellArgs;
 use crate::terminal::TerminalSession;
@@ -122,6 +125,7 @@ fn poll_event(
         Event::Mouse(mouse) => {
             let input = terminalui::InputEvent::from(Event::Mouse(mouse));
             let _ = tree.handle_event(&input);
+            drain_compact(tree, commands, model);
             sync_selectors(tree, commands, model);
             drain_tab_request(tree, model);
             drain_models_actions(tree, commands, model);
@@ -243,6 +247,7 @@ fn handle_key(
         let input = terminalui::InputEvent::from(Event::Key(key));
         let _ = tree.handle_event(&input);
     }
+    drain_compact(tree, commands, model);
     drain_question_answer(tree, commands, model);
     drain_models_actions(tree, commands, model);
     drain_sessions_actions(tree, commands, model);
@@ -862,6 +867,43 @@ fn fold_job_event(kind: &norte_code_wire::ServerEventKind, tree: &mut terminalui
     }
 }
 
+fn set_compact_loading(tree: &mut terminalui::Tree, loading: bool) {
+    if let Some(button) = tree.find_mut::<Button>("compact") {
+        button.set_loading(loading);
+    }
+}
+
+fn fold_compaction_event(kind: &ServerEventKind, tree: &mut terminalui::Tree, model: &mut UiModel) {
+    match kind {
+        ServerEventKind::SessionStats {
+            context_used,
+            context_window,
+            ..
+        } => {
+            model.context = ContextUsage {
+                used: *context_used,
+                window: *context_window,
+            };
+        }
+        ServerEventKind::CompactionStarted { reason } => {
+            notice(tree, compact_notice::started(*reason), ui::Tone::Neutral);
+            set_compact_loading(tree, true);
+        }
+        ServerEventKind::CompactionFinished {
+            compacted,
+            summary,
+            error,
+            ..
+        } => {
+            let (text, tone) =
+                compact_notice::finished(*compacted, summary.as_deref(), error.as_deref());
+            notice(tree, text, tone);
+            set_compact_loading(tree, false);
+        }
+        _ => {}
+    }
+}
+
 fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model: &mut UiModel) {
     if fold_error_event(&event.kind, tree, model) {
         return;
@@ -952,7 +994,10 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
                 stream.complete_running_tools();
             }
         }
-        _ => fold_job_event(&event.kind, tree),
+        _ => {
+            fold_job_event(&event.kind, tree);
+            fold_compaction_event(&event.kind, tree, model);
+        }
     }
 }
 
@@ -1159,6 +1204,25 @@ fn notice(tree: &mut terminalui::Tree, text: String, tone: ui::Tone) -> bool {
     true
 }
 
+fn drain_compact(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &UiModel,
+) {
+    let Some(button) = tree.find_mut::<Button>("compact") else {
+        return;
+    };
+    if button.take_pressed()
+        && let Some(session) = model.active.as_ref()
+        && let Some(commands) = commands.as_ref()
+    {
+        let _ = commands.try_send(UiCommand::Compact {
+            session: session.clone(),
+        });
+        button.set_loading(true);
+    }
+}
+
 fn fold_tool_started(
     tool: &str,
     call_id: &str,
@@ -1243,5 +1307,7 @@ fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
         rail.set_session(model.active.as_ref().map(|key| key.as_str().to_string()));
         rail.model = model.active_model.as_ref().map(|model| model.id.clone());
         rail.provider.clone_from(&model.active_provider);
+        rail.set_context(model.context);
+        rail.set_compact_enabled(model.active.is_some());
     }
 }
