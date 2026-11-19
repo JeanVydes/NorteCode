@@ -100,6 +100,20 @@ fn reasoning_in_a_new_turn_gets_its_own_block() {
 }
 
 #[test]
+fn selection_omits_the_user_bar() {
+    let mut transcript = Transcript::new();
+    transcript.painted = vec!["▌ hello".to_string(), "world".to_string()];
+    transcript.painted_user = vec![true, false];
+    let text = transcript
+        .selection_text(super::Selection {
+            anchor: super::Pos { row: 0, col: 0 },
+            cur: super::Pos { row: 1, col: 4 },
+        })
+        .expect("text");
+    assert_eq!(text, "hello\nworld");
+}
+
+#[test]
 fn wrapping_counts_cells_not_bytes() {
     let lines = super::wrap("área énfasis Ópera", 12);
     assert!(lines.iter().all(|line| super::display_width(line) <= 12));
@@ -138,7 +152,7 @@ fn history_item(id: &str, kind: &str, content: &str) -> norte_code_wire::History
 fn replayed_shell_calls_keep_the_command_and_its_result() {
     let mut transcript = Transcript::new();
     transcript.replace_history(vec![
-        history_item("1", "tool_call", "shell\n{\n  \"script\": \"echo hi\"\n}"),
+        history_item("1", "tool_call", "shell {\n  \"script\": \"echo hi\"\n}"),
         history_item("2", "tool_result", "hi"),
     ]);
     let Some(Item::Tool {
@@ -162,7 +176,7 @@ fn replayed_edit_calls_keep_their_diff() {
     transcript.replace_history(vec![norte_code_wire::HistoryItem {
         id: "call-1".to_string(),
         kind: "tool_call".to_string(),
-        content: "edit\n{\n  \"path\": \"x.rs\",\n  \"edits\": [{ \"search\": \"old\", \"replace\": \"new\" }]\n}"
+        content: "edit {\n  \"path\": \"x.rs\",\n  \"edits\": [{ \"search\": \"old\", \"replace\": \"new\" }]\n}"
             .to_string(),
         created_at: 0,
         turn_id: None,

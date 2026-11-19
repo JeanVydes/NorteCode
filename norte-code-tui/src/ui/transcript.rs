@@ -204,6 +204,9 @@ pub(crate) struct Transcript {
     /// Whether the row's source item may be copied or highlighted.
     #[serde(skip)]
     painted_copyable: Vec<bool>,
+    /// Whether a row carries the user message's leading bar.
+    #[serde(skip)]
+    painted_user: Vec<bool>,
     /// How edit diffs are drawn.
     #[serde(skip)]
     diff_mode: crate::diff::DiffMode,
@@ -250,6 +253,7 @@ impl Transcript {
             selection: None,
             painted: Vec::new(),
             painted_copyable: Vec::new(),
+            painted_user: Vec::new(),
             diff_mode: crate::diff::DiffMode::Unified,
             follow_tail: true,
         }
@@ -304,8 +308,11 @@ impl Transcript {
                 "system_event" | "tool" | "tool_call" => {
                     let call_id = item.id.clone();
                     let mut lines = item.content.lines();
-                    let summary = lines.next().unwrap_or("tool").trim().to_owned();
-                    let arguments = lines.collect::<Vec<_>>().join("\n");
+                    let first = lines.next().unwrap_or("tool").trim();
+                    let has_brace = first.ends_with('{');
+                    let summary = first.strip_suffix('{').unwrap_or(first).trim().to_owned();
+                    let rest = lines.collect::<Vec<_>>().join("\n");
+                    let arguments = if has_brace { format!("{{{rest}") } else { rest };
                     let edit = serde_json::from_str::<serde_json::Value>(&arguments)
                         .ok()
                         .and_then(|value| {
@@ -639,6 +646,7 @@ impl Transcript {
         };
         for offset in 0..=(end.row - start.row) {
             let row = start.row + offset;
+            let row_index = usize::from(row);
             if !self
                 .painted_copyable
                 .get(usize::from(row))
@@ -647,7 +655,7 @@ impl Transcript {
             {
                 continue;
             }
-            let Some(line) = self.painted.get(usize::from(row)) else {
+            let Some(line) = self.painted.get(row_index) else {
                 continue;
             };
             let text_end = line.trim_end_matches(' ').chars().count();
@@ -658,6 +666,11 @@ impl Transcript {
                 usize::from(start.col)
             } else {
                 0
+            };
+            let from = if self.painted_user.get(row_index).copied().unwrap_or(false) {
+                from.max(2)
+            } else {
+                from
             };
             let to = if row == end.row {
                 usize::from(end.col).saturating_add(1).min(text_end)
@@ -725,8 +738,14 @@ impl Transcript {
                     )
                 )
             });
+            let user = row_items
+                .get(row)
+                .copied()
+                .flatten()
+                .is_some_and(|index| matches!(self.items.get(index), Some(Item::User { .. })));
             self.painted.push(line);
             self.painted_copyable.push(copyable);
+            self.painted_user.push(user);
         }
     }
 
@@ -747,6 +766,7 @@ impl Transcript {
         let (start, end) = Self::ordered_selection(selection)?;
         let mut out = String::new();
         for row in start.row..=end.row {
+            let row_index = usize::from(row);
             if !self
                 .painted_copyable
                 .get(usize::from(row))
@@ -755,7 +775,7 @@ impl Transcript {
             {
                 continue;
             }
-            let Some(line) = self.painted.get(usize::from(row)) else {
+            let Some(line) = self.painted.get(row_index) else {
                 continue;
             };
             let chars: Vec<char> = line.chars().collect();
@@ -763,6 +783,11 @@ impl Transcript {
                 usize::from(start.col)
             } else {
                 0
+            };
+            let from = if self.painted_user.get(row_index).copied().unwrap_or(false) {
+                from.max(2)
+            } else {
+                from
             };
             let to = if row == end.row {
                 usize::from(end.col).saturating_add(1).min(chars.len())
