@@ -370,9 +370,26 @@ impl Transcript {
         });
     }
 
-    /// Append reasoning text; merges into the trailing reasoning block.
+    /// Append reasoning text to the block for this turn.
+    ///
+    /// Assistant text and tools arrive between reasoning deltas, so the
+    /// block is not necessarily the last item; it is the last one before
+    /// the next user message.
     pub(crate) fn push_reasoning_text(&mut self, text: &str) {
-        if let Some(Item::Reasoning { text: existing, .. }) = self.items.last_mut() {
+        let mut target = None;
+        for index in (0..self.items.len()).rev() {
+            match &self.items[index] {
+                Item::User { .. } => break,
+                Item::Reasoning { .. } => {
+                    target = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if let Some(index) = target
+            && let Item::Reasoning { text: existing, .. } = &mut self.items[index]
+        {
             existing.push_str(text);
             self.dirty = true;
             return;
