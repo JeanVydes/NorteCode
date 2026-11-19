@@ -276,6 +276,7 @@ impl Transcript {
     pub(crate) fn replace_history(&mut self, items: Vec<norte_code_wire::HistoryItem>) {
         self.items.clear();
         self.thinking = None;
+        let mut last_shell: Option<usize> = None;
         for item in items {
             match item.kind.as_str() {
                 "user" => self.items.push(Item::User { text: item.content }),
@@ -288,7 +289,19 @@ impl Transcript {
                     text: item.content,
                     tone: Tone::Warn,
                 }),
-                "system_event" | "tool" | "tool_call" | "tool_result" => {
+                "tool_result" => {
+                    if let Some(index) = last_shell
+                        && let Some(Item::Tool {
+                            console: Some(console),
+                            ..
+                        }) = self.items.get_mut(index)
+                    {
+                        for line in item.content.lines() {
+                            console.push_line(line.to_owned());
+                        }
+                    }
+                }
+                "system_event" | "tool" | "tool_call" => {
                     let call_id = item.id.clone();
                     let mut lines = item.content.lines();
                     let summary = lines.next().unwrap_or("tool").trim().to_owned();
@@ -298,10 +311,28 @@ impl Transcript {
                         .and_then(|value| {
                             serde_json::from_value::<crate::diff::EditArgs>(value).ok()
                         });
-                    let target = edit.as_ref().and_then(|edit| edit.path.clone());
+                    let shell = serde_json::from_str::<serde_json::Value>(&arguments)
+                        .ok()
+                        .and_then(|value| {
+                            serde_json::from_value::<crate::shell::ShellArgs>(value).ok()
+                        });
+                    let command = shell.as_ref().and_then(crate::shell::ShellArgs::command);
+                    let is_shell = matches!(summary.as_str(), "shell" | "bash");
+                    let target = edit
+                        .as_ref()
+                        .and_then(|edit| edit.path.clone())
+                        .or_else(|| command.map(str::to_owned));
                     let diff = edit
                         .as_ref()
                         .and_then(|edit| crate::diff::Diff::from_call(None, edit));
+                    let console = if is_shell {
+                        command.map(|command| Box::new(Console::new(command).with_max_visible(6)))
+                    } else {
+                        None
+                    };
+                    if console.is_some() {
+                        last_shell = Some(self.items.len());
+                    }
                     self.items.push(Item::Tool {
                         call_id,
                         name: if summary.len() > 40 {
@@ -314,7 +345,7 @@ impl Transcript {
                         state: ToolState::Done,
                         meta: None,
                         diff,
-                        console: None,
+                        console,
                     });
                 }
                 _ => {}

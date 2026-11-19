@@ -122,6 +122,40 @@ fn wrapping_splits_a_word_longer_than_the_line() {
     assert_eq!(lines.concat(), "abcdefghijklmnop");
 }
 
+fn history_item(id: &str, kind: &str, content: &str) -> norte_code_wire::HistoryItem {
+    norte_code_wire::HistoryItem {
+        id: id.to_string(),
+        kind: kind.to_string(),
+        content: content.to_string(),
+        created_at: 0,
+        turn_id: None,
+        role: norte_code_wire::HistorySpeaker::Tool,
+        provenance: None,
+    }
+}
+
+#[test]
+fn replayed_shell_calls_keep_the_command_and_its_result() {
+    let mut transcript = Transcript::new();
+    transcript.replace_history(vec![
+        history_item("1", "tool_call", "shell\n{\n  \"script\": \"echo hi\"\n}"),
+        history_item("2", "tool_result", "hi"),
+    ]);
+    let Some(Item::Tool {
+        name,
+        target,
+        console,
+        ..
+    }) = transcript.items.first()
+    else {
+        panic!("tool row");
+    };
+    assert_eq!(name, "shell");
+    assert_eq!(target.as_deref(), Some("echo hi"));
+    let console = console.as_ref().expect("console");
+    assert_eq!(console.lines(), &["hi".to_string()]);
+}
+
 #[test]
 fn replayed_edit_calls_keep_their_diff() {
     let mut transcript = Transcript::new();
