@@ -807,7 +807,10 @@ fn fold_error_event(
     model: &mut UiModel,
 ) -> bool {
     match kind {
-        ServerEventKind::Error { message, .. } if message.starts_with("RAEP sequence gap") => {
+        ServerEventKind::Error { message, .. }
+            if message.starts_with("RAEP sequence gap")
+                || message.contains("fell behind and dropped") =>
+        {
             // The reader resyncs on the next frame; not a turn failure.
             notice(
                 tree,
