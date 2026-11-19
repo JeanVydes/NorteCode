@@ -29,6 +29,7 @@ const POLL_MS: u64 = 16;
 /// Returns the error the loop reported.
 pub(super) fn run() -> io::Result<()> {
     let mut session = TerminalSession::enter()?;
+    crate::terminal::watch_exit_signals();
 
     let mut model = UiModel::detached();
     let mut config: Option<ClientConfig> = None;
@@ -53,6 +54,9 @@ pub(super) fn run() -> io::Result<()> {
     let mut views_dirty = true;
 
     loop {
+        if crate::terminal::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         if drain_server_events(&mut events, &mut tree, &mut model) {
             views_dirty = true;
         }
@@ -349,9 +353,30 @@ fn handle_enter(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) {
-    if model.tab == Tab::Models {
-        handle_models_enter(tree, commands, model);
+    match model.tab {
+        Tab::Models => handle_models_enter(tree, commands, model),
+        Tab::Sessions => handle_sessions_enter(tree, commands, model),
+        _ => {}
     }
+}
+
+fn handle_sessions_enter(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) {
+    let index = tree
+        .find::<Inspector>("sessions")
+        .and_then(Inspector::selected);
+    let Some(summary) = index.and_then(|index| model.sessions.get(index)).cloned() else {
+        return;
+    };
+    let Some(commands) = commands.as_ref() else {
+        return;
+    };
+    let _ = commands.try_send(UiCommand::OpenSession { session: Box::new(summary) });
+    model.tab = Tab::Chat;
+    ui::sync_views(tree, model);
 }
 
 fn handle_models_enter(
@@ -531,7 +556,16 @@ fn drain_server_events(
                 }
                 changed = true;
             }
-            Ok(ClientEvent::Server(event)) => fold(&event, tree, model),
+            Ok(ClientEvent::History(items)) => {
+                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                    stream.replace_history(items);
+                }
+                changed = true;
+            }
+            Ok(ClientEvent::Server(event)) => {
+                fold(&event, tree, model);
+                changed = true;
+            }
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return changed,
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 *events = None;
