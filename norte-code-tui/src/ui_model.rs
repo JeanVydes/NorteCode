@@ -5,6 +5,7 @@
 
 use crate::diff::DiffMode;
 use crate::theme::{ThemeCatalog, ThemeChoice, ThemeKind};
+use crate::ui::RailPosition;
 use norte_code_wire::SessionSummary;
 
 /// Where the active turn is.
@@ -136,6 +137,8 @@ pub(crate) struct Preferences {
     pub(crate) send_mode: SendMode,
     /// How edit diffs are drawn.
     pub(crate) diff_mode: DiffMode,
+    /// Where the session rail sits relative to the stream.
+    pub(crate) rail_position: RailPosition,
 }
 
 /// The turn the host is running, when known.
@@ -334,6 +337,7 @@ impl UiModel {
                 reasoning: ReasoningLevel::Auto,
                 send_mode: SendMode::Steer,
                 diff_mode: DiffMode::Unified,
+                rail_position: RailPosition::Left,
             },
             attachment: SessionAttachmentState::Disconnected,
             turn: TurnState::Idle,

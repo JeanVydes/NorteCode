@@ -10,6 +10,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::theme::CustomThemeConfig;
+use crate::ui::RailPosition;
 
 const CONFIG_FILE: &str = "cli.json";
 
@@ -57,6 +58,9 @@ pub(crate) struct UiConfig {
     /// Extra themes, in cycle order.
     #[serde(default)]
     pub(crate) themes: Vec<CustomThemeConfig>,
+    /// Where the session rail sits; `left` when absent.
+    #[serde(default)]
+    pub(crate) rail_position: Option<RailPosition>,
 }
 
 /// The client configuration.

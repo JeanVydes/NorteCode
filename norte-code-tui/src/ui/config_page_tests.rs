@@ -32,3 +32,16 @@ fn navigation_moves_to_the_diff_row() {
         [ConfigAction::Cycle(Setting::DiffMode)]
     ));
 }
+
+#[test]
+fn navigation_reaches_the_rail_row() {
+    let mut page = ConfigPage::new();
+    for _ in 0..4 {
+        page.handle_key(&key(crossterm::event::KeyCode::Down));
+    }
+    page.handle_key(&key(crossterm::event::KeyCode::Enter));
+    assert!(matches!(
+        &page.take_pending()[..],
+        [ConfigAction::Cycle(Setting::RailPosition)]
+    ));
+}
