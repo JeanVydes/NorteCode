@@ -1,29 +1,21 @@
-//! The terminal user interface of Norte Code.
+//! The Norte Code terminal interface, built on terminalui.
 //!
-//! This library is the front-end the `norte` binary delegates to; it owns the
-//! screen and the conversation loop. What it does not own is the host: it
-//! talks to one through the client, and expects that host to be running —
-//! opening one implies keeping one.
-
-#![forbid(unsafe_code)]
+//! `norte-code-tui` is the client the `norte` binary delegates to. It talks
+//! to the raep server and owns the screen: a retained-mode tree of typed
+//! views, central focus management, and a strict raep state machine that
+//! never pretends to be attached when it is not.
 
 mod app;
-mod chips;
 mod client;
-mod components;
 mod config;
-mod keys;
-mod provider_keys;
-mod signals;
 mod terminal;
-mod text_builder;
-mod tools;
+mod theme;
+mod ui;
 mod ui_model;
 
-/// Turns the TUI off gracefully, or reports why it could not start.
+/// Turns the TUI on and serves until it exits, or reports why it cannot.
 ///
 /// # Errors
-///
 /// Returns the error the loop reported to the caller.
 pub fn run_tui() -> Result<(), String> {
     app::run().map_err(|error| error.to_string())

@@ -1,884 +1,677 @@
-use std::{future::Future, io, sync::Arc};
+//! The client layer: how the interface talks to the raep server.
+//!
+//! One task owns the connection; attaching, streaming and sending all
+//! happen there. Commands come in on one channel, events go out on
+//! another. The behavior is deliberately stricter than a best-effort loop:
+//! a failed attach reports its reason and stops, waiting for an explicit
+//! retry; a stream that keeps dying gives up after a few attempts instead
+//! of retrying forever.
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
-use norte_code_client::{
-    AgentClient, ApiError, ClientError, EventStream, RemoteClient, RestClient, SessionSummary,
-};
-use norte_code_wire::{ChildSessionSummary, ModelInfo, PlanSummary, ServerEvent, SessionKey};
-use thiserror::Error;
+use norte_code_client::{AgentClient, EventStream, RemoteClient, RestClient};
+use norte_code_wire::UserInputPart;
+use norte_code_wire::{SessionKey, SessionSummary};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-mod catalog;
-mod host;
-mod imports;
-mod jobs;
-mod plugins;
-mod reports;
-mod turns;
-mod uploads;
-
 use crate::config::ClientConfig;
-use crate::ui_model::SendMode;
 
-/// How long to wait before opening the stream again.
-fn reconnect_delay(attempt: u32) -> u64 {
-    const MAX: u64 = 15_000;
-    const BASE: u64 = 500;
-    BASE.saturating_mul(1_u64 << attempt.min(5)).min(MAX)
+/// Events the connection reports to the interface.
+#[derive(Clone, Debug)]
+pub(crate) enum ClientEvent {
+    /// The attach completed and the stream is open.
+    Attached {
+        /// The session the interface is now attached to.
+        session: norte_code_wire::SessionSummary,
+    },
+    /// The connection is down; contains the reason.
+    Detached {
+        /// What went wrong, in words a person can act on.
+        reason: String,
+    },
+    /// A server event arrived.
+    Server(Box<norte_code_wire::ServerEvent>),
+    /// The session list changed.
+    Sessions(Vec<SessionSummary>),
+    /// The catalogue of models, grouped by provider.
+    Models(Vec<norte_code_wire::ModelInfo>),
+    /// The plan list of the attached session.
+    Plans(Vec<norte_code_wire::PlanSummary>),
+    /// The job list of the attached session.
+    Jobs(Vec<norte_code_wire::JobSummary>),
+    /// Telemetry for the whole fleet.
+    Telemetry(norte_code_wire::TelemetryReport),
+    /// Telemetry for the attached session.
+    TelemetrySession(norte_code_wire::TelemetryReport),
+    /// The cost of the attached session.
+    CostSession(norte_code_client::CostReport),
+    /// The fleet-wide cost total.
+    CostGlobal(norte_code_client::CostReport),
+    /// The list of installed plugins.
+    Plugins(Vec<norte_code_client::PluginSummary>),
+    /// The catalogue detail (providers, models) for the HOST view.
+    Catalog(norte_code_client::CatalogDetail),
+    /// The server-reported agents.
+    Agents(Vec<norte_code_wire::AgentSummary>),
+    /// A command failed; carry the reason for the transcript.
+    SendFailed {
+        /// What went wrong, in words a person can act on.
+        reason: String,
+    },
+    /// The full history of the attached session, newest first.
+    History(Vec<norte_code_wire::HistoryItem>),
+    /// Something the host did, worth telling the reader.
+    Notice {
+        /// The words.
+        text: String,
+    },
+    /// The session's history could not be fetched; carry the reason.
+    HistoryFailed {
+        /// The transport or server error.
+        reason: String,
+    },
 }
 
-/// Reads one stream lifetime.
-///
-/// Returns the attempt counter to use for the next reconnect. A stream that
-/// opened once resets the counter; one that never opened keeps the count so
-/// the wait stays sane.
-#[allow(clippy::too_many_arguments)]
-async fn pump_stream(
-    client: &RemoteClient,
-    api: &RestClient,
-    sender: &tokio::sync::mpsc::Sender<ClientEvent>,
-    session: &SessionKey,
-    generation: u64,
-    mut attempt: u32,
-) -> u32 {
-    match client.open_events(session.as_str()).await {
-        Ok(mut stream) => {
-            attempt = 0;
-            if sender
-                .send(ClientEvent::Attached {
-                    session: session.clone(),
-                    generation,
-                })
-                .await
-                .is_err()
-            {
-                return attempt;
+/// Commands the interface sends to the connection task.
+#[derive(Clone, Debug)]
+pub(crate) enum UiCommand {
+    /// Send a user message on the session's stream.
+    Send {
+        /// The session to send on.
+        session: SessionKey,
+        /// The text of the message.
+        text: String,
+        /// `steer` or `queue`; forwarded to the host.
+        queue_mode: String,
+    },
+    /// Refetch the session list.
+    Refresh,
+    /// Set the session's model.
+    SetModel {
+        /// The session to change.
+        session: SessionKey,
+        /// The provider the model lives in.
+        provider: String,
+        /// The model id.
+        model: String,
+    },
+    /// Set the session's reasoning effort.
+    SetReasoning {
+        /// The session to change.
+        session: SessionKey,
+        /// The effort, `auto` / `low` / `medium` / `high`.
+        effort: String,
+    },
+    /// Refetch the catalogue views for the current session.
+    RefreshViews,
+    /// Answer the question the turn is parked on.
+    AnswerQuestion {
+        /// The session the question belongs to.
+        session: SessionKey,
+        /// The host's id for the question.
+        question: String,
+        /// The answer text.
+        answer: String,
+    },
+    /// Attach to an existing session, leaving the current stream behind.
+    OpenSession {
+        /// The session to attach to.
+        session: Box<norte_code_wire::SessionSummary>,
+    },
+    /// Run a plugin operation on the host; completion re-lists the plugins.
+    Plugin(PluginOp),
+    /// Rename a session in the host's list.
+    RenameSession {
+        /// The session to rename.
+        session: norte_code_wire::SessionKey,
+        /// The new title.
+        title: String,
+    },
+    /// Delete a session in the host's list.
+    DeleteSession {
+        /// The session to delete.
+        session: norte_code_wire::SessionKey,
+    },
+}
+
+/// A plugin operation the host can do for us.
+#[derive(Clone, Debug)]
+pub(crate) enum PluginOp {
+    /// Install a plugin from a git repository, optionally one package of it.
+    Install {
+        /// The repository URL.
+        url: String,
+        /// One workspace package to install instead of the whole workspace.
+        package: Option<String>,
+    },
+    /// Update one plugin, or every plugin with a recorded source.
+    Update {
+        /// The plugin to update; `None` updates all.
+        name: Option<String>,
+    },
+    /// Remove one plugin.
+    Remove {
+        /// The plugin to remove.
+        name: String,
+    },
+    /// Enable or disable one plugin.
+    SetEnabled {
+        /// The plugin to toggle.
+        name: String,
+        /// What it should be after the change.
+        enabled: bool,
+    },
+}
+
+const RETRY_BASE_MS: u64 = 400;
+
+enum BackgroundOp {
+    /// A plugin operation.
+    Plugin(PluginOp),
+    /// A session rename.
+    Rename {
+        /// The session to rename.
+        session: norte_code_wire::SessionKey,
+        /// The new title.
+        title: String,
+    },
+    /// A session delete.
+    Delete {
+        /// The session to delete.
+        session: norte_code_wire::SessionKey,
+    },
+}
+
+/// Spawn a host operation without blocking the command loop.
+fn spawn_host_op(kind: BackgroundOp, api: Arc<RestClient>, events: Sender<ClientEvent>) {
+    tokio::spawn(async move {
+        match kind {
+            BackgroundOp::Plugin(op) => run_plugin_op(&api, op, &events).await,
+            BackgroundOp::Rename { session, title } => {
+                rename_session(&api, &session, &title, &events).await;
             }
-            let result = api.history(session.as_str()).await.map(ClientData::History);
-            let _ = sender
-                .send(ClientEvent::Data {
-                    session: Some(session.clone()),
-                    generation,
-                    result: Box::new(result.map_err(Into::into)),
+            BackgroundOp::Delete { session } => delete_session(&api, &session, &events).await,
+        }
+    });
+}
+
+/// Rename a session; on any outcome re-list the sessions.
+async fn rename_session(
+    api: &Arc<RestClient>,
+    session: &norte_code_wire::SessionKey,
+    title: &str,
+    events: &Sender<ClientEvent>,
+) {
+    match api.rename_session(session.as_str(), title).await {
+        Ok(()) => {
+            let _ = events
+                .send(ClientEvent::Notice {
+                    text: format!("session renamed · {title}"),
                 })
                 .await;
-            while let Some(event) = stream.next().await {
-                if sender
-                    .send(ClientEvent::Server {
-                        session: session.clone(),
-                        generation,
-                        event: Box::new(event),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return attempt;
-                }
-            }
-            attempt = attempt.saturating_add(1);
         }
         Err(error) => {
-            let _ = sender
-                .send(ClientEvent::AttachmentFailure {
-                    session: session.clone(),
-                    generation,
-                    message: error.to_string(),
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: format!("rename session failed · {error}"),
                 })
                 .await;
-            attempt = attempt.saturating_add(1);
         }
     }
-    attempt
-}
-
-/// The queue policy the host spells for a send mode.
-fn queue_policy(mode: SendMode) -> &'static str {
-    match mode {
-        SendMode::Steer => "steer",
-        SendMode::Queue => "queue",
-        SendMode::Interrupt => "interrupt",
-        SendMode::Reject => "reject",
+    if let Ok(sessions) = api.sessions().await {
+        let _ = events.send(ClientEvent::Sessions(sessions)).await;
     }
 }
 
-#[derive(Debug, Error)]
-pub(crate) enum ClientRuntimeError {
-    #[error(transparent)]
-    Runtime(#[from] io::Error),
-    #[error(transparent)]
-    Client(#[from] ClientError),
-    #[error(transparent)]
-    Api(#[from] ApiError),
-}
-
-pub(crate) enum ClientEvent {
-    Attached {
-        session: SessionKey,
-        generation: u64,
-    },
-    Server {
-        session: SessionKey,
-        generation: u64,
-        event: Box<ServerEvent>,
-    },
-    Failure {
-        session: SessionKey,
-        generation: u64,
-        message: String,
-    },
-    AttachmentFailure {
-        session: SessionKey,
-        generation: u64,
-        message: String,
-    },
-    StreamClosed {
-        session: SessionKey,
-        generation: u64,
-        attempt: u32,
-    },
-    Imported {
-        session: SessionKey,
-        generation: u64,
-        session_id: String,
-    },
-    Rewound {
-        session: SessionKey,
-        generation: u64,
-        removed: Vec<String>,
-    },
-    Pinned {
-        session: SessionKey,
-        generation: u64,
-        pinned_turns: Vec<String>,
-    },
-    Jobs {
-        session: SessionKey,
-        generation: u64,
-        jobs: Vec<norte_code_wire::JobInfo>,
-    },
-    Uploaded {
-        session: SessionKey,
-        generation: u64,
-        chip: crate::chips::Chip,
-    },
-    JobStopped {
-        session: SessionKey,
-        generation: u64,
-        job: norte_code_wire::JobInfo,
-    },
-    Data {
-        session: Option<SessionKey>,
-        generation: u64,
-        result: Box<Result<ClientData, ClientOperationError>>,
-    },
-}
-
-#[derive(Debug, Error)]
-pub(crate) enum ClientOperationError {
-    #[error(transparent)]
-    Client(#[from] ClientError),
-    #[error(transparent)]
-    Api(#[from] ApiError),
-}
-
-pub(crate) enum ClientData {
-    Models(Vec<ModelInfo>),
-    Catalog(norte_code_client::CatalogDetail),
-    HostFailure {
-        probe: &'static str,
-        message: String,
-    },
-    ServerInfo(norte_code_client::ServerInfo),
-    Liveness(norte_code_client::Liveness),
-    Readiness(norte_code_client::Readiness),
-    Quota(norte_code_wire::QuotaReport),
-    Agents(Vec<norte_code_wire::AgentSummary>),
-    Skills(norte_code_client::SkillCatalog),
-    Mcp(norte_code_client::McpCatalog),
-    ToolRules(Vec<norte_code_client::ToolRule>),
-    PluginUpdate {
-        change: norte_code_client::PluginChange,
-        plugins: Vec<norte_code_client::PluginSummary>,
-    },
-    Telemetry(norte_code_wire::TelemetryReport),
-    Costs {
-        session: Option<SessionKey>,
-        report: norte_code_client::CostReport,
-    },
-    CompactedHistory(Vec<norte_code_wire::HistoryItem>),
-    ExportReady(String),
-    SessionCreated(Box<SessionSummary>),
-    SessionsUpdated(Vec<SessionSummary>),
-    History(Vec<norte_code_wire::HistoryItem>),
-    Plans(Vec<PlanSummary>),
-    Children(Vec<ChildSessionSummary>),
-    ChildHistory(Vec<norte_code_wire::HistoryItem>),
-    ModelSelected {
-        provider: String,
-        model: String,
-    },
-    QuestionAnswered,
-}
-
-pub(crate) struct ClientRuntime {
-    runtime: tokio::runtime::Runtime,
-    client: Arc<RemoteClient>,
-    api: Arc<RestClient>,
-    events: Receiver<ClientEvent>,
-    sender: Sender<ClientEvent>,
-    endpoint: String,
-    authentication_configured: bool,
-    agent_id: String,
-    /// The task that reads the open stream of the active session.
-    stream: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-impl ClientRuntime {
-    /// A runtime pointed at the configured endpoint without contacting it.
-    ///
-    /// Drawing a frame needs a client, not a host. The tests that render one
-    /// modal use this so a stopped server cannot fail them.
-    #[cfg(test)]
-    pub(crate) fn detached(config: &ClientConfig) -> Result<Self, ClientRuntimeError> {
-        let base_url = config.service.url.clone();
-        let token = config.service.token.as_deref();
-        let agent_id = config.agent_id.clone();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let client = Arc::new(
-            RemoteClient::new(base_url.clone(), token, None)?.with_agent_id(agent_id.clone()),
-        );
-        let api = Arc::new(RestClient::new(&base_url, token.unwrap_or_default())?);
-        let (sender, events) = mpsc::channel(8);
-        Ok(Self {
-            runtime,
-            client,
-            api,
-            events,
-            sender,
-            endpoint: base_url,
-            authentication_configured: token.is_some(),
-            agent_id,
-            stream: std::sync::Mutex::new(None),
-        })
-    }
-
-    pub(crate) fn connect(
-        config: &ClientConfig,
-    ) -> Result<(Self, Vec<SessionSummary>, SessionKey), ClientRuntimeError> {
-        let base_url = config.service.url.clone();
-        let token = config.service.token.as_deref();
-        let agent_id = config.agent_id.clone();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let client = Arc::new(
-            RemoteClient::new(base_url.clone(), token, None)?.with_agent_id(agent_id.clone()),
-        );
-        let api = Arc::new(RestClient::new(&base_url, token.unwrap_or_default())?);
-        let sessions = runtime.block_on(client.list_sessions())?;
-        // The reader starts with an empty session of their own, never with one
-        // that was left open before.
-        let fresh = runtime.block_on(client.create_session(None))?;
-        let (sender, events) = mpsc::channel(256);
-        Ok((
-            Self {
-                runtime,
-                client,
-                api,
-                events,
-                sender,
-                endpoint: base_url,
-                authentication_configured: token.is_some(),
-                agent_id,
-                stream: std::sync::Mutex::new(None),
-            },
-            sessions,
-            SessionKey::new(fresh.session_id),
-        ))
-    }
-
-    pub(crate) fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    pub(crate) const fn authentication_configured(&self) -> bool {
-        self.authentication_configured
-    }
-
-    /// Opens the session's event stream and keeps it open.
-    ///
-    /// The stream is the attachment: the host binds the session to it and
-    /// releases it when the stream closes. Keeping it open means the reader
-    /// sees every event of the session, whether a turn is running or not.
-    /// If the stream dies, the task takes it again with backoff until the
-    /// session is closed or another one is opened.
-    pub(crate) fn resume(&self, session: &SessionKey, generation: u64, agent_id: Option<String>) {
-        if let Some(agent_id) = agent_id {
-            self.client.set_session_agent(session.as_str(), agent_id);
-        }
-        self.close_stream();
-        let request_session = session.clone();
-        let client = Arc::clone(&self.client);
-        let api = Arc::clone(&self.api);
-        let sender = self.sender.clone();
-        let handle = self.runtime.spawn(async move {
-            let mut attempt = 0_u32;
-            loop {
-                let before = attempt;
-                attempt = pump_stream(
-                    &client,
-                    &api,
-                    &sender,
-                    &request_session,
-                    generation,
-                    attempt,
-                )
-                .await;
-                if sender
-                    .send(ClientEvent::StreamClosed {
-                        session: request_session.clone(),
-                        generation,
-                        attempt,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                let delay = reconnect_delay(before);
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-            }
-        });
-        self.remember_stream(handle);
-    }
-
-    /// Closes the stream of the session that was open.
-    ///
-    /// Dropping the stream releases the attachment on the host, so the next
-    /// session starts from a clean state.
-    fn close_stream(&self) {
-        let handle = self
-            .stream
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(handle) = handle {
-            handle.abort();
-        }
-    }
-
-    fn remember_stream(&self, handle: tokio::task::JoinHandle<()>) {
-        let mut stream = self
-            .stream
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(previous) = stream.replace(handle) {
-            previous.abort();
-        }
-    }
-
-    pub(crate) fn create_session(&self) {
-        let api = Arc::clone(&self.api);
-        let agent_id = self.agent_id.clone();
-        self.spawn_data(None, 0, async move {
-            api.create_session(&agent_id, None, None)
-                .await
-                .map(|session| ClientData::SessionCreated(Box::new(session)))
-        });
-    }
-
-    pub(crate) fn rename_session(&self, session: SessionKey, title: String, generation: u64) {
-        let client = Arc::clone(&self.client);
-        self.spawn_client_data(None, generation, async move {
-            client.rename_session(session.as_str(), &title).await?;
-            client
-                .list_sessions()
-                .await
-                .map(ClientData::SessionsUpdated)
-        });
-    }
-
-    pub(crate) fn delete_session(&self, session: SessionKey, generation: u64) {
-        let client = Arc::clone(&self.client);
-        self.spawn_client_data(None, generation, async move {
-            client.delete_session(session.as_str()).await?;
-            let sessions = client.list_sessions().await?;
-            if sessions.is_empty() {
-                return client
-                    .create_session(None)
-                    .await
-                    .map(|session| ClientData::SessionCreated(Box::new(session)));
-            }
-            Ok(ClientData::SessionsUpdated(sessions))
-        });
-    }
-
-    pub(crate) fn fork_session(&self, session: SessionKey, generation: u64) {
-        let client = Arc::clone(&self.client);
-        self.spawn_client_data(None, generation, async move {
-            client
-                .fork_session(session.as_str())
-                .await
-                .map(|session| ClientData::SessionCreated(Box::new(session)))
-        });
-    }
-
-    pub(crate) fn compact_session(&self, session: SessionKey, generation: u64) {
-        let client = Arc::clone(&self.client);
-        let api = Arc::clone(&self.api);
-        let sender = self.sender.clone();
-        self.runtime.spawn(async move {
-            let mut stream = match client.compact_session(session.as_str()).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    let _ = sender
-                        .send(ClientEvent::Data {
-                            session: Some(session),
-                            generation,
-                            result: Box::new(Err(error.into())),
-                        })
-                        .await;
-                    return;
-                }
-            };
-            while let Some(event) = stream.next().await {
-                if sender
-                    .send(ClientEvent::Server {
-                        session: session.clone(),
-                        generation,
-                        event: Box::new(event),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            let result = api
-                .history(session.as_str())
-                .await
-                .map(ClientData::CompactedHistory)
-                .map_err(Into::into);
-            let _ = sender
-                .send(ClientEvent::Data {
-                    session: Some(session),
-                    generation,
-                    result: Box::new(result),
+/// Delete a session; on any outcome re-list the sessions.
+async fn delete_session(
+    api: &Arc<RestClient>,
+    session: &norte_code_wire::SessionKey,
+    events: &Sender<ClientEvent>,
+) {
+    match api.delete_session(session.as_str()).await {
+        Ok(()) => {
+            let _ = events
+                .send(ClientEvent::Notice {
+                    text: "session deleted".to_string(),
                 })
                 .await;
-        });
-    }
-
-    pub(crate) fn export_session(&self, session: SessionKey, generation: u64) {
-        let api = Arc::clone(&self.api);
-        self.spawn_data(Some(session.clone()), generation, async move {
-            let export_id = api.export_session(session.as_str()).await?;
-            Ok(ClientData::ExportReady(api.export_url(&export_id)))
-        });
-    }
-
-    pub(crate) fn set_budget(
-        &self,
-        session: SessionKey,
-        limit: f64,
-        action: norte_code_wire::BudgetAction,
-        generation: u64,
-    ) {
-        let client = Arc::clone(&self.client);
-        self.spawn_stream(session.clone(), generation, async move {
-            client
-                .set_budget(
-                    session.as_str(),
-                    norte_code_wire::Budget {
-                        unit: norte_code_wire::BudgetUnit::Usd,
-                        limit,
-                        action,
-                    },
-                )
-                .await
-        });
-    }
-
-    pub(crate) fn approve_budget(&self, session: SessionKey, limit: f64, generation: u64) {
-        let client = Arc::clone(&self.client);
-        let sender = self.sender.clone();
-        self.runtime.spawn(async move {
-            let continuation =
-                Self::continue_after_budget_approval(&client, &sender, &session, limit, generation)
-                    .await;
-            let restoration = Self::set_budget_action(
-                &client,
-                &sender,
-                &session,
-                limit,
-                norte_code_wire::BudgetAction::Ask,
-                generation,
-            )
-            .await;
-            if let Err(error) = continuation {
-                Self::send_operation_error(&sender, session.clone(), generation, error).await;
-            }
-            if let Err(error) = restoration {
-                Self::send_operation_error(&sender, session, generation, error).await;
-            }
-        });
-    }
-
-    /// Sends a message to the session.
-    ///
-    /// The message goes to the command endpoint and the events of the turn
-    /// arrive on the session's open stream, so the reader sees them the same
-    /// way it sees every other event.
-    pub(crate) fn send_message(
-        &self,
-        session: SessionKey,
-        generation: u64,
-        text: String,
-        parts: Vec<norte_code_wire::UserInputPart>,
-        send_mode: SendMode,
-    ) {
-        let api = Arc::clone(&self.api);
-        let client = Arc::clone(&self.client);
-        let sender = self.sender.clone();
-        self.runtime.spawn(async move {
-            let policy = queue_policy(send_mode);
-            let session_id = session.as_str().to_owned();
-            let outcome: Result<(), ClientOperationError> = async {
-                for attempt in 0..2 {
-                    let result = if parts.is_empty() {
-                        api.send_prompt(
-                            session_id.as_str(),
-                            Some(text.as_str()),
-                            None,
-                            None,
-                            policy,
-                        )
-                        .await
-                    } else {
-                        let mut content = parts.clone();
-                        if !text.is_empty() {
-                            content.insert(0, norte_code_wire::UserInputPart::text(text.clone()));
-                        }
-                        api.send_prompt(session_id.as_str(), None, Some(content), None, policy)
-                            .await
-                    };
-                    match result {
-                        Ok(_) => return Ok(()),
-                        Err(error) if error.is_session_not_attached() && attempt == 0 => {
-                            client.recover_attachment(session_id.as_str()).await?;
-                        }
-                        Err(error) => return Err(ClientOperationError::from(error)),
-                    }
-                }
-                Err(ClientOperationError::Client(ClientError::new(
-                    "Failed to send message: session attachment could not be recovered.".to_owned(),
-                )))
-            }
-            .await;
-            if let Err(error) = outcome {
-                let _ = sender
-                    .send(ClientEvent::Failure {
-                        session,
-                        generation,
-                        message: error.to_string(),
-                    })
-                    .await;
-            }
-        });
-    }
-
-    pub(crate) fn load_models(&self, generation: u64) {
-        let api = Arc::clone(&self.api);
-        self.spawn_data(None, generation, async move {
-            api.models().await.map(ClientData::Models)
-        });
-    }
-
-    pub(crate) fn load_history(&self, session: SessionKey, generation: u64) {
-        let api = Arc::clone(&self.api);
-        let client = Arc::clone(&self.client);
-        let sender = self.sender.clone();
-        self.runtime.spawn(async move {
-            let session_id = session.as_str().to_owned();
-            let result = async {
-                match api.history(session_id.as_str()).await {
-                    Ok(items) => Ok(items),
-                    Err(error) if error.is_session_not_attached() => {
-                        client
-                            .recover_attachment(session_id.as_str())
-                            .await
-                            .map_err(|recover| {
-                                norte_code_client::ApiError::Request(recover.to_string())
-                            })?;
-                        api.history(session_id.as_str()).await
-                    }
-                    Err(error) => Err(error),
-                }
-            }
-            .await
-            .map(ClientData::History);
-            let _ = sender
-                .send(ClientEvent::Data {
-                    session: Some(session),
-                    generation,
-                    result: Box::new(result.map_err(Into::into)),
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: format!("delete session failed · {error}"),
                 })
                 .await;
-        });
+        }
     }
-
-    pub(crate) fn refresh_sessions(&self, generation: u64) {
-        let client = Arc::clone(&self.client);
-        self.spawn_client_data(None, generation, async move {
-            client
-                .list_sessions()
-                .await
-                .map(ClientData::SessionsUpdated)
-        });
+    if let Ok(sessions) = api.sessions().await {
+        let _ = events.send(ClientEvent::Sessions(sessions)).await;
     }
+}
 
-    pub(crate) fn load_plans(&self, session: SessionKey, generation: u64) {
-        let api = Arc::clone(&self.api);
-        let request_session = session.clone();
-        self.spawn_data(Some(session), generation, async move {
-            api.plans(request_session.as_str())
-                .await
-                .map(ClientData::Plans)
-        });
-    }
-
-    pub(crate) fn load_children(&self, session: SessionKey, generation: u64) {
-        let api = Arc::clone(&self.api);
-        let request_session = session.clone();
-        self.spawn_data(Some(session), generation, async move {
-            api.child_sessions(request_session.as_str())
-                .await
-                .map(ClientData::Children)
-        });
-    }
-
-    pub(crate) fn load_child_history(
-        &self,
-        session: SessionKey,
-        agent: Option<String>,
-        generation: u64,
-    ) {
-        let api = Arc::clone(&self.api);
-        let request_session = session.clone();
-        let agent_id = agent.unwrap_or_else(|| self.agent_id.clone());
-        let sender = self.sender.clone();
-        self.runtime.spawn(async move {
-            let result = async {
-                api.attach_observer(request_session.as_str(), &agent_id)
-                    .await?;
-                api.history(request_session.as_str()).await
-            }
-            .await;
-            match result {
-                Ok(history) => {
-                    let _ = sender
-                        .send(ClientEvent::Data {
-                            session: Some(session),
-                            generation,
-                            result: Box::new(Ok(ClientData::ChildHistory(history))),
-                        })
-                        .await;
-                }
-                Err(error) => {
-                    let _ = sender
-                        .send(ClientEvent::AttachmentFailure {
-                            session,
-                            generation,
-                            message: error.to_string(),
-                        })
-                        .await;
-                }
-            }
-        });
-    }
-
-    pub(crate) fn set_model(
-        &self,
-        session: SessionKey,
-        generation: u64,
-        provider: String,
-        model: String,
-    ) {
-        let api = Arc::clone(&self.api);
-        let request_session = session.clone();
-        let selected_provider = provider.clone();
-        let selected_model = model.clone();
-        self.spawn_data(Some(session), generation, async move {
-            api.set_session_model(request_session.as_str(), &provider, &model)
-                .await
-                .map(|()| ClientData::ModelSelected {
-                    provider: selected_provider,
-                    model: selected_model,
+/// Run one plugin operation and re-list the plugins afterwards.
+async fn run_plugin_op(api: &Arc<RestClient>, op: PluginOp, events: &Sender<ClientEvent>) {
+    let outcome = match &op {
+        PluginOp::Install { url, package } => {
+            api.install_plugin(url, package.as_deref(), false).await
+        }
+        PluginOp::Update { name } => api.update_plugin(name.as_deref()).await,
+        PluginOp::Remove { name } => api.remove_plugin(name).await,
+        PluginOp::SetEnabled { name, enabled } => api.set_plugin_enabled(name, *enabled).await,
+    };
+    match outcome {
+        Ok(change) => {
+            let _ = events
+                .send(ClientEvent::Notice {
+                    text: format!("plugin {} · {}", change.name, change.operation),
                 })
-        });
-    }
-
-    pub(crate) fn answer_question(
-        &self,
-        session: SessionKey,
-        generation: u64,
-        question: String,
-        answer: String,
-    ) {
-        let api = Arc::clone(&self.api);
-        let request_session = session.clone();
-        self.spawn_data(Some(session), generation, async move {
-            api.answer_question(request_session.as_str(), &question, &answer)
-                .await
-                .map(|()| ClientData::QuestionAnswered)
-        });
-    }
-
-    pub(crate) fn try_recv(&mut self) -> Option<ClientEvent> {
-        self.events.try_recv().ok()
-    }
-
-    fn spawn_stream<F>(&self, session: SessionKey, generation: u64, request: F)
-    where
-        F: Future<Output = Result<EventStream, ClientError>> + Send + 'static,
-    {
-        let sender = self.sender.clone();
-        self.runtime.spawn(async move {
-            match request.await {
-                Ok(mut stream) => {
-                    while let Some(event) = stream.next().await {
-                        if sender
-                            .send(ClientEvent::Server {
-                                session: session.clone(),
-                                generation,
-                                event: Box::new(event),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                }
-                Err(error) => {
-                    let _ = sender
-                        .send(ClientEvent::Failure {
-                            session,
-                            generation,
-                            message: error.to_string(),
-                        })
-                        .await;
-                }
-            }
-        });
-    }
-
-    async fn forward_events(
-        mut stream: EventStream,
-        sender: &Sender<ClientEvent>,
-        session: &SessionKey,
-        generation: u64,
-    ) -> bool {
-        while let Some(event) = stream.next().await {
-            if sender
-                .send(ClientEvent::Server {
-                    session: session.clone(),
-                    generation,
-                    event: Box::new(event),
+                .await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: format!("plugin operation failed · {error}"),
                 })
-                .await
-                .is_err()
-            {
-                return false;
+                .await;
+        }
+    }
+    if let Ok(plugins) = api.plugins().await {
+        let _ = events.send(ClientEvent::Plugins(plugins)).await;
+    }
+}
+
+/// Fetch everything the interface needs right after attach.
+async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<ClientEvent>) {
+    let (
+        models,
+        plans,
+        jobs,
+        telemetry_session,
+        telemetry_global,
+        plugins,
+        catalog,
+        agents,
+        cost_session,
+        cost_global,
+    ) = tokio::join!(
+        api.models(),
+        api.plans(session),
+        api.list_jobs(session),
+        api.telemetry(Some(session)),
+        api.telemetry(None),
+        api.plugins(),
+        api.catalog_detail(),
+        api.agents(),
+        api.cost_report(Some(session)),
+        api.cost_report(None),
+    );
+    if let Ok(models) = models {
+        let _ = events.send(ClientEvent::Models(models)).await;
+    }
+    if let Ok(plans) = plans {
+        let _ = events.send(ClientEvent::Plans(plans)).await;
+    }
+    if let Ok(jobs) = jobs {
+        let _ = events.send(ClientEvent::Jobs(jobs)).await;
+    }
+    if let Ok(report) = telemetry_session {
+        let _ = events.send(ClientEvent::TelemetrySession(report)).await;
+    }
+    if let Ok(report) = telemetry_global {
+        let _ = events.send(ClientEvent::Telemetry(report)).await;
+    }
+    if let Ok(plugins) = plugins {
+        let _ = events.send(ClientEvent::Plugins(plugins)).await;
+    }
+    if let Ok(catalog) = catalog {
+        let _ = events.send(ClientEvent::Catalog(catalog)).await;
+    }
+    if let Ok(agents) = agents {
+        let _ = events.send(ClientEvent::Agents(agents)).await;
+    }
+    if let Ok(cost) = cost_session {
+        let _ = events.send(ClientEvent::CostSession(cost)).await;
+    }
+    if let Ok(cost) = cost_global {
+        let _ = events.send(ClientEvent::CostGlobal(cost)).await;
+    }
+}
+
+/// Starts the connection task and returns (commands, events).
+pub(crate) fn start(config: ClientConfig) -> (Sender<UiCommand>, Receiver<ClientEvent>) {
+    let (events_tx, events_rx) = mpsc::channel(256);
+    let (commands_tx, commands_rx) = mpsc::channel(64);
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = events_tx.blocking_send(ClientEvent::Detached {
+                    reason: format!("could not start the runtime: {error}"),
+                });
+                return;
+            }
+        };
+        runtime.block_on(connection(config, commands_rx, events_tx));
+    });
+    (commands_tx, events_rx)
+}
+
+/// Owns the connection; driven by commands from the interface.
+async fn connection(
+    config: ClientConfig,
+    mut commands: Receiver<UiCommand>,
+    events: Sender<ClientEvent>,
+) {
+    let client = match RemoteClient::new(
+        config.service.url.clone(),
+        config.service.token.as_deref(),
+        None,
+    ) {
+        Ok(client) => Arc::new(client.with_agent_id(config.agent_id.clone())),
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::Detached {
+                    reason: format!("could not build the raep client: {error}"),
+                })
+                .await;
+            return;
+        }
+    };
+    let api = match RestClient::new(
+        &config.service.url,
+        config.service.token.as_deref().unwrap_or_default(),
+    ) {
+        Ok(api) => Arc::new(api),
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::Detached {
+                    reason: format!("could not build the raep api: {error}"),
+                })
+                .await;
+            return;
+        }
+    };
+    let sessions = match client.list_sessions().await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::Detached {
+                    reason: format!("could not list the sessions: {error}"),
+                })
+                .await;
+            return;
+        }
+    };
+    let fresh = match client.create_session(None).await {
+        Ok(fresh) => fresh,
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::Detached {
+                    reason: format!("could not create a session: {error}"),
+                })
+                .await;
+            return;
+        }
+    };
+    let _ = events.send(ClientEvent::Sessions(sessions)).await;
+    let mut session = attach_shared(&client, &events, Box::new(fresh)).await;
+    loop {
+        match stream_loop(&client, &api, &mut commands, &events, &session).await {
+            StreamOutcome::Retry => return,
+            StreamOutcome::Switch(summary) => {
+                session = attach_shared(&client, &events, summary).await;
             }
         }
-        true
     }
+}
 
-    async fn continue_after_budget_approval(
-        client: &RemoteClient,
-        sender: &Sender<ClientEvent>,
-        session: &SessionKey,
-        limit: f64,
-        generation: u64,
-    ) -> Result<bool, ClientError> {
-        let changed = Self::set_budget_action(
-            client,
-            sender,
-            session,
-            limit,
-            norte_code_wire::BudgetAction::Warn,
-            generation,
+/// Send a user message on the session's stream.
+async fn send_prompt(api: &Arc<RestClient>, target: &SessionKey, text: String, queue_mode: String) {
+    let _ = api
+        .send_prompt(
+            target.as_str(),
+            Some(&text),
+            None::<Vec<UserInputPart>>,
+            None,
+            &queue_mode,
         )
-        .await?;
-        let stream = client.resume(session.as_str()).await?;
-        let resumed = Self::forward_events(stream, sender, session, generation).await;
-        Ok(changed && resumed)
-    }
+        .await;
+}
 
-    async fn set_budget_action(
-        client: &RemoteClient,
-        sender: &Sender<ClientEvent>,
-        session: &SessionKey,
-        limit: f64,
-        action: norte_code_wire::BudgetAction,
-        generation: u64,
-    ) -> Result<bool, ClientError> {
-        let stream = client
-            .set_budget(
-                session.as_str(),
-                norte_code_wire::Budget {
-                    unit: norte_code_wire::BudgetUnit::Usd,
-                    limit,
-                    action,
-                },
-            )
-            .await?;
-        Ok(Self::forward_events(stream, sender, session, generation).await)
-    }
-
-    async fn send_operation_error(
-        sender: &Sender<ClientEvent>,
-        session: SessionKey,
-        generation: u64,
-        error: ClientError,
-    ) {
-        let _ = sender
-            .send(ClientEvent::Failure {
-                session,
-                generation,
-                message: error.to_string(),
+/// Answer the question the turn is parked on.
+async fn answer_question(
+    api: &Arc<RestClient>,
+    events: &Sender<ClientEvent>,
+    target: &SessionKey,
+    question: String,
+    answer: String,
+) {
+    if let Err(error) = api
+        .answer_question(target.as_str(), &question, &answer)
+        .await
+    {
+        let _ = events
+            .send(ClientEvent::SendFailed {
+                reason: format!("answer refused: {error}"),
             })
             .await;
     }
+}
 
-    fn spawn_data<F>(&self, session: Option<SessionKey>, generation: u64, request: F)
-    where
-        F: Future<Output = Result<ClientData, ApiError>> + Send + 'static,
-    {
-        let sender = self.sender.clone();
-        self.runtime.spawn(async move {
-            let _ = sender
-                .send(ClientEvent::Data {
-                    session,
-                    generation,
-                    result: Box::new(request.await.map_err(Into::into)),
-                })
-                .await;
-        });
+/// Send the attachment frames for a session.
+async fn attach_shared(
+    client: &Arc<RemoteClient>,
+    events: &Sender<ClientEvent>,
+    summary: Box<norte_code_wire::SessionSummary>,
+) -> SessionKey {
+    let session = SessionKey::new(summary.session_id.clone());
+    let _ = events
+        .send(ClientEvent::Attached { session: *summary })
+        .await;
+    if let Ok(sessions) = client.list_sessions().await {
+        let _ = events.send(ClientEvent::Sessions(sessions)).await;
     }
+    session
+}
 
-    fn spawn_client_data<F>(&self, session: Option<SessionKey>, generation: u64, request: F)
-    where
-        F: Future<Output = Result<ClientData, ClientError>> + Send + 'static,
-    {
-        let sender = self.sender.clone();
-        self.runtime.spawn(async move {
-            let _ = sender
-                .send(ClientEvent::Data {
-                    session,
-                    generation,
-                    result: Box::new(request.await.map_err(Into::into)),
+/// Fetch the session's history; best effort, failure is reported.
+async fn fetch_history(api: &Arc<RestClient>, session: &str, events: &Sender<ClientEvent>) {
+    match api.history(session).await {
+        Ok(items) => {
+            let _ = events.send(ClientEvent::History(items)).await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::HistoryFailed {
+                    reason: error.to_string(),
                 })
                 .await;
-        });
+        }
+    }
+}
+
+/// After this many consecutive failures or short-lived streams, surface a
+/// notice once; the reconnect keeps going in the background regardless.
+const GIVE_UP_ATTEMPTS: u32 = 3;
+/// A stream that stays up at least this long counts as healthy.
+const HEALTHY_STREAM: Duration = Duration::from_secs(10);
+const RETRY_MAX_MS: u64 = 5000;
+
+enum StreamOutcome {
+    /// The stream closed; the caller should re-open it.
+    Retry,
+    /// The user asked another session.
+    Switch(Box<norte_code_wire::SessionSummary>),
+}
+
+/// Owns the session's event stream; driven by both the stream and commands.
+///
+/// Reconnects forever with a capped backoff: the server supports resume
+/// from `last-event-id`, so a close is only a hiccup. The interface hears
+/// about sustained trouble once, not per attempt; Ctrl+R forces a fresh
+/// attach from the session list.
+async fn stream_loop(
+    client: &Arc<RemoteClient>,
+    api: &Arc<RestClient>,
+    commands: &mut Receiver<UiCommand>,
+    events: &Sender<ClientEvent>,
+    session: &SessionKey,
+) -> StreamOutcome {
+    let mut attempt = 0u32;
+    let mut announced = false;
+    let mut primed = false;
+    loop {
+        match client.open_events(session.as_str()).await {
+            Ok(mut stream) => {
+                if !primed {
+                    // The host only honours these once the stream is attached.
+                    Box::pin(fetch_history(api, session.as_str(), events)).await;
+                    Box::pin(fetch_views(api, session.as_str(), events)).await;
+                    primed = true;
+                }
+                let opened_at = std::time::Instant::now();
+                match Box::pin(drive_stream(
+                    &mut stream,
+                    commands,
+                    events,
+                    client,
+                    api,
+                    session,
+                ))
+                .await
+                {
+                    StreamOutcome::Switch(summary) => return StreamOutcome::Switch(summary),
+                    StreamOutcome::Retry => {}
+                }
+                if opened_at.elapsed() >= HEALTHY_STREAM {
+                    attempt = 0;
+                    announced = false;
+                } else {
+                    attempt = attempt.saturating_add(1);
+                }
+                if attempt >= GIVE_UP_ATTEMPTS && !announced {
+                    let _ = events
+                        .send(ClientEvent::Detached {
+                            reason: "the stream keeps closing; retrying in the background — check the raep server".into(),
+                        })
+                        .await;
+                    announced = true;
+                }
+            }
+            Err(error) => {
+                attempt = attempt.saturating_add(1);
+                if attempt >= GIVE_UP_ATTEMPTS && !announced {
+                    let _ = events
+                        .send(ClientEvent::Detached {
+                            reason: format!(
+                                "lost the stream ({error}); retrying in the background — check the raep server"
+                            ),
+                        })
+                        .await;
+                    announced = true;
+                }
+            }
+        }
+        let delay = (RETRY_BASE_MS << attempt.min(6)).min(RETRY_MAX_MS);
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+}
+
+/// Pump events from the stream while dispatching commands.
+async fn drive_stream(
+    stream: &mut EventStream,
+    commands: &mut Receiver<UiCommand>,
+    events: &Sender<ClientEvent>,
+    client: &Arc<RemoteClient>,
+    api: &Arc<RestClient>,
+    session: &SessionKey,
+) -> StreamOutcome {
+    loop {
+        tokio::select! {
+            Some(command) = commands.recv() => {
+                match command {
+                    UiCommand::OpenSession { session: summary } => {
+                        return StreamOutcome::Switch(summary);
+                    }
+                    UiCommand::Plugin(op) => {
+                        spawn_host_op(BackgroundOp::Plugin(op), Arc::clone(api), events.clone());
+                    }
+                    UiCommand::RenameSession { session, title } => {
+                        spawn_host_op(
+                            BackgroundOp::Rename { session, title },
+                            Arc::clone(api),
+                            events.clone(),
+                        );
+                    }
+                    UiCommand::DeleteSession { session } => {
+                        spawn_host_op(
+                            BackgroundOp::Delete { session },
+                            Arc::clone(api),
+                            events.clone(),
+                        );
+                    }
+                    UiCommand::Send { session: target, text, queue_mode } => {
+                        send_prompt(api, &target, text, queue_mode).await;
+                    }
+                    UiCommand::Refresh => {
+                        if let Ok(sessions) = client.list_sessions().await {
+                            let _ = events.send(ClientEvent::Sessions(sessions)).await;
+                        }
+                    }
+                    UiCommand::AnswerQuestion {
+                        session: target,
+                        question,
+                        answer,
+                    } => {
+                        answer_question(api, events, &target, question, answer).await;
+                    }
+                    UiCommand::RefreshViews => {
+                        Box::pin(fetch_views(api, session.as_str(), events)).await;
+                    }
+                    UiCommand::SetModel {
+                        session: target,
+                        provider,
+                        model,
+                    } => {
+                        let _ = api.set_session_model(target.as_str(), &provider, &model).await;
+                        if let Ok(models) = api.models().await {
+                            let _ = events.send(ClientEvent::Models(models)).await;
+                        }
+                        if let Ok(sessions) = client.list_sessions().await {
+                            let _ = events.send(ClientEvent::Sessions(sessions)).await;
+                        }
+                    }
+                    UiCommand::SetReasoning {
+                        session: target,
+                        effort,
+                    } => {
+                        let reasoning = match effort.as_str() {
+                            "low" | "medium" | "high" => norte_code_wire::Reasoning::Effort {
+                                effort: effort.clone(),
+                            },
+                            _ => norte_code_wire::Reasoning::Automatic,
+                        };
+                        let _ = api
+                            .set_reasoning(
+                                target.as_str(),
+                                norte_code_wire::ReasoningScope::Session,
+                                reasoning,
+                            )
+                            .await;
+                    }
+                }
+            }
+            frame = stream.next() => {
+                match frame {
+                    Some(event) => {
+                        let _ = events.send(ClientEvent::Server(Box::new(event))).await;
+                    }
+                    None => return StreamOutcome::Retry,
+                }
+            }
+        }
     }
 }
