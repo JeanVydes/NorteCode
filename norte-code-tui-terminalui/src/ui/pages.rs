@@ -19,16 +19,6 @@ fn clip(text: &str, limit: usize) -> String {
     out
 }
 
-fn format_limit(limit: u64) -> String {
-    if limit >= 1_000_000 {
-        format!("{}M", limit / 1_000_000)
-    } else if limit >= 1_000 {
-        format!("{}k", limit / 1_000)
-    } else {
-        limit.to_string()
-    }
-}
-
 fn human_duration(ms: u64) -> String {
     let secs = ms / 1000;
     if secs >= 3600 {
@@ -63,29 +53,6 @@ pub(crate) fn session(model: &UiModel) -> Inspector {
         .collect();
     if rows.is_empty() {
         rows.push(Row::new("no sessions yet").with_secondary("detached"));
-    }
-    inspector.set_rows(rows);
-    inspector
-}
-
-pub(crate) fn models(model: &UiModel) -> Inspector {
-    let mut inspector = Inspector::new("models · grouped by provider", Selection::Activate);
-    let mut rows: Vec<Row> = Vec::with_capacity(model.models.len());
-    for model_info in &model.models {
-        let context = model_info
-            .max_context
-            .map_or_else(|| "—".to_string(), format_limit);
-        let tools = if model_info.tools { " · tools" } else { "" };
-        let row = Row::new(format!("{} · {}", model_info.provider, model_info.model))
-            .with_secondary(format!("{context} ctx{tools}"));
-        rows.push(if model_info.deprecated {
-            row.with_tag("deprecated")
-        } else {
-            row
-        });
-    }
-    if rows.is_empty() {
-        rows.push(Row::new("catalogue not loaded yet").with_secondary("waiting for attach"));
     }
     inspector.set_rows(rows);
     inspector
