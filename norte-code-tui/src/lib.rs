@@ -9,6 +9,7 @@ mod app;
 mod client;
 mod config;
 mod diff;
+mod job_notice;
 mod palette;
 mod shell;
 mod terminal;

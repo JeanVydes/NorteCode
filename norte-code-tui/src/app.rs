@@ -842,6 +842,26 @@ fn drain_server_events(
     }
 }
 
+fn fold_job_event(kind: &norte_code_wire::ServerEventKind, tree: &mut terminalui::Tree) {
+    match kind {
+        norte_code_wire::ServerEventKind::JobStarted {
+            job_id, command, ..
+        } => {
+            notice(
+                tree,
+                crate::job_notice::started(job_id, command),
+                ui::Tone::Neutral,
+            );
+        }
+        norte_code_wire::ServerEventKind::JobFinished { job, .. } => {
+            let text = crate::job_notice::finished(job);
+            let tone = crate::job_notice::tone(job);
+            notice(tree, text, tone);
+        }
+        _ => {}
+    }
+}
+
 fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model: &mut UiModel) {
     if fold_error_event(&event.kind, tree, model) {
         return;
@@ -932,7 +952,7 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
                 stream.complete_running_tools();
             }
         }
-        _ => {}
+        _ => fold_job_event(&event.kind, tree),
     }
 }
 
