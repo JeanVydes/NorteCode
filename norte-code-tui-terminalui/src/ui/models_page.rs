@@ -49,7 +49,7 @@ pub(crate) struct ModelsData {
 /// A pending request to the app layer, drained each frame.
 #[derive(Serialize)]
 pub(crate) enum ModelsAction {
-    /// Send a SetModel command for a model whose provider has a key.
+    /// Send a `SetModel` command for a model whose provider has a key.
     SetModel {
         /// The provider.
         provider: String,
@@ -373,7 +373,7 @@ impl View for ModelsPage {
         let body = self.body_rows();
         let end = (self.offset + body).min(rows.len());
         for (offset, index) in (self.offset..end).enumerate() {
-            let y = area.y + 1 + offset as u16;
+            let y = area.y + 1 + u16::try_from(offset).unwrap_or(0);
             let selected = self.selected == index;
             let row_style = if selected {
                 Style::default()

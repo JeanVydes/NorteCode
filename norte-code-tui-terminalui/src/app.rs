@@ -478,19 +478,19 @@ fn drain_models_actions(
             }
         }
     }
-    if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt") {
-        if let Some(intent) = prompt.take_saved() {
-            match intent {
-                crate::ui::KeyIntent::SwitchModel {
-                    provider,
-                    model: model_id,
-                } => {
-                    set_model(tree, commands, model, &provider, &model_id);
-                }
-                crate::ui::KeyIntent::Expand { provider } => {
-                    if let Some(page) = tree.find_mut::<ui::ModelsPage>("models") {
-                        page.expand(&provider);
-                    }
+    if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt")
+        && let Some(intent) = prompt.take_saved()
+    {
+        match intent {
+            crate::ui::KeyIntent::SwitchModel {
+                provider,
+                model: model_id,
+            } => {
+                set_model(tree, commands, model, &provider, &model_id);
+            }
+            crate::ui::KeyIntent::Expand { provider } => {
+                if let Some(page) = tree.find_mut::<ui::ModelsPage>("models") {
+                    page.expand(&provider);
                 }
             }
         }
