@@ -174,11 +174,15 @@ impl QuestionPrompt {
         );
         row += 1;
         for line in prompt_lines {
+            if row >= inner.y + inner.height.saturating_sub(1) {
+                break;
+            }
+            let line_budget = inner.width as usize;
             buf.set_stringn(
                 inner.x,
                 row,
                 line,
-                line.chars().count(),
+                line_budget,
                 Style::default().fg(theme.foreground),
             );
             row += 1;
@@ -268,7 +272,7 @@ impl QuestionPrompt {
             inner.x,
             inner.y + inner.height - 1,
             hint,
-            hint.chars().count(),
+            inner.width as usize,
             Style::default().fg(theme.muted),
         );
     }
@@ -322,10 +326,20 @@ impl View for QuestionPrompt {
             );
         }
 
-        let inner_width = (area.width.saturating_sub(8)).min(72);
-        let prompt_lines = self.wrapped_prompt(usize::from(inner_width));
+        let inner_width = (area.width.saturating_sub(8)).min(88);
+        let full_prompt_lines = self.wrapped_prompt(usize::from(inner_width));
+        let prompt_max = 4usize;
+        let mut prompt_lines: Vec<String> =
+            full_prompt_lines.iter().take(prompt_max).cloned().collect();
+        if full_prompt_lines.len() > prompt_max {
+            if let Some(last) = prompt_lines.last_mut() {
+                last.truncate(last.len().saturating_sub(1));
+                last.push('…');
+            }
+        }
         let options_lines = self.visible_rows().len();
-        let body_rows = 1 + prompt_lines.len() + options_lines + 2;
+        let answer_rows = if self.mode == InputMode::Answer { 2 } else { 0 };
+        let body_rows = 1 + prompt_lines.len() + options_lines + answer_rows + 1;
         let height = u16::try_from(body_rows.max(6))
             .unwrap_or(9)
             .max(9)
