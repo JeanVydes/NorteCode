@@ -279,6 +279,15 @@ fn send_current_prompt(
         }
         return;
     };
+    if !model.active_session_has_model() {
+        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+            stream.push(ui::Item::Notice {
+                text: "no model selected; message not sent (3 Models, Enter to choose)".into(),
+                tone: ui::Tone::Warn,
+            });
+        }
+        return;
+    }
     let Some(session) = model.active.clone() else {
         return;
     };
@@ -388,6 +397,12 @@ fn drain_server_events(
                         text: format!("attached to {title}"),
                         tone: ui::Tone::Neutral,
                     });
+                    if !model.active_session_has_model() {
+                        stream.push(ui::Item::Notice {
+                            text: "no model selected; 3 Models, Enter to choose".into(),
+                            tone: ui::Tone::Warn,
+                        });
+                    }
                 }
                 changed = true;
             }
@@ -462,6 +477,9 @@ fn drain_server_events(
 }
 
 fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model: &mut UiModel) {
+    if fold_error_event(&event.kind, tree, model) {
+        return;
+    }
     match &event.kind {
         ServerEventKind::TurnStarted { .. } | ServerEventKind::InputAccepted { .. } => {
             model.turn = TurnState::Connecting;
@@ -502,6 +520,97 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
         }
         _ => {}
     }
+}
+
+/// Handle the failure-ish arms of the stream; `true` when one applied.
+fn fold_error_event(
+    kind: &ServerEventKind,
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+) -> bool {
+    match kind {
+        ServerEventKind::Error { message, .. } => stop_with_notice(
+            tree,
+            model,
+            format!("host error · {message}"),
+            ui::Tone::Error,
+        ),
+        ServerEventKind::BudgetExceeded {
+            scope,
+            spent,
+            limit,
+            unit,
+            action,
+        } => stop_with_notice(
+            tree,
+            model,
+            format!("budget exceeded · {scope:?} · {spent:.2}/{limit:.2} {unit:?} · {action:?}"),
+            ui::Tone::Error,
+        ),
+        ServerEventKind::BudgetWarning {
+            scope,
+            spent,
+            limit,
+            unit,
+        } => notice(
+            tree,
+            format!("budget warning · {scope:?} · {spent:.2}/{limit:.2} {unit:?}"),
+            ui::Tone::Warn,
+        ),
+        ServerEventKind::QuestionAsked { prompt, .. } => {
+            model.turn = TurnState::AwaitingAnswer;
+            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                stream.stop_thinking();
+                stream.push(ui::Item::Notice {
+                    text: format!("the model asks · {prompt} (answer from another client)"),
+                    tone: ui::Tone::Warn,
+                });
+            }
+            true
+        }
+        ServerEventKind::ModelQueued {
+            provider,
+            model: queued,
+        } => notice(
+            tree,
+            format!("model queued · {provider} · {queued}"),
+            ui::Tone::Neutral,
+        ),
+        ServerEventKind::RetryScheduled {
+            attempt, reason, ..
+        } => notice(tree, format!("retry {attempt} · {reason}"), ui::Tone::Warn),
+        ServerEventKind::RetryStarted { attempt, .. } => {
+            notice(tree, format!("retry {attempt} running"), ui::Tone::Neutral)
+        }
+        ServerEventKind::ReasoningDowngraded { from, to, reason } => notice(
+            tree,
+            format!("reasoning {from} → {to} · {reason}"),
+            ui::Tone::Warn,
+        ),
+        _ => false,
+    }
+}
+
+fn stop_with_notice(
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    text: String,
+    tone: ui::Tone,
+) -> bool {
+    model.turn = TurnState::Idle;
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.stop_thinking();
+        stream.complete_running_tools();
+        stream.push(ui::Item::Notice { text, tone });
+    }
+    true
+}
+
+fn notice(tree: &mut terminalui::Tree, text: String, tone: ui::Tone) -> bool {
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.push(ui::Item::Notice { text, tone });
+    }
+    true
 }
 
 fn fold_tool_started(

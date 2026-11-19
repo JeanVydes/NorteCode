@@ -196,6 +196,21 @@ impl Tab {
 }
 
 impl UiModel {
+    /// The session the interface is attached to, when it is in the list.
+    pub(crate) fn active_session(&self) -> Option<&SessionSummary> {
+        let active = self.active.as_ref()?;
+        self.sessions
+            .iter()
+            .find(|candidate| candidate.session_id == active.as_str())
+    }
+
+    /// Whether the attached session has a model configured.
+    pub(crate) fn active_session_has_model(&self) -> bool {
+        self.active_session()
+            .and_then(|session| session.model.as_ref())
+            .is_some()
+    }
+
     /// A fresh model for a client that never attached yet.
     pub(crate) fn detached() -> Self {
         Self {
