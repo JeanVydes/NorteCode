@@ -397,9 +397,8 @@ fn key_intent_for(provider: String, model_id: Option<String>) -> crate::ui::KeyI
     }
 }
 
-/// Set the attached session's model and tell the reader about it.
+/// Ask the host to switch the attached session's model.
 fn set_model(
-    tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &UiModel,
     provider: &str,
@@ -410,12 +409,6 @@ fn set_model(
             session,
             provider: provider.to_owned(),
             model: model_id.to_owned(),
-        });
-    }
-    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-        stream.push(ui::Item::Notice {
-            text: format!("model set · {provider} · {model_id}"),
-            tone: ui::Tone::Neutral,
         });
     }
 }
@@ -546,7 +539,7 @@ fn drain_models_actions(
                 provider,
                 model: model_id,
             } => {
-                set_model(tree, commands, model, &provider, &model_id);
+                set_model(commands, model, &provider, &model_id);
             }
             ui::ModelsAction::AskKeyForModel {
                 provider,
@@ -574,7 +567,7 @@ fn drain_models_actions(
                 provider,
                 model: model_id,
             } => {
-                set_model(tree, commands, model, &provider, &model_id);
+                set_model(commands, model, &provider, &model_id);
             }
             crate::ui::KeyIntent::Expand { provider } => {
                 if let Some(page) = tree.find_mut::<ui::ModelsPage>("models") {
@@ -846,6 +839,37 @@ fn push_attach_notice(stream: &mut ui::Transcript, model: &crate::ui_model::UiMo
     }
 }
 
+/// Apply the host's confirmation that the session's model changed.
+fn fold_model_changed(
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    provider: &str,
+    new_model: &str,
+) -> bool {
+    if let Some(active) = model.active.as_ref()
+        && let Some(summary) = model
+            .sessions
+            .iter_mut()
+            .find(|summary| summary.session_id == active.as_str())
+    {
+        summary.provider = Some(provider.to_owned());
+        summary.model = Some(norte_code_wire::AgentRef {
+            id: new_model.to_owned(),
+            version: String::new(),
+        });
+    }
+    model.active_provider = Some(provider.to_owned());
+    model.active_model = Some(norte_code_wire::AgentRef {
+        id: new_model.to_owned(),
+        version: String::new(),
+    });
+    notice(
+        tree,
+        format!("model · {provider} · {new_model}"),
+        ui::Tone::Neutral,
+    )
+}
+
 /// Handle the failure-ish arms of the stream; `true` when one applied.
 fn fold_error_event(
     kind: &ServerEventKind,
@@ -923,6 +947,10 @@ fn fold_error_event(
             format!("model queued · {provider} · {queued}"),
             ui::Tone::Neutral,
         ),
+        ServerEventKind::ModelChanged {
+            provider,
+            model: new_model,
+        } => fold_model_changed(tree, model, provider, new_model),
         ServerEventKind::RetryScheduled {
             attempt, reason, ..
         } => {
@@ -1056,5 +1084,7 @@ fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
     if let Some(rail) = tree.find_mut::<ui::Rail>("rail") {
         rail.attachment = model.attachment.clone();
         rail.set_session(model.active.as_ref().map(|key| key.as_str().to_string()));
+        rail.model = model.active_model.as_ref().map(|model| model.id.clone());
+        rail.provider.clone_from(&model.active_provider);
     }
 }
