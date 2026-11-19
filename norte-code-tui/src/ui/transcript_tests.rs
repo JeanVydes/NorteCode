@@ -100,6 +100,29 @@ fn reasoning_in_a_new_turn_gets_its_own_block() {
 }
 
 #[test]
+fn wrapping_counts_cells_not_bytes() {
+    let lines = super::wrap("área énfasis Ópera", 12);
+    assert!(lines.iter().all(|line| super::display_width(line) <= 12));
+    assert_eq!(
+        lines.concat().replace(' ', ""),
+        "áreaénfasisÓpera".replace(' ', "")
+    );
+}
+
+#[test]
+fn wrapping_keeps_explicit_newlines() {
+    assert_eq!(super::wrap("uno\ndos", 10), vec!["uno", "dos"]);
+    assert_eq!(super::wrap("hola\n", 10), vec!["hola", ""]);
+}
+
+#[test]
+fn wrapping_splits_a_word_longer_than_the_line() {
+    let lines = super::wrap("abcdefghijklmnop", 5);
+    assert!(lines.iter().all(|line| super::display_width(line) <= 5));
+    assert_eq!(lines.concat(), "abcdefghijklmnop");
+}
+
+#[test]
 fn replayed_edit_calls_keep_their_diff() {
     let mut transcript = Transcript::new();
     transcript.replace_history(vec![norte_code_wire::HistoryItem {
