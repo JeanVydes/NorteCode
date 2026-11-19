@@ -98,6 +98,54 @@ fn reasoning_in_a_new_turn_gets_its_own_block() {
 }
 
 #[test]
+fn split_diff_paints_both_sides_in_one_row() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+    use terminalui::Theme;
+
+    let theme = Theme {
+        background: Color::Reset,
+        foreground: Color::Reset,
+        primary: Color::Reset,
+        secondary: Color::Reset,
+        muted: Color::Reset,
+        accent: Color::Reset,
+        destructive: Color::Red,
+        success: Color::Green,
+        warning: Color::Reset,
+        border: Color::Reset,
+        ring: Color::Reset,
+        border_set: Color::Reset,
+    };
+    let diff = crate::diff::Diff {
+        removed: vec!["old".to_string()],
+        added: vec!["new".to_string()],
+    };
+    let area = Rect::new(0, 0, 40, 4);
+    let mut buf = Buffer::empty(area);
+    super::paint_diff(
+        &mut buf,
+        area,
+        &diff,
+        crate::diff::DiffMode::Split,
+        4,
+        &theme,
+    );
+    let painted: Vec<char> = (0..40)
+        .map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' '))
+        .collect();
+    let text: String = painted.into_iter().collect();
+    assert!(text.trim_start().starts_with("−"), "{text:?}");
+    assert!(text.contains("new"), "{text:?}");
+    assert_eq!(
+        diff.rows(crate::diff::DiffMode::Split),
+        2,
+        "one diff row plus its header"
+    );
+}
+
+#[test]
 fn non_reasoning_rows_are_not_toggleable() {
     let mut transcript = Transcript::new();
     transcript.push(Item::Notice {

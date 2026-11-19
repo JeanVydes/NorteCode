@@ -3,6 +3,7 @@
 //! The view reads this; only the client layer mutates it. Everything here
 //! is plain data, free of any notion of terminal or layout.
 
+use crate::diff::DiffMode;
 use crate::theme::{ThemeCatalog, ThemeChoice, ThemeKind};
 use norte_code_wire::SessionSummary;
 
@@ -52,6 +53,28 @@ pub(crate) struct PendingQuestion {
     pub(crate) multiple: bool,
 }
 
+impl ReasoningLevel {
+    /// The label shown in the config page.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// The next level in the cycle.
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Low,
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Auto,
+        }
+    }
+}
+
 /// The effort level the reasoning selector offers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReasoningLevel {
@@ -63,6 +86,28 @@ pub(crate) enum ReasoningLevel {
     Medium,
     /// High effort.
     High,
+}
+
+impl SendMode {
+    /// The label shown in the config page.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Steer => "steer",
+            Self::Queue => "queue",
+            Self::Interrupt => "interrupt",
+            Self::Reject => "reject",
+        }
+    }
+
+    /// The next mode in the cycle.
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::Steer => Self::Queue,
+            Self::Queue => Self::Interrupt,
+            Self::Interrupt => Self::Reject,
+            Self::Reject => Self::Steer,
+        }
+    }
 }
 
 /// What to do with a message sent while a turn is running.
@@ -89,6 +134,8 @@ pub(crate) struct Preferences {
     pub(crate) reasoning: ReasoningLevel,
     /// What to do with a message sent while a turn is running.
     pub(crate) send_mode: SendMode,
+    /// How edit diffs are drawn.
+    pub(crate) diff_mode: DiffMode,
 }
 
 /// The turn the host is running, when known.
@@ -175,6 +222,8 @@ pub(crate) enum Tab {
     Plugins,
     /// The costs page.
     Costs,
+    /// The preferences page.
+    Config,
 }
 
 impl Tab {
@@ -190,7 +239,8 @@ impl Tab {
             Self::Telemetry => Self::Host,
             Self::Host => Self::Plugins,
             Self::Plugins => Self::Costs,
-            Self::Costs => Self::Chat,
+            Self::Costs => Self::Config,
+            Self::Config => Self::Chat,
         }
     }
 
@@ -198,7 +248,8 @@ impl Tab {
     #[must_use]
     pub(crate) const fn previous(self) -> Self {
         match self {
-            Self::Chat => Self::Costs,
+            Self::Chat => Self::Config,
+            Self::Config => Self::Costs,
             Self::Sessions => Self::Chat,
             Self::Models => Self::Sessions,
             Self::Plans => Self::Models,
@@ -222,6 +273,23 @@ impl Tab {
             Self::Host => "Host",
             Self::Plugins => "Plugins",
             Self::Costs => "Costs",
+            Self::Config => "Config",
+        }
+    }
+
+    /// A short label for narrow screens.
+    pub(crate) const fn short_label(self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            Self::Sessions => "Sess",
+            Self::Models => "Models",
+            Self::Plans => "Plans",
+            Self::Jobs => "Jobs",
+            Self::Telemetry => "Tele",
+            Self::Host => "Host",
+            Self::Plugins => "Plug",
+            Self::Costs => "Cost",
+            Self::Config => "Cfg",
         }
     }
 
@@ -237,6 +305,7 @@ impl Tab {
             '7' => Some(Self::Host),
             '8' => Some(Self::Plugins),
             '9' => Some(Self::Costs),
+            '0' => Some(Self::Config),
             _ => None,
         }
     }
@@ -264,6 +333,7 @@ impl UiModel {
                 catalog: ThemeCatalog::default(),
                 reasoning: ReasoningLevel::Auto,
                 send_mode: SendMode::Steer,
+                diff_mode: DiffMode::Unified,
             },
             attachment: SessionAttachmentState::Disconnected,
             turn: TurnState::Idle,

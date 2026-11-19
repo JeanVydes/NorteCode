@@ -73,12 +73,10 @@ pub(crate) enum Item {
         /// Optional meta column, e.g. `+41 −12`.
         meta: Option<String>,
     },
-    /// A unified diff with red removal rows and green addition rows.
+    /// The change an edit made, drawn in the configured layout.
     Diff {
-        /// Lines removed.
-        removed: Vec<String>,
-        /// Lines added.
-        added: Vec<String>,
+        /// The removed and added lines.
+        diff: crate::diff::Diff,
     },
     /// A shell session, rendered with the library `Console` view.
     Shell {
@@ -173,6 +171,9 @@ pub(crate) struct Transcript {
     /// Whether the row's source item may be copied or highlighted.
     #[serde(skip)]
     painted_copyable: Vec<bool>,
+    /// How edit diffs are drawn.
+    #[serde(skip)]
+    diff_mode: crate::diff::DiffMode,
 }
 
 /// A cell position in transcript coordinates (rows from the transcript's top).
@@ -216,7 +217,16 @@ impl Transcript {
             selection: None,
             painted: Vec::new(),
             painted_copyable: Vec::new(),
+            diff_mode: crate::diff::DiffMode::Unified,
             follow_tail: true,
+        }
+    }
+
+    /// Set the diff layout; a change rebuilds the cached row heights.
+    pub(crate) fn set_diff_mode(&mut self, mode: crate::diff::DiffMode) {
+        if self.diff_mode != mode {
+            self.diff_mode = mode;
+            self.dirty = true;
         }
     }
 
@@ -400,7 +410,7 @@ impl Transcript {
         });
     }
 
-    fn item_height(item: &Item, width: usize) -> u16 {
+    fn item_height(item: &Item, width: usize, diff_mode: crate::diff::DiffMode) -> u16 {
         match item {
             Item::User { text }
             | Item::Assistant { text }
@@ -416,9 +426,7 @@ impl Transcript {
                 }
             }
             Item::Tool { .. } => 2,
-            Item::Diff { removed, added } => {
-                u16::try_from(removed.len() + added.len() + 1).unwrap_or(u16::MAX)
-            }
+            Item::Diff { diff } => u16::try_from(diff.rows(diff_mode)).unwrap_or(u16::MAX),
             Item::Shell { console, .. } => {
                 console.measure().map_or(2, |(_, height)| height) + BLOCK_GAP
             }
@@ -433,7 +441,7 @@ impl Transcript {
         self.heights = self
             .items
             .iter()
-            .map(|item| Self::item_height(item, width))
+            .map(|item| Self::item_height(item, width, self.diff_mode))
             .collect();
         self.content_height = self.heights.iter().sum();
         self.heights_width = u16::try_from(width).unwrap_or(u16::MAX);
@@ -792,7 +800,9 @@ impl View for Transcript {
                     clip,
                     theme,
                 ),
-                Item::Diff { removed, added } => paint_diff(buf, rect, removed, added, clip, theme),
+                Item::Diff { diff } => {
+                    paint_diff(buf, rect, diff, self.diff_mode, clip, theme);
+                }
                 Item::Shell { console, .. } => {
                     let rows = console.measure().map_or(2, |(_, height)| height);
                     let shell_rect = Rect {
@@ -994,55 +1004,103 @@ fn paint_tool(buf: &mut Buffer, area: Rect, row: ToolRow<'_>, clip: u16, theme: 
 fn paint_diff(
     buf: &mut Buffer,
     area: Rect,
-    removed: &[String],
-    added: &[String],
+    diff: &crate::diff::Diff,
+    mode: crate::diff::DiffMode,
     clip: u16,
     theme: &Theme,
 ) {
     let surface = theme.secondary;
     let mut y = area.y;
-    for line in removed {
-        if y >= clip {
-            return;
-        }
-        buf.set_style(Rect { height: 1, ..area }, Style::default().bg(surface));
+    let title = format!(" ─ {} / + {} ", diff.removed.len(), diff.added.len());
+    if y < clip {
         buf.set_stringn(
             area.x,
             y,
-            "−",
-            1,
-            Style::default().fg(theme.destructive).bg(surface),
-        );
-        buf.set_stringn(
-            area.x + 2,
-            y,
-            line,
-            line.chars().count(),
-            Style::default().fg(theme.destructive).bg(surface),
+            &title,
+            usize::from(area.width),
+            Style::default().fg(theme.muted).bg(surface),
         );
         y += 1;
     }
-    for line in added {
-        if y >= clip {
-            return;
+    match mode {
+        crate::diff::DiffMode::Unified => {
+            for line in &diff.removed {
+                if y >= clip {
+                    return;
+                }
+                paint_diff_line(
+                    buf,
+                    area.x,
+                    y,
+                    area.width,
+                    "−",
+                    line,
+                    Style::default().fg(theme.destructive).bg(surface),
+                );
+                y += 1;
+            }
+            for line in &diff.added {
+                if y >= clip {
+                    return;
+                }
+                paint_diff_line(
+                    buf,
+                    area.x,
+                    y,
+                    area.width,
+                    "+",
+                    line,
+                    Style::default().fg(theme.success).bg(surface),
+                );
+                y += 1;
+            }
         }
-        buf.set_style(Rect { height: 1, ..area }, Style::default().bg(surface));
-        buf.set_stringn(
-            area.x,
-            y,
-            "+",
-            1,
-            Style::default().fg(theme.success).bg(surface),
-        );
-        buf.set_stringn(
-            area.x + 2,
-            y,
-            line,
-            line.chars().count(),
-            Style::default().fg(theme.success).bg(surface),
-        );
-        y += 1;
+        crate::diff::DiffMode::Split => {
+            let half = usize::from(area.width.saturating_sub(1)) / 2;
+            let half_width = u16::try_from(half).unwrap_or(0);
+            for index in 0..diff.removed.len().max(diff.added.len()) {
+                if y >= clip {
+                    return;
+                }
+                if let Some(line) = diff.removed.get(index) {
+                    paint_diff_line(
+                        buf,
+                        area.x,
+                        y,
+                        half_width,
+                        "−",
+                        line,
+                        Style::default().fg(theme.destructive).bg(surface),
+                    );
+                }
+                if let Some(line) = diff.added.get(index) {
+                    paint_diff_line(
+                        buf,
+                        area.x + half_width + 1,
+                        y,
+                        half_width,
+                        "+",
+                        line,
+                        Style::default().fg(theme.success).bg(surface),
+                    );
+                }
+                y += 1;
+            }
+        }
     }
+}
+
+fn paint_diff_line(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    sign: &str,
+    line: &str,
+    style: Style,
+) {
+    buf.set_stringn(x, y, sign, 1, style);
+    buf.set_stringn(x + 2, y, line, usize::from(width.saturating_sub(2)), style);
 }
 
 fn paint_notice(buf: &mut Buffer, area: Rect, text: &str, tone: Tone, clip: u16, theme: &Theme) {

@@ -1,6 +1,7 @@
 //! The view tree: header, rail, stream, composer, status strip, pages.
 
 mod composer;
+mod config_page;
 #[cfg(test)]
 #[path = "focus_tests.rs"]
 mod focus_tests;
@@ -20,6 +21,7 @@ use ratatui::layout::Constraint;
 use terminalui::Pane;
 
 pub(crate) use composer::Composer;
+pub(crate) use config_page::{ConfigAction, ConfigData, ConfigPage, Setting};
 pub(crate) use header::Header;
 
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
@@ -48,6 +50,7 @@ fn tab_index(tab: Tab) -> usize {
         Tab::Host => 6,
         Tab::Plugins => 7,
         Tab::Costs => 8,
+        Tab::Config => 9,
     }
 }
 
@@ -82,7 +85,7 @@ fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
             .right(vec![
                 node(
                     "hint",
-                    Text::new("alt+1-9 tabs · ⏎ send · ⇧⏎ newline")
+                    Text::new("alt+0-9 tabs · ⏎ send · ⇧⏎ newline")
                         .with_style(TextStyle::default().fg(theme.muted)),
                 ),
                 node(
@@ -122,6 +125,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
             node("host", pages::host(model)),
             node("plugins", plugins_page::PluginsPage::new()),
             node("costs", pages::costs(model)),
+            node("config", config_page::ConfigPage::new()),
         ]),
     );
 
@@ -238,6 +242,20 @@ fn update_plugins(tree: &mut Tree, model: &UiModel) {
     }
 }
 
+fn update_config(tree: &mut Tree, model: &UiModel) {
+    if let Some(page) = tree.find_mut::<config_page::ConfigPage>("config") {
+        page.set_data(ConfigData {
+            theme: crate::theme::theme_name(&model.preferences.theme).to_string(),
+            thinking: model.preferences.reasoning.label().to_string(),
+            send_mode: model.preferences.send_mode.label().to_string(),
+            diff_mode: model.preferences.diff_mode.label().to_string(),
+        });
+    }
+    if let Some(stream) = tree.find_mut::<Transcript>("stream") {
+        stream.set_diff_mode(model.preferences.diff_mode);
+    }
+}
+
 /// Refresh the inspectors from the latest model snapshot; called after data arrives.
 pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
     update_sessions(tree, model);
@@ -255,6 +273,7 @@ pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
         *inspector = pages::host(model);
     }
     update_plugins(tree, model);
+    update_config(tree, model);
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("costs") {
         *inspector = pages::costs(model);
     }
