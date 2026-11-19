@@ -39,6 +39,19 @@ pub(crate) enum SessionAttachmentState {
     },
 }
 
+/// A question from the model, waiting for an answer.
+#[derive(Clone)]
+pub(crate) struct PendingQuestion {
+    /// The host's id for the question.
+    pub(crate) question: String,
+    /// The question text.
+    pub(crate) prompt: String,
+    /// Closed choices, when the model offered them.
+    pub(crate) options: Vec<String>,
+    /// Whether more than one option may be chosen.
+    pub(crate) multiple: bool,
+}
+
 /// The effort level the reasoning selector offers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReasoningLevel {
@@ -94,6 +107,12 @@ pub(crate) struct UiModel {
     pub(crate) telemetry: Option<norte_code_wire::TelemetryReport>,
     /// Installed plugins.
     pub(crate) plugins: Vec<norte_code_client::PluginSummary>,
+    /// The model the host reports for the attached session, when known.
+    pub(crate) active_model: Option<norte_code_wire::AgentRef>,
+    /// The provider the host reports for the attached session, when known.
+    pub(crate) active_provider: Option<String>,
+    /// The question the model is parked on, when one is open.
+    pub(crate) question: Option<PendingQuestion>,
     /// The catalogue detail for the HOST view.
     pub(crate) catalog: Option<norte_code_client::CatalogDetail>,
     /// The agents the server reported.
@@ -196,19 +215,17 @@ impl Tab {
 }
 
 impl UiModel {
-    /// The session the interface is attached to, when it is in the list.
-    pub(crate) fn active_session(&self) -> Option<&SessionSummary> {
-        let active = self.active.as_ref()?;
-        self.sessions
-            .iter()
-            .find(|candidate| candidate.session_id == active.as_str())
-    }
-
     /// Whether the attached session has a model configured.
     pub(crate) fn active_session_has_model(&self) -> bool {
-        self.active_session()
-            .and_then(|session| session.model.as_ref())
-            .is_some()
+        if let Some(active) = self.active.as_ref()
+            && let Some(found) = self
+                .sessions
+                .iter()
+                .find(|candidate| candidate.session_id == active.as_str())
+        {
+            return found.model.is_some();
+        }
+        self.active_model.is_some()
     }
 
     /// A fresh model for a client that never attached yet.
@@ -232,6 +249,9 @@ impl UiModel {
             agents: Vec::new(),
             telemetry_session: None,
             cost: None,
+            active_model: None,
+            active_provider: None,
+            question: None,
             tab: Tab::Chat,
         }
     }

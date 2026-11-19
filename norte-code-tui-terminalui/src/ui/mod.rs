@@ -8,6 +8,7 @@ mod header;
 mod inspector;
 mod key_prompt;
 mod pages;
+mod question_prompt;
 mod rail;
 mod selector;
 mod transcript;
@@ -19,6 +20,7 @@ pub(crate) use composer::Composer;
 pub(crate) use header::Header;
 pub(crate) use inspector::Inspector;
 pub(crate) use key_prompt::{KeyPrompt, provider_has_key};
+pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::Rail;
 pub(crate) use selector::Selector;
 pub(crate) use transcript::{Item, Tone, ToolState, Transcript};
@@ -141,6 +143,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
         Pane::new(vec![
             frame,
             node("key_prompt", key_prompt::KeyPrompt::new()),
+            node("question_prompt", question_prompt::QuestionPrompt::new()),
         ]),
     );
 
@@ -151,8 +154,8 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
 
 /// Sync the pane visibility + composer disabled state + tab to the model's tab.
 ///
-/// The key prompt replaces the whole frame while it is open: when it opens
-/// the root pane switches to it; when it closes the frame returns.
+/// The key prompt and the ask-user prompt each replace the whole frame while
+/// they are open; the frame returns when they close.
 pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     if let Some(pane) = tree.find_mut::<Pane>("middle") {
         pane.set_visible(tab_index(model.tab));
@@ -166,8 +169,23 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     let prompt_open = tree
         .find::<key_prompt::KeyPrompt>("key_prompt")
         .is_some_and(key_prompt::KeyPrompt::is_open);
+    let question_open = model.question.is_some();
     if let Some(root) = tree.find_mut::<Pane>("root") {
-        root.set_visible(usize::from(prompt_open));
+        root.set_visible(if question_open {
+            2
+        } else {
+            usize::from(prompt_open)
+        });
+    }
+    if let Some(overlay) = tree.find_mut::<question_prompt::QuestionPrompt>("question_prompt") {
+        let open = overlay.is_open();
+        if question_open && !open {
+            if let Some(question) = model.question.clone() {
+                overlay.begin(question);
+            }
+        } else if !question_open && open {
+            overlay.close();
+        }
     }
 }
 
