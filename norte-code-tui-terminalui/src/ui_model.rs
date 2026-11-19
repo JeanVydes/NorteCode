@@ -125,6 +125,21 @@ pub(crate) struct UiModel {
     pub(crate) tab: Tab,
     /// The title of the session the stream is attached to, for the attach notice.
     pub(crate) attached_title: Option<String>,
+    /// A plugin operation in flight, when one is.
+    pub(crate) plugin_job: Option<PluginJob>,
+}
+
+/// A plugin operation the host is running right now.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct PluginJob {
+    /// The operation: `install`, `update` or `remove`.
+    pub(crate) operation: String,
+    /// The step it reached.
+    pub(crate) step: u64,
+    /// How many steps the operation has.
+    pub(crate) total: u64,
+    /// What the step is doing, in a few words.
+    pub(crate) stage: String,
 }
 
 /// The tabs of the interface.
@@ -256,6 +271,7 @@ impl UiModel {
             question: None,
             tab: Tab::Chat,
             attached_title: None,
+            plugin_job: None,
         }
     }
 }

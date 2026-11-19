@@ -251,7 +251,7 @@ impl ModelsPage {
         if key.kind != KeyEventKind::Press {
             return Outcome::Ignored;
         }
-        if key.modifiers == KeyModifiers::NONE {
+        if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.selected = self.selected.saturating_sub(1);
