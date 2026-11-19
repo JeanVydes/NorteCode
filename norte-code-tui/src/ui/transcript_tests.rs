@@ -60,6 +60,7 @@ fn reasoning_deltas_merge_into_one_block_per_turn() {
         state: super::ToolState::Done,
         meta: None,
         diff: None,
+        console: None,
     });
     transcript.push_reasoning_text("explore the repo.");
     let thoughts: Vec<_> = transcript

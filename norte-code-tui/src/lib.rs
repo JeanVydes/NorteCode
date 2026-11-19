@@ -10,6 +10,7 @@ mod client;
 mod config;
 mod diff;
 mod palette;
+mod shell;
 mod terminal;
 mod theme;
 mod ui;

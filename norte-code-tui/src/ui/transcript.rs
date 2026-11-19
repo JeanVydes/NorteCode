@@ -76,13 +76,8 @@ pub(crate) enum Item {
         meta: Option<String>,
         /// The change an edit made, drawn under its header.
         diff: Option<crate::diff::Diff>,
-    },
-    /// A shell session, rendered with the library `Console` view.
-    Shell {
-        /// The call id the host names; used to match output frames to it.
-        call_id: String,
-        /// The console block itself.
-        console: Console,
+        /// A shell call's live output, under its header.
+        console: Option<Box<Console>>,
     },
     /// A host notice, e.g. `model switched to claude-sonnet-4.5`.
     Notice {
@@ -280,6 +275,7 @@ impl Transcript {
                         state: ToolState::Done,
                         meta: None,
                         diff,
+                        console: None,
                     });
                 }
                 _ => {}
@@ -343,9 +339,10 @@ impl Transcript {
     /// Append a line of output to the console with the given call id.
     pub(crate) fn append_console_line(&mut self, call_id: &str, line: String) -> bool {
         for item in self.items.iter_mut().rev() {
-            if let Item::Shell {
+            if let Item::Tool {
                 call_id: id,
-                console,
+                console: Some(console),
+                ..
             } = item
                 && *id == call_id
             {
@@ -430,12 +427,12 @@ impl Transcript {
                     1 + BLOCK_GAP
                 }
             }
-            Item::Tool { diff, .. } => match diff {
-                Some(diff) => u16::try_from(diff.rows(diff_mode) + 3).unwrap_or(u16::MAX),
-                None => 2,
-            },
-            Item::Shell { console, .. } => {
-                console.measure().map_or(2, |(_, height)| height) + BLOCK_GAP
+            Item::Tool { diff, console, .. } => {
+                let extra = diff.as_ref().map_or(0, |diff| diff.rows(diff_mode) + 2)
+                    + console.as_ref().map_or(0, |console| {
+                        console.measure().map_or(2, |(_, height)| height as usize) + 1
+                    });
+                u16::try_from(extra + 2).unwrap_or(u16::MAX)
             }
         }
     }
@@ -487,6 +484,76 @@ impl Transcript {
             top = end;
         }
         false
+    }
+
+    /// Paint one tool row with its diff or its live console underneath.
+    fn paint_tool_item(
+        item: &mut Item,
+        rect: Rect,
+        buf: &mut Buffer,
+        cx: &mut Context,
+        clip: u16,
+        diff_mode: crate::diff::DiffMode,
+        theme: &Theme,
+    ) {
+        let Item::Tool {
+            name,
+            target,
+            state,
+            meta,
+            diff,
+            console,
+            ..
+        } = item
+        else {
+            return;
+        };
+        paint_tool(
+            buf,
+            rect,
+            ToolRow {
+                name,
+                target: target.as_deref(),
+                state: *state,
+                meta: meta.as_deref(),
+            },
+            clip,
+            theme,
+        );
+        if let Some(diff) = diff {
+            let box_rect = Rect {
+                y: rect.y + 1,
+                height: rect.height.saturating_sub(1),
+                ..rect
+            };
+            paint_diff(
+                buf,
+                box_rect,
+                diff,
+                diff_mode,
+                target.as_deref().unwrap_or("edit"),
+                clip,
+                theme,
+            );
+        }
+        if let Some(console) = console {
+            let rows = console.measure().map_or(2, |(_, height)| height);
+            let taken = u16::try_from(diff.as_ref().map_or(0, |diff| diff.rows(diff_mode) + 2))
+                .unwrap_or(0);
+            let y = rect.y.saturating_add(1).saturating_add(taken);
+            if y < clip {
+                console.render(
+                    Rect {
+                        y,
+                        height: rows.min(clip.saturating_sub(y)),
+                        ..rect
+                    },
+                    buf,
+                    cx,
+                    theme,
+                );
+            }
+        }
     }
 
     /// Paint the selection over the text cells only.
@@ -585,7 +652,6 @@ impl Transcript {
                             | Item::Assistant { .. }
                             | Item::Reasoning { .. }
                             | Item::Tool { .. }
-                            | Item::Shell { .. }
                     )
                 )
             });
@@ -752,7 +818,11 @@ impl View for Transcript {
             self.thinking = Some(thinking.saturating_add(delta));
         }
         for item in &mut self.items {
-            if let Item::Shell { console, .. } = item {
+            if let Item::Tool {
+                console: Some(console),
+                ..
+            } = item
+            {
                 console.tick(delta, cx);
             }
         }
@@ -791,50 +861,8 @@ impl View for Transcript {
             match item {
                 Item::User { text } => paint_user(buf, rect, text, clip, theme),
                 Item::Assistant { text } => paint_assistant(buf, rect, text, clip, theme),
-                Item::Tool {
-                    call_id: _,
-                    name,
-                    target,
-                    state,
-                    meta,
-                    diff,
-                } => {
-                    paint_tool(
-                        buf,
-                        rect,
-                        ToolRow {
-                            name,
-                            target: target.as_deref(),
-                            state: *state,
-                            meta: meta.as_deref(),
-                        },
-                        clip,
-                        theme,
-                    );
-                    if let Some(diff) = diff {
-                        let box_rect = Rect {
-                            y: rect.y + 1,
-                            height: rect.height.saturating_sub(1),
-                            ..rect
-                        };
-                        paint_diff(
-                            buf,
-                            box_rect,
-                            diff,
-                            self.diff_mode,
-                            target.as_deref().unwrap_or("edit"),
-                            clip,
-                            theme,
-                        );
-                    }
-                }
-                Item::Shell { console, .. } => {
-                    let rows = console.measure().map_or(2, |(_, height)| height);
-                    let shell_rect = Rect {
-                        height: rows,
-                        ..rect
-                    };
-                    console.render(shell_rect, buf, cx, theme);
+                Item::Tool { .. } => {
+                    Self::paint_tool_item(item, rect, buf, cx, clip, self.diff_mode, theme);
                 }
                 Item::Notice { text, tone } | Item::Retry { text, tone } => {
                     paint_notice(buf, rect, text, *tone, clip, theme);

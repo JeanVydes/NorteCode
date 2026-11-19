@@ -13,6 +13,7 @@ use ratatui::style::Style;
 use crate::client::{ClientEvent, UiCommand, start};
 use crate::config::ClientConfig;
 use crate::diff::{Diff, EditArgs};
+use crate::shell::ShellArgs;
 use crate::terminal::TerminalSession;
 use crate::theme::{CustomTheme, ThemeCatalog};
 use crate::ui;
@@ -1153,15 +1154,21 @@ fn fold_tool_started(
         });
         let edit =
             arguments.and_then(|value| serde_json::from_value::<EditArgs>(value.clone()).ok());
-        let target = edit.as_ref().and_then(|edit| edit.path.clone()).or(target);
-        if matches!(tool, "shell" | "bash")
-            && let Some(command) = arguments.and_then(|v| v.get("command").and_then(|s| s.as_str()))
-        {
-            stream.push(ui::Item::Shell {
-                call_id: call_id.to_owned(),
-                console: terminalui::components::console::Console::new(command).with_max_visible(6),
-            });
-        }
+        let shell =
+            arguments.and_then(|value| serde_json::from_value::<ShellArgs>(value.clone()).ok());
+        let command = shell.as_ref().and_then(ShellArgs::command);
+        let target = edit
+            .as_ref()
+            .and_then(|edit| edit.path.clone())
+            .or(target)
+            .or_else(|| command.map(str::to_owned));
+        let console = if matches!(tool, "shell" | "bash") {
+            command.map(|command| {
+                Box::new(terminalui::components::console::Console::new(command).with_max_visible(6))
+            })
+        } else {
+            None
+        };
         stream.push(ui::Item::Tool {
             call_id: call_id.to_owned(),
             name: tool.to_owned(),
@@ -1169,6 +1176,7 @@ fn fold_tool_started(
             state: ui::ToolState::Running,
             meta: None,
             diff: edit.as_ref().and_then(|edit| Diff::from_call(source, edit)),
+            console,
         });
     }
 }
