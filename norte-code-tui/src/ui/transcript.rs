@@ -13,6 +13,8 @@ use crossterm::event::{KeyCode, KeyEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
+
+use crate::diff::LineKind;
 use serde::Serialize;
 
 use terminalui::components::console::Console;
@@ -72,11 +74,8 @@ pub(crate) enum Item {
         state: ToolState,
         /// Optional meta column, e.g. `+41 −12`.
         meta: Option<String>,
-    },
-    /// The change an edit made, drawn in the configured layout.
-    Diff {
-        /// The removed and added lines.
-        diff: crate::diff::Diff,
+        /// The change an edit made, drawn under its header.
+        diff: Option<crate::diff::Diff>,
     },
     /// A shell session, rendered with the library `Console` view.
     Shell {
@@ -257,13 +256,18 @@ impl Transcript {
                 }),
                 "system_event" | "tool" | "tool_call" | "tool_result" => {
                     let call_id = item.id.clone();
-                    let summary = item
-                        .content
-                        .lines()
-                        .next()
-                        .unwrap_or("tool")
-                        .trim()
-                        .to_owned();
+                    let mut lines = item.content.lines();
+                    let summary = lines.next().unwrap_or("tool").trim().to_owned();
+                    let arguments = lines.collect::<Vec<_>>().join("\n");
+                    let edit = serde_json::from_str::<serde_json::Value>(&arguments)
+                        .ok()
+                        .and_then(|value| {
+                            serde_json::from_value::<crate::diff::EditArgs>(value).ok()
+                        });
+                    let target = edit.as_ref().and_then(|edit| edit.path.clone());
+                    let diff = edit
+                        .as_ref()
+                        .and_then(|edit| crate::diff::Diff::from_call(None, edit));
                     self.items.push(Item::Tool {
                         call_id,
                         name: if summary.len() > 40 {
@@ -272,9 +276,10 @@ impl Transcript {
                         } else {
                             summary
                         },
-                        target: None,
+                        target,
                         state: ToolState::Done,
                         meta: None,
+                        diff,
                     });
                 }
                 _ => {}
@@ -425,8 +430,10 @@ impl Transcript {
                     1 + BLOCK_GAP
                 }
             }
-            Item::Tool { .. } => 2,
-            Item::Diff { diff } => u16::try_from(diff.rows(diff_mode)).unwrap_or(u16::MAX),
+            Item::Tool { diff, .. } => match diff {
+                Some(diff) => u16::try_from(diff.rows(diff_mode) + 3).unwrap_or(u16::MAX),
+                None => 2,
+            },
             Item::Shell { console, .. } => {
                 console.measure().map_or(2, |(_, height)| height) + BLOCK_GAP
             }
@@ -443,7 +450,10 @@ impl Transcript {
             .iter()
             .map(|item| Self::item_height(item, width, self.diff_mode))
             .collect();
-        self.content_height = self.heights.iter().sum();
+        self.content_height = self
+            .heights
+            .iter()
+            .fold(0u16, |total, height| total.saturating_add(*height));
         self.heights_width = u16::try_from(width).unwrap_or(u16::MAX);
         self.dirty = false;
         let max = self.max_offset();
@@ -575,7 +585,6 @@ impl Transcript {
                             | Item::Assistant { .. }
                             | Item::Reasoning { .. }
                             | Item::Tool { .. }
-                            | Item::Diff { .. }
                             | Item::Shell { .. }
                     )
                 )
@@ -788,20 +797,36 @@ impl View for Transcript {
                     target,
                     state,
                     meta,
-                } => paint_tool(
-                    buf,
-                    rect,
-                    ToolRow {
-                        name,
-                        target: target.as_deref(),
-                        state: *state,
-                        meta: meta.as_deref(),
-                    },
-                    clip,
-                    theme,
-                ),
-                Item::Diff { diff } => {
-                    paint_diff(buf, rect, diff, self.diff_mode, clip, theme);
+                    diff,
+                } => {
+                    paint_tool(
+                        buf,
+                        rect,
+                        ToolRow {
+                            name,
+                            target: target.as_deref(),
+                            state: *state,
+                            meta: meta.as_deref(),
+                        },
+                        clip,
+                        theme,
+                    );
+                    if let Some(diff) = diff {
+                        let box_rect = Rect {
+                            y: rect.y + 1,
+                            height: rect.height.saturating_sub(1),
+                            ..rect
+                        };
+                        paint_diff(
+                            buf,
+                            box_rect,
+                            diff,
+                            self.diff_mode,
+                            target.as_deref().unwrap_or("edit"),
+                            clip,
+                            theme,
+                        );
+                    }
                 }
                 Item::Shell { console, .. } => {
                     let rows = console.measure().map_or(2, |(_, height)| height);
@@ -1006,87 +1031,182 @@ fn paint_diff(
     area: Rect,
     diff: &crate::diff::Diff,
     mode: crate::diff::DiffMode,
+    path: &str,
     clip: u16,
     theme: &Theme,
 ) {
-    let surface = theme.secondary;
-    let mut y = area.y;
-    let title = format!(" ─ {} / + {} ", diff.removed.len(), diff.added.len());
-    if y < clip {
-        buf.set_stringn(
-            area.x,
-            y,
-            &title,
-            usize::from(area.width),
-            Style::default().fg(theme.muted).bg(surface),
-        );
-        y += 1;
+    if area.height < 3 || area.width < 4 || area.y >= clip {
+        return;
     }
+    paint_diff_frame(buf, area, diff, path, clip, theme);
+    let inner_x = area.x + 2;
+    let inner_w = area.width.saturating_sub(4);
     match mode {
         crate::diff::DiffMode::Unified => {
-            for line in &diff.removed {
-                if y >= clip {
-                    return;
-                }
-                paint_diff_line(
-                    buf,
-                    area.x,
-                    y,
-                    area.width,
-                    "−",
-                    line,
-                    Style::default().fg(theme.destructive).bg(surface),
-                );
-                y += 1;
-            }
-            for line in &diff.added {
-                if y >= clip {
-                    return;
-                }
-                paint_diff_line(
-                    buf,
-                    area.x,
-                    y,
-                    area.width,
-                    "+",
-                    line,
-                    Style::default().fg(theme.success).bg(surface),
-                );
-                y += 1;
-            }
+            paint_diff_unified(buf, area, diff, inner_x, inner_w, clip, theme);
         }
         crate::diff::DiffMode::Split => {
-            let half = usize::from(area.width.saturating_sub(1)) / 2;
-            let half_width = u16::try_from(half).unwrap_or(0);
-            for index in 0..diff.removed.len().max(diff.added.len()) {
-                if y >= clip {
-                    return;
-                }
-                if let Some(line) = diff.removed.get(index) {
-                    paint_diff_line(
-                        buf,
-                        area.x,
-                        y,
-                        half_width,
-                        "−",
-                        line,
-                        Style::default().fg(theme.destructive).bg(surface),
-                    );
-                }
-                if let Some(line) = diff.added.get(index) {
-                    paint_diff_line(
-                        buf,
-                        area.x + half_width + 1,
-                        y,
-                        half_width,
-                        "+",
-                        line,
-                        Style::default().fg(theme.success).bg(surface),
-                    );
-                }
-                y += 1;
-            }
+            paint_diff_split(buf, area, diff, inner_x, inner_w, clip, theme);
         }
+    }
+}
+
+fn paint_diff_frame(
+    buf: &mut Buffer,
+    area: Rect,
+    diff: &crate::diff::Diff,
+    path: &str,
+    clip: u16,
+    theme: &Theme,
+) {
+    let (removed, added) = diff.counts();
+    let title = format!(" {path}  −{removed} +{added} ");
+    let top = format!("╭─{title}");
+    let head_len = u16::try_from(top.chars().count())
+        .unwrap_or(u16::MAX)
+        .saturating_add(1);
+    let top = format!(
+        "{top}{}╮",
+        "─".repeat(usize::from(area.width.saturating_sub(head_len)))
+    );
+    buf.set_stringn(
+        area.x,
+        area.y,
+        &top,
+        usize::from(area.width),
+        Style::default().fg(theme.border),
+    );
+    for row in 1..area.height - 1 {
+        let y = area.y + row;
+        if y < clip {
+            buf.set_stringn(area.x, y, "│", 1, Style::default().fg(theme.border));
+            buf.set_stringn(
+                area.right() - 1,
+                y,
+                "│",
+                1,
+                Style::default().fg(theme.border),
+            );
+        }
+    }
+    if area.y + area.height - 1 < clip {
+        let bottom = format!(
+            "╰{}╯",
+            "─".repeat(usize::from(area.width.saturating_sub(2)))
+        );
+        buf.set_stringn(
+            area.x,
+            area.y + area.height - 1,
+            &bottom,
+            usize::from(area.width),
+            Style::default().fg(theme.border),
+        );
+    }
+}
+
+fn paint_diff_unified(
+    buf: &mut Buffer,
+    area: Rect,
+    diff: &crate::diff::Diff,
+    x: u16,
+    width: u16,
+    clip: u16,
+    theme: &Theme,
+) {
+    for (offset, line) in diff.lines.iter().enumerate() {
+        let y = area.y + 1 + u16::try_from(offset).unwrap_or(u16::MAX);
+        if y >= area.y + area.height - 1 || y >= clip {
+            return;
+        }
+        let (sign, color) = sign_and_color(line.kind, theme);
+        paint_diff_line(
+            buf,
+            x,
+            y,
+            width,
+            sign,
+            &line.text,
+            Style::default().fg(color).bg(theme.secondary),
+        );
+    }
+}
+
+fn paint_diff_split(
+    buf: &mut Buffer,
+    area: Rect,
+    diff: &crate::diff::Diff,
+    x: u16,
+    width: u16,
+    clip: u16,
+    theme: &Theme,
+) {
+    let mut y = area.y + 1;
+    let mut index = 0usize;
+    let half = width.saturating_sub(1) / 2;
+    while index < diff.lines.len() && y < area.y + area.height - 1 && y < clip {
+        if diff.lines[index].kind == LineKind::Context {
+            let line = &diff.lines[index];
+            paint_diff_line(
+                buf,
+                x,
+                y,
+                width,
+                " ",
+                &line.text,
+                Style::default().fg(theme.muted).bg(theme.secondary),
+            );
+            y += 1;
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < diff.lines.len() && diff.lines[index].kind != LineKind::Context {
+            index += 1;
+        }
+        let removed: Vec<_> = diff.lines[start..index]
+            .iter()
+            .filter(|line| line.kind == LineKind::Removed)
+            .collect();
+        let added: Vec<_> = diff.lines[start..index]
+            .iter()
+            .filter(|line| line.kind == LineKind::Added)
+            .collect();
+        for pair in 0..removed.len().max(added.len()) {
+            if y >= area.y + area.height - 1 || y >= clip {
+                return;
+            }
+            if let Some(line) = removed.get(pair) {
+                paint_diff_line(
+                    buf,
+                    x,
+                    y,
+                    half,
+                    "−",
+                    &line.text,
+                    Style::default().fg(theme.destructive).bg(theme.secondary),
+                );
+            }
+            if let Some(line) = added.get(pair) {
+                paint_diff_line(
+                    buf,
+                    x + half + 1,
+                    y,
+                    width.saturating_sub(half + 1),
+                    "+",
+                    &line.text,
+                    Style::default().fg(theme.success).bg(theme.secondary),
+                );
+            }
+            y += 1;
+        }
+    }
+}
+
+fn sign_and_color(kind: LineKind, theme: &Theme) -> (&'static str, ratatui::style::Color) {
+    match kind {
+        LineKind::Context => (" ", theme.muted),
+        LineKind::Removed => ("−", theme.destructive),
+        LineKind::Added => ("+", theme.success),
     }
 }
 

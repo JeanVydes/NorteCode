@@ -59,6 +59,7 @@ fn reasoning_deltas_merge_into_one_block_per_turn() {
         target: None,
         state: super::ToolState::Done,
         meta: None,
+        diff: None,
     });
     transcript.push_reasoning_text("explore the repo.");
     let thoughts: Vec<_> = transcript
@@ -98,6 +99,33 @@ fn reasoning_in_a_new_turn_gets_its_own_block() {
 }
 
 #[test]
+fn replayed_edit_calls_keep_their_diff() {
+    let mut transcript = Transcript::new();
+    transcript.replace_history(vec![norte_code_wire::HistoryItem {
+        id: "call-1".to_string(),
+        kind: "tool_call".to_string(),
+        content: "edit\n{\n  \"path\": \"x.rs\",\n  \"edits\": [{ \"search\": \"old\", \"replace\": \"new\" }]\n}"
+            .to_string(),
+        created_at: 0,
+        turn_id: None,
+        role: norte_code_wire::HistorySpeaker::Tool,
+        provenance: None,
+    }]);
+    let Some(Item::Tool { diff, target, .. }) = transcript.items.first() else {
+        panic!("tool row");
+    };
+    assert_eq!(target.as_deref(), Some("x.rs"));
+    let diff = diff.as_ref().expect("diff from the call arguments");
+    assert_eq!(
+        diff.lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["old", "new"]
+    );
+}
+
+#[test]
 fn split_diff_paints_both_sides_in_one_row() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -119,8 +147,16 @@ fn split_diff_paints_both_sides_in_one_row() {
         border_set: Color::Reset,
     };
     let diff = crate::diff::Diff {
-        removed: vec!["old".to_string()],
-        added: vec!["new".to_string()],
+        lines: vec![
+            crate::diff::Line {
+                kind: crate::diff::LineKind::Removed,
+                text: "old".to_string(),
+            },
+            crate::diff::Line {
+                kind: crate::diff::LineKind::Added,
+                text: "new".to_string(),
+            },
+        ],
     };
     let area = Rect::new(0, 0, 40, 4);
     let mut buf = Buffer::empty(area);
@@ -129,6 +165,7 @@ fn split_diff_paints_both_sides_in_one_row() {
         area,
         &diff,
         crate::diff::DiffMode::Split,
+        "file.txt",
         4,
         &theme,
     );
@@ -136,13 +173,9 @@ fn split_diff_paints_both_sides_in_one_row() {
         .map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' '))
         .collect();
     let text: String = painted.into_iter().collect();
-    assert!(text.trim_start().starts_with("−"), "{text:?}");
+    assert!(text.contains('−'), "{text:?}");
     assert!(text.contains("new"), "{text:?}");
-    assert_eq!(
-        diff.rows(crate::diff::DiffMode::Split),
-        2,
-        "one diff row plus its header"
-    );
+    assert_eq!(diff.rows(crate::diff::DiffMode::Split), 1);
 }
 
 #[test]
