@@ -113,6 +113,8 @@ fn poll_event(
             let _ = tree.handle_event(&input);
             sync_selectors(tree, commands, model);
             drain_tab_request(tree, model);
+            drain_models_actions(tree, commands, model);
+            drain_plugins_actions(tree, commands);
             ui::sync_views(tree, model);
             Ok(false)
         }

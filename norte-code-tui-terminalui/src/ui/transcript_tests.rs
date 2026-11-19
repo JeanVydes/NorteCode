@@ -22,6 +22,40 @@ fn consecutive_retry_lines_update_the_same_item() {
 }
 
 #[test]
+fn reasoning_blocks_toggle_with_clicks() {
+    let mut transcript = Transcript::new();
+    transcript.push_reasoning_text("alpha beta gamma delta");
+    assert!(transcript.toggle_reasoning_at(0));
+    let expanded = transcript.items.iter().find_map(|item| {
+        if let Item::Reasoning { expanded, .. } = item {
+            Some(*expanded)
+        } else {
+            None
+        }
+    });
+    assert_eq!(expanded, Some(true));
+    assert!(transcript.toggle_reasoning_at(0));
+    let expanded = transcript.items.iter().find_map(|item| {
+        if let Item::Reasoning { expanded, .. } = item {
+            Some(*expanded)
+        } else {
+            None
+        }
+    });
+    assert_eq!(expanded, Some(false));
+}
+
+#[test]
+fn non_reasoning_rows_are_not_toggleable() {
+    let mut transcript = Transcript::new();
+    transcript.push(Item::Notice {
+        text: "hi".to_string(),
+        tone: Tone::Neutral,
+    });
+    assert!(!transcript.toggle_reasoning_at(0));
+}
+
+#[test]
 fn a_retry_after_other_items_starts_a_new_line() {
     let mut transcript = Transcript::new();
     transcript.push_retry("retry 1 · overloaded".to_string(), Tone::Warn);

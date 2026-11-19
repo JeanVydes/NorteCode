@@ -101,10 +101,12 @@ pub(crate) enum Item {
         /// How loud the notice is.
         tone: Tone,
     },
-    /// Reasoning text, muted.
+    /// Reasoning text, muted; collapsed by default, click expands.
     Reasoning {
         /// The raw text.
         text: String,
+        /// Whether the block is expanded in place.
+        expanded: bool,
     },
 }
 
@@ -153,6 +155,9 @@ pub(crate) struct Transcript {
     /// Time spent in the current thinking phase; `None` when idle.
     #[serde(skip)]
     thinking: Option<Duration>,
+    /// The y of the item area, set during render; used for click hit tests.
+    #[serde(skip)]
+    origin_y: u16,
 }
 
 impl Default for Transcript {
@@ -173,6 +178,7 @@ impl Transcript {
             heights_width: 0,
             dirty: true,
             thinking: None,
+            origin_y: 0,
         }
     }
 
@@ -184,7 +190,10 @@ impl Transcript {
             match item.kind.as_str() {
                 "user" => self.items.push(Item::User { text: item.content }),
                 "assistant" => self.items.push(Item::Assistant { text: item.content }),
-                "reasoning" => self.items.push(Item::Reasoning { text: item.content }),
+                "reasoning" => self.items.push(Item::Reasoning {
+                    text: item.content,
+                    expanded: false,
+                }),
                 "refusal" => self.items.push(Item::Notice {
                     text: item.content,
                     tone: Tone::Warn,
@@ -313,20 +322,28 @@ impl Transcript {
 
     /// Append reasoning text; merges into the trailing reasoning block.
     pub(crate) fn push_reasoning_text(&mut self, text: &str) {
-        if let Some(Item::Reasoning { text: existing }) = self.items.last_mut() {
+        if let Some(Item::Reasoning { text: existing, .. }) = self.items.last_mut() {
             existing.push_str(text);
             self.dirty = true;
             return;
         }
         self.push(Item::Reasoning {
             text: text.to_string(),
+            expanded: false,
         });
     }
 
     fn item_height(item: &Item, width: usize) -> u16 {
         match item {
-            Item::User { text } | Item::Assistant { text } | Item::Reasoning { text } => {
+            Item::User { text } | Item::Assistant { text } => {
                 u16::try_from(wrap(text, width).len()).unwrap_or(u16::MAX) + BLOCK_GAP
+            }
+            Item::Reasoning { text, expanded } => {
+                if *expanded {
+                    u16::try_from(wrap(text, width).len() + 1).unwrap_or(u16::MAX) + BLOCK_GAP
+                } else {
+                    1 + BLOCK_GAP
+                }
             }
             Item::Tool { .. } | Item::Notice { .. } | Item::Retry { .. } => 2,
             Item::Diff { removed, added } => {
@@ -359,6 +376,25 @@ impl Transcript {
 
     fn max_offset(&self) -> u16 {
         self.content_height.saturating_sub(self.view_height)
+    }
+
+    /// Flip the expansion of the reasoning block at `row`, when that row is one.
+    pub(crate) fn toggle_reasoning_at(&mut self, row: u16) -> bool {
+        self.compute_heights(self.heights_width.max(1));
+        let mut top = 0u16;
+        for (index, height) in self.heights.iter().enumerate() {
+            let end = top.saturating_add(*height);
+            if row >= top && row < end {
+                if let Some(Item::Reasoning { expanded, .. }) = self.items.get_mut(index) {
+                    *expanded = !*expanded;
+                    self.dirty = true;
+                    return true;
+                }
+                return false;
+            }
+            top = end;
+        }
+        false
     }
 
     /// Scroll the stream by `delta` rows; negative scrolls toward the top.
@@ -404,6 +440,7 @@ impl View for Transcript {
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
         let _ = cx.is_focused();
         self.view_height = area.height;
+        self.origin_y = area.y;
         let content = Rect {
             x: area.x + 1,
             width: area.width.saturating_sub(1),
@@ -462,7 +499,9 @@ impl View for Transcript {
                 Item::Notice { text, tone } | Item::Retry { text, tone } => {
                     paint_notice(buf, rect, text, *tone, clip, theme);
                 }
-                Item::Reasoning { text } => paint_reasoning(buf, rect, text, clip, theme),
+                Item::Reasoning { text, expanded } => {
+                    paint_reasoning(buf, rect, text, *expanded, clip, theme);
+                }
             }
         }
 
@@ -528,6 +567,17 @@ impl View for Transcript {
                 MouseEventKind::ScrollDown => {
                     self.scroll(3);
                     Outcome::Consumed
+                }
+                MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                    let row = mouse
+                        .row
+                        .saturating_sub(self.origin_y)
+                        .saturating_add(self.first_visible);
+                    if self.toggle_reasoning_at(row) {
+                        Outcome::Consumed
+                    } else {
+                        Outcome::Ignored
+                    }
                 }
                 _ => Outcome::Ignored,
             },
@@ -727,10 +777,50 @@ fn paint_notice(buf: &mut Buffer, area: Rect, text: &str, tone: Tone, clip: u16,
     );
 }
 
-fn paint_reasoning(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &Theme) {
+fn paint_reasoning(
+    buf: &mut Buffer,
+    area: Rect,
+    text: &str,
+    expanded: bool,
+    clip: u16,
+    theme: &Theme,
+) {
+    if !expanded {
+        if area.y >= clip {
+            return;
+        }
+        let line_count = wrap(text, usize::from(area.width)).len();
+        let first_line: String = text
+            .split_whitespace()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let budget = usize::from(area.width.saturating_sub(2));
+        let label = format!("▸ ◌ thought · {line_count} lines · {first_line}");
+        buf.set_stringn(
+            area.x + 2,
+            area.y,
+            &label,
+            budget,
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::ITALIC),
+        );
+        return;
+    }
+    let header = "▾ ◌ thought";
+    buf.set_stringn(
+        area.x + 2,
+        area.y,
+        header,
+        header.chars().count(),
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::ITALIC),
+    );
     let lines = wrap(text, usize::from(area.width));
     for (row, line) in lines.iter().enumerate() {
-        let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
+        let y = area.y + 1 + u16::try_from(row).unwrap_or(u16::MAX);
         if y >= clip {
             break;
         }
