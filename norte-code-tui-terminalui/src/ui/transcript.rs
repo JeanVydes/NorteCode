@@ -158,6 +158,9 @@ pub(crate) struct Transcript {
     /// The y of the item area, set during render; used for click hit tests.
     #[serde(skip)]
     origin_y: u16,
+    /// Whether the view follows the tail as new content streams in.
+    #[serde(skip)]
+    follow_tail: bool,
     /// The transcript's area; mouse hit-testing is meaningless without it.
     #[serde(skip)]
     area: Rect,
@@ -213,7 +216,17 @@ impl Transcript {
             selection: None,
             painted: Vec::new(),
             painted_copyable: Vec::new(),
+            follow_tail: true,
         }
+    }
+
+    /// Forget everything and pin the view to the bottom.
+    pub(crate) fn clear_all(&mut self) {
+        self.items.clear();
+        self.thinking = None;
+        self.dirty = true;
+        self.first_visible = u16::MAX;
+        self.follow_tail = true;
     }
 
     /// Replace the stream with a history page; scroll pins to the bottom.
@@ -259,13 +272,16 @@ impl Transcript {
         }
         self.dirty = true;
         self.first_visible = u16::MAX;
+        self.follow_tail = true;
     }
 
-    /// Append an item; the view stays pinned to the bottom.
+    /// Append an item; the view stays pinned to the bottom while following the tail.
     pub(crate) fn push(&mut self, item: Item) {
         self.items.push(item);
         self.dirty = true;
-        self.first_visible = u16::MAX;
+        if self.follow_tail {
+            self.first_visible = u16::MAX;
+        }
     }
 
     /// Report a retry; the previous retry line is rewritten in place so a
@@ -406,6 +422,10 @@ impl Transcript {
         self.heights_width = u16::try_from(width).unwrap_or(u16::MAX);
         self.dirty = false;
         let max = self.max_offset();
+        if self.follow_tail {
+            self.first_visible = max;
+            return;
+        }
         if self.first_visible == u16::MAX || self.first_visible > max {
             self.first_visible = max;
         }
@@ -668,6 +688,7 @@ impl Transcript {
         let max = i64::from(self.max_offset());
         let next = i64::from(self.first_visible) + i64::try_from(delta).unwrap_or(0);
         self.first_visible = u16::try_from(next.clamp(0, max)).unwrap_or(u16::MAX);
+        self.follow_tail = self.first_visible >= self.max_offset();
     }
 }
 
@@ -824,6 +845,7 @@ impl View for Transcript {
                     }
                     KeyCode::End => {
                         self.first_visible = self.max_offset();
+                        self.follow_tail = true;
                         Outcome::Consumed
                     }
                     _ => Outcome::Ignored,

@@ -67,6 +67,11 @@ pub(crate) enum ClientEvent {
         /// The words.
         text: String,
     },
+    /// The session's history could not be fetched; carry the reason.
+    HistoryFailed {
+        /// The transport or server error.
+        reason: String,
+    },
 }
 
 /// Commands the interface sends to the connection task.
@@ -315,21 +320,23 @@ async fn connection(
         }
     };
     let _ = events.send(ClientEvent::Sessions(sessions)).await;
-    let mut session = attach_shared(&client, &api, &events, Box::new(fresh)).await;
+    let mut session = attach_shared(&client, &events, Box::new(fresh)).await;
     loop {
         match stream_loop(&client, &api, &mut commands, &events, &session).await {
             StreamOutcome::Retry => return,
             StreamOutcome::Switch(summary) => {
-                session = attach_shared(&client, &api, &events, summary).await;
+                session = attach_shared(&client, &events, summary).await;
             }
         }
     }
 }
 
-/// Send the attachment frames for a session and fill the surrounding views.
+/// Send the attachment frames for a session.
+///
+/// History and views are not filled here: the host refuses them until the
+/// session is actually attached, which only happens once the stream opens.
 async fn attach_shared(
     client: &Arc<RemoteClient>,
-    api: &Arc<RestClient>,
     events: &Sender<ClientEvent>,
     summary: Box<norte_code_wire::SessionSummary>,
 ) -> SessionKey {
@@ -337,18 +344,25 @@ async fn attach_shared(
     let _ = events
         .send(ClientEvent::Attached { session: *summary })
         .await;
-    Box::pin(fetch_history(api, session.as_str(), events)).await;
-    Box::pin(fetch_views(api, session.as_str(), events)).await;
     if let Ok(sessions) = client.list_sessions().await {
         let _ = events.send(ClientEvent::Sessions(sessions)).await;
     }
     session
 }
 
-/// Fetch the session's history; best effort.
+/// Fetch the session's history; best effort, failure is reported.
 async fn fetch_history(api: &Arc<RestClient>, session: &str, events: &Sender<ClientEvent>) {
-    if let Ok(items) = api.history(session).await {
-        let _ = events.send(ClientEvent::History(items)).await;
+    match api.history(session).await {
+        Ok(items) => {
+            let _ = events.send(ClientEvent::History(items)).await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::HistoryFailed {
+                    reason: error.to_string(),
+                })
+                .await;
+        }
     }
 }
 
@@ -381,9 +395,16 @@ async fn stream_loop(
 ) -> StreamOutcome {
     let mut attempt = 0u32;
     let mut announced = false;
+    let mut primed = false;
     loop {
         match client.open_events(session.as_str()).await {
             Ok(mut stream) => {
+                if !primed {
+                    // The host only honours these once the stream is attached.
+                    Box::pin(fetch_history(api, session.as_str(), events)).await;
+                    Box::pin(fetch_views(api, session.as_str(), events)).await;
+                    primed = true;
+                }
                 let opened_at = std::time::Instant::now();
                 match Box::pin(drive_stream(
                     &mut stream,
