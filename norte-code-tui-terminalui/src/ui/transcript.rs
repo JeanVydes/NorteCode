@@ -8,7 +8,7 @@
 use std::any::Any;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEventKind, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEventKind};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -158,6 +158,36 @@ pub(crate) struct Transcript {
     /// The y of the item area, set during render; used for click hit tests.
     #[serde(skip)]
     origin_y: u16,
+    /// The transcript's area; mouse hit-testing is meaningless without it.
+    #[serde(skip)]
+    area: Rect,
+    /// The in-progress text selection.
+    #[serde(skip)]
+    selection: Option<Selection>,
+    /// The painted lines of the last render, one per row.
+    #[serde(skip)]
+    painted: Vec<String>,
+    /// Whether the row's source item may be copied or highlighted.
+    #[serde(skip)]
+    painted_copyable: Vec<bool>,
+}
+
+/// A cell position in transcript coordinates (rows from the transcript's top).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct Pos {
+    /// Row within the transcript.
+    row: u16,
+    /// Column within the transcript.
+    col: u16,
+}
+
+/// The drag-selected range.
+#[derive(Clone, Copy, Debug)]
+struct Selection {
+    /// Where the drag started.
+    anchor: Pos,
+    /// Where the drag currently is.
+    cur: Pos,
 }
 
 impl Default for Transcript {
@@ -179,6 +209,10 @@ impl Transcript {
             dirty: true,
             thinking: None,
             origin_y: 0,
+            area: Rect::new(0, 0, 0, 0),
+            selection: None,
+            painted: Vec::new(),
+            painted_copyable: Vec::new(),
         }
     }
 
@@ -335,7 +369,10 @@ impl Transcript {
 
     fn item_height(item: &Item, width: usize) -> u16 {
         match item {
-            Item::User { text } | Item::Assistant { text } => {
+            Item::User { text }
+            | Item::Assistant { text }
+            | Item::Notice { text, .. }
+            | Item::Retry { text, .. } => {
                 u16::try_from(wrap(text, width).len()).unwrap_or(u16::MAX) + BLOCK_GAP
             }
             Item::Reasoning { text, expanded } => {
@@ -345,7 +382,7 @@ impl Transcript {
                     1 + BLOCK_GAP
                 }
             }
-            Item::Tool { .. } | Item::Notice { .. } | Item::Retry { .. } => 2,
+            Item::Tool { .. } => 2,
             Item::Diff { removed, added } => {
                 u16::try_from(removed.len() + added.len() + 1).unwrap_or(u16::MAX)
             }
@@ -397,6 +434,235 @@ impl Transcript {
         false
     }
 
+    /// Paint the selection over the text cells only.
+    ///
+    /// Rows with no text or with system content stay untouched, and the
+    /// highlight never reaches past the trailing spaces of a line.
+    fn paint_selection(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let Some((start, end)) = Self::ordered_selection(selection) else {
+            return;
+        };
+        for offset in 0..=(end.row - start.row) {
+            let row = start.row + offset;
+            if !self
+                .painted_copyable
+                .get(usize::from(row))
+                .copied()
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let Some(line) = self.painted.get(usize::from(row)) else {
+                continue;
+            };
+            let text_end = line.trim_end_matches(' ').chars().count();
+            if text_end == 0 {
+                continue;
+            }
+            let from = if row == start.row {
+                usize::from(start.col)
+            } else {
+                0
+            };
+            let to = if row == end.row {
+                usize::from(end.col).saturating_add(1).min(text_end)
+            } else {
+                text_end
+            };
+            if from >= to {
+                continue;
+            }
+            let y = area.y + row;
+            for x in from..to {
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(
+                    area.x + u16::try_from(x).unwrap_or(u16::MAX),
+                    y,
+                )) {
+                    cell.set_bg(theme.accent);
+                    cell.set_fg(theme.background);
+                }
+            }
+        }
+    }
+
+    /// Which item produced each visible row, if any.
+    fn row_items(&self) -> Vec<Option<usize>> {
+        let mut map = vec![None; usize::from(self.area.height)];
+        if self.heights.len() != self.items.len() {
+            return map;
+        }
+        let mut top = 0u16;
+        let visible_start = self.first_visible;
+        let visible_end = visible_start.saturating_add(self.area.height);
+        for (index, height) in self.heights.iter().enumerate() {
+            let end = top.saturating_add(*height);
+            let start = top.max(visible_start);
+            let stop = end.min(visible_end);
+            for row in start..stop {
+                map[usize::from(row - visible_start)] = Some(index);
+            }
+            top = end;
+        }
+        map
+    }
+
+    /// Remember the painted lines for clipboard extraction.
+    fn capture_painted(&mut self, area: Rect, buf: &Buffer) {
+        let row_items = self.row_items();
+        self.painted.clear();
+        self.painted_copyable.clear();
+        for y in area.y..area.y + area.height {
+            let row = usize::from(y - area.y);
+            let mut line = String::with_capacity(area.width as usize);
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell(ratatui::layout::Position::new(area.x + x, y)) {
+                    line.push_str(cell.symbol());
+                }
+            }
+            let copyable = row_items.get(row).copied().flatten().is_some_and(|index| {
+                matches!(
+                    self.items.get(index),
+                    Some(
+                        Item::User { .. }
+                            | Item::Assistant { .. }
+                            | Item::Reasoning { .. }
+                            | Item::Tool { .. }
+                            | Item::Diff { .. }
+                            | Item::Shell { .. }
+                    )
+                )
+            });
+            self.painted.push(line);
+            self.painted_copyable.push(copyable);
+        }
+    }
+
+    /// The selected range in row/col, ordered.
+    fn ordered_selection(selection: Selection) -> Option<(Pos, Pos)> {
+        if selection.anchor == selection.cur {
+            return None;
+        }
+        Some(if selection.anchor <= selection.cur {
+            (selection.anchor, selection.cur)
+        } else {
+            (selection.cur, selection.anchor)
+        })
+    }
+
+    /// The selected text, rows joined by newlines.
+    fn selection_text(&self, selection: Selection) -> Option<String> {
+        let (start, end) = Self::ordered_selection(selection)?;
+        let mut out = String::new();
+        for row in start.row..=end.row {
+            if !self
+                .painted_copyable
+                .get(usize::from(row))
+                .copied()
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let Some(line) = self.painted.get(usize::from(row)) else {
+                continue;
+            };
+            let chars: Vec<char> = line.chars().collect();
+            let from = if row == start.row {
+                usize::from(start.col)
+            } else {
+                0
+            };
+            let to = if row == end.row {
+                usize::from(end.col).saturating_add(1).min(chars.len())
+            } else {
+                chars.len()
+            };
+            if from < to {
+                let slice: String = chars[from..to].iter().collect();
+                out.push_str(slice.trim_end());
+            }
+            if row != end.row {
+                out.push('\n');
+            }
+        }
+        if out.trim().is_empty() {
+            return None;
+        }
+        Some(out.trim_matches('\n').to_string())
+    }
+
+    /// Mouse: scroll, select text to copy on release, toggle thoughts.
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Outcome {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let inside = mouse.row >= self.area.y
+            && mouse.row < self.area.y + self.area.height
+            && mouse.column >= self.area.x
+            && mouse.column < self.area.x + self.area.width;
+        let pos = Pos {
+            row: mouse.row.saturating_sub(self.area.y),
+            col: mouse.column.saturating_sub(self.area.x),
+        };
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll(-3);
+                Outcome::Consumed
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll(3);
+                Outcome::Consumed
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !inside {
+                    return Outcome::Ignored;
+                }
+                let row = mouse
+                    .row
+                    .saturating_sub(self.origin_y)
+                    .saturating_add(self.first_visible);
+                let _ = self.toggle_reasoning_at(row);
+                self.selection = Some(Selection {
+                    anchor: pos,
+                    cur: pos,
+                });
+                Outcome::Consumed
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(selection) = &mut self.selection else {
+                    return Outcome::Ignored;
+                };
+                selection.cur = pos;
+                Outcome::Consumed
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(selection) = self.selection.take()
+                    && selection.anchor != selection.cur
+                {
+                    match self.selection_text(selection) {
+                        Some(text) => {
+                            let chars = text.chars().count();
+                            let _ = terminalui::osc52_write(&text);
+                            self.push(Item::Notice {
+                                text: format!("copied {chars} chars to clipboard"),
+                                tone: Tone::Neutral,
+                            });
+                        }
+                        None => {
+                            self.push(Item::Notice {
+                                text: "selection produced no text".to_string(),
+                                tone: Tone::Warn,
+                            });
+                        }
+                    }
+                }
+                Outcome::Consumed
+            }
+            _ => Outcome::Ignored,
+        }
+    }
+
     /// Scroll the stream by `delta` rows; negative scrolls toward the top.
     pub(crate) fn scroll(&mut self, delta: isize) {
         let max = i64::from(self.max_offset());
@@ -441,6 +707,7 @@ impl View for Transcript {
         let _ = cx.is_focused();
         self.view_height = area.height;
         self.origin_y = area.y;
+        self.area = area;
         let content = Rect {
             x: area.x + 1,
             width: area.width.saturating_sub(1),
@@ -521,6 +788,9 @@ impl View for Transcript {
             };
             render_scrollbar(buf, area, &scroll_style, theme, &scroll);
         }
+
+        self.capture_painted(area, buf);
+        self.paint_selection(area, buf, theme);
     }
 
     fn handle_event(&mut self, event: &InputEvent, cx: &mut Context) -> Outcome {
@@ -559,28 +829,7 @@ impl View for Transcript {
                     _ => Outcome::Ignored,
                 }
             }
-            InputEvent::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.scroll(-3);
-                    Outcome::Consumed
-                }
-                MouseEventKind::ScrollDown => {
-                    self.scroll(3);
-                    Outcome::Consumed
-                }
-                MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                    let row = mouse
-                        .row
-                        .saturating_sub(self.origin_y)
-                        .saturating_add(self.first_visible);
-                    if self.toggle_reasoning_at(row) {
-                        Outcome::Consumed
-                    } else {
-                        Outcome::Ignored
-                    }
-                }
-                _ => Outcome::Ignored,
-            },
+            InputEvent::Mouse(mouse) => self.handle_mouse(*mouse),
             _ => Outcome::Ignored,
         }
     }
@@ -758,23 +1007,33 @@ fn paint_diff(
 }
 
 fn paint_notice(buf: &mut Buffer, area: Rect, text: &str, tone: Tone, clip: u16, theme: &Theme) {
-    let y = area.y;
-    if y >= clip {
-        return;
-    }
     let (glyph, color) = match tone {
         Tone::Neutral => ("·", theme.muted),
         Tone::Warn => ("!", theme.warning),
         Tone::Error => ("✗", theme.destructive),
     };
-    let line = format!("{glyph} notice · {text}");
-    buf.set_stringn(
-        area.x + 2,
-        y,
-        &line,
-        line.chars().count(),
-        Style::default().fg(color).add_modifier(Modifier::ITALIC),
-    );
+    let budget = usize::from(area.width.saturating_sub(2));
+    let prefix_len = format!("{glyph} notice · ").chars().count();
+    let text_budget = budget.saturating_sub(prefix_len).max(1);
+    let lines = wrap(text, text_budget);
+    for (row, line) in lines.iter().enumerate() {
+        let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
+        if y >= clip {
+            break;
+        }
+        let rendered = if row == 0 {
+            format!("{glyph} notice · {line}")
+        } else {
+            format!("  {line}")
+        };
+        buf.set_stringn(
+            area.x + 2,
+            y,
+            &rendered,
+            budget,
+            Style::default().fg(color).add_modifier(Modifier::ITALIC),
+        );
+    }
 }
 
 fn paint_reasoning(

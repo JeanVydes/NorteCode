@@ -56,6 +56,97 @@ fn non_reasoning_rows_are_not_toggleable() {
 }
 
 #[test]
+fn selection_extracts_the_painted_cells() {
+    let mut transcript = Transcript::new();
+    transcript.painted = vec!["hello world".to_string(), "second line".to_string()];
+    assert_eq!(
+        transcript
+            .selection_text(super::Selection {
+                anchor: super::Pos { row: 0, col: 0 },
+                cur: super::Pos { row: 1, col: 5 },
+            })
+            .as_deref(),
+        Some("hello world\nsecond")
+    );
+}
+
+#[test]
+fn reversed_selection_extracts_from_the_visual_start() {
+    let mut transcript = Transcript::new();
+    transcript.painted = vec!["hello world".to_string()];
+    assert_eq!(
+        transcript
+            .selection_text(super::Selection {
+                anchor: super::Pos { row: 0, col: 10 },
+                cur: super::Pos { row: 0, col: 6 },
+            })
+            .as_deref(),
+        Some("world")
+    );
+}
+
+#[test]
+fn a_degenerate_selection_copies_nothing() {
+    let mut transcript = Transcript::new();
+    transcript.painted = vec!["line".to_string()];
+    assert_eq!(
+        transcript.selection_text(super::Selection {
+            anchor: super::Pos { row: 0, col: 2 },
+            cur: super::Pos { row: 0, col: 2 },
+        }),
+        None
+    );
+}
+
+#[test]
+fn notice_rows_are_excluded_from_the_selection() {
+    let mut transcript = Transcript::new();
+    transcript.painted = vec![
+        "hello".to_string(),
+        "x notice row".to_string(),
+        "world".to_string(),
+    ];
+    transcript.painted_copyable = vec![true, false, true];
+    assert_eq!(
+        transcript
+            .selection_text(super::Selection {
+                anchor: super::Pos { row: 0, col: 0 },
+                cur: super::Pos { row: 2, col: 4 },
+            })
+            .as_deref(),
+        Some("hello\nworld")
+    );
+}
+
+#[test]
+fn painted_flags_mark_notice_rows_as_not_copyable() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut transcript = Transcript::new();
+    transcript.push(Item::User {
+        text: "hi".to_string(),
+    });
+    transcript.push(Item::Notice {
+        text: "a host notice".to_string(),
+        tone: Tone::Neutral,
+    });
+    transcript.area = Rect::new(0, 0, 20, 6);
+    transcript.first_visible = 0;
+    transcript.view_height = 6;
+    transcript.compute_heights(20);
+    transcript.first_visible = 0;
+    transcript.view_height = 6;
+    let buffer = Buffer::empty(Rect::new(0, 0, 20, 6));
+    transcript.capture_painted(Rect::new(0, 0, 20, 6), &buffer);
+    assert_eq!(transcript.heights, vec![2, 2]);
+    assert_eq!(
+        transcript.painted_copyable,
+        vec![true, true, false, false, false, false]
+    );
+}
+
+#[test]
 fn a_retry_after_other_items_starts_a_new_line() {
     let mut transcript = Transcript::new();
     transcript.push_retry("retry 1 · overloaded".to_string(), Tone::Warn);
