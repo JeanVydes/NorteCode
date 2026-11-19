@@ -1,6 +1,11 @@
 //! Sent-message history: recall, stash and restore.
 
-use super::History;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use terminalui::{Tree, node};
+
+use super::{Composer, History};
+use terminalui::Theme;
 
 #[test]
 fn older_is_none_when_history_is_empty() {
@@ -63,4 +68,20 @@ fn push_resets_an_active_browse() {
     history.push("three");
     assert_eq!(history.browse, None);
     assert_eq!(history.older("x").as_deref(), Some("three"));
+}
+
+#[test]
+fn the_composer_repaints_with_the_current_theme() {
+    let dark = Theme::default();
+    let other = Theme::for_ansi16();
+    let mut tree = Tree::new(node("composer", Composer::new(&dark)));
+    let area = Rect::new(0, 0, 40, 6);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &other);
+    let composer = tree
+        .find_mut::<Composer>("composer")
+        .expect("composer in tree");
+    assert_eq!(composer.input.style.background, Some(other.secondary));
+    assert_eq!(composer.input.style.foreground, Some(other.foreground));
+    assert_eq!(composer.input.style.cursor, Some(other.accent));
 }
