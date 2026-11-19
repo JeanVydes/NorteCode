@@ -15,10 +15,73 @@ use terminalui::components::scroll::ScrollbarStyle;
 
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
+/// Cap on retained sent messages; oldest fall off.
+const MAX_HISTORY: usize = 200;
+
+/// Sent-message history with the unsent draft stashed while browsing.
+#[derive(Default, serde::Serialize)]
+struct History {
+    /// Oldest first.
+    entries: Vec<String>,
+    /// Position into `entries` from the back while browsing; `0` is the
+    /// newest. `None` when the user is not browsing.
+    browse: Option<usize>,
+    /// The text in the composer when browsing began.
+    draft: String,
+}
+
+impl History {
+    /// Retain a sent message; browsing resets.
+    fn push(&mut self, text: &str) {
+        if text.is_empty() || self.entries.last().is_some_and(|last| last == text) {
+            return;
+        }
+        self.entries.push(text.to_owned());
+        if self.entries.len() > MAX_HISTORY {
+            self.entries.remove(0);
+        }
+        self.browse = None;
+        self.draft.clear();
+    }
+
+    /// Recall the next-older message; `draft` is the text being edited.
+    fn older(&mut self, draft: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let offset = match self.browse {
+            None => {
+                self.draft = draft.to_string();
+                0
+            }
+            Some(offset) => {
+                if offset + 1 >= self.entries.len() {
+                    return None;
+                }
+                offset + 1
+            }
+        };
+        self.browse = Some(offset);
+        Some(self.entries[self.entries.len() - 1 - offset].clone())
+    }
+
+    /// Recall the next-newer message, or the stashed draft at the bottom.
+    fn newer(&mut self) -> Option<String> {
+        let offset = self.browse?;
+        if offset == 0 {
+            self.browse = None;
+            return Some(std::mem::take(&mut self.draft));
+        }
+        self.browse = Some(offset - 1);
+        Some(self.entries[self.entries.len() - offset].clone())
+    }
+}
+
 /// The composed composer box; the tree knows it as one node.
 #[derive(Serialize)]
 pub(crate) struct Composer {
     input: Input,
+    history: History,
 }
 
 impl Composer {
@@ -49,6 +112,7 @@ impl Composer {
                 .multiline(true)
                 .with_placeholder("Ask NORTE to do anything...")
                 .with_style(style),
+            history: History::default(),
         }
     }
 
@@ -62,6 +126,72 @@ impl Composer {
         self.input.clear();
     }
 
+    /// Retain a sent message for Up/Down recall.
+    pub(crate) fn push_history(&mut self, text: &str) {
+        self.history.push(text);
+    }
+
+    /// The caret's logical line, `(line, last_line)`.
+    fn caret_line(&self) -> (usize, usize) {
+        let mut line = 0usize;
+        for (index, ch) in self.input.state.value.chars().enumerate() {
+            if index == self.input.state.cursor {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+            }
+        }
+        let last_line = self
+            .input
+            .state
+            .value
+            .chars()
+            .filter(|ch| *ch == '\n')
+            .count();
+        (line, last_line)
+    }
+
+    fn caret_on_first_line(&self) -> bool {
+        self.caret_line().0 == 0
+    }
+
+    fn caret_on_last_line(&self) -> bool {
+        let (line, last_line) = self.caret_line();
+        line == last_line
+    }
+
+    fn recall_older(&mut self) -> bool {
+        if self.input.state.disabled {
+            return false;
+        }
+        if let Some(text) = self.history.older(self.input.value()) {
+            self.input.set_value(text);
+            return true;
+        }
+        false
+    }
+
+    fn recall_newer(&mut self) -> bool {
+        if let Some(text) = self.history.newer() {
+            self.input.set_value(text);
+            return true;
+        }
+        false
+    }
+
+    /// History recall on bare arrows; everything else flows to the input.
+    fn handle_history_key(&mut self, key: &crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+        if key.kind != KeyEventKind::Press || key.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+        match key.code {
+            KeyCode::Up if self.caret_on_first_line() => self.recall_older(),
+            KeyCode::Down if self.caret_on_last_line() => self.recall_newer(),
+            _ => false,
+        }
+    }
     /// Disable or enable editing; used when a page other than Chat is active.
     pub(crate) fn set_disabled(&mut self, disabled: bool) {
         self.input.state.disabled = disabled;
@@ -104,6 +234,11 @@ impl View for Composer {
     }
 
     fn handle_event(&mut self, event: &InputEvent, cx: &mut Context) -> Outcome {
+        if let InputEvent::Key(key) = event
+            && self.handle_history_key(key)
+        {
+            return Outcome::Consumed;
+        }
         self.input.handle_event(event, cx)
     }
 
@@ -111,3 +246,7 @@ impl View for Composer {
         self.input.focusable()
     }
 }
+
+#[cfg(test)]
+#[path = "composer_tests.rs"]
+mod tests;

@@ -94,6 +94,13 @@ pub(crate) enum Item {
         /// How loud the notice is.
         tone: Tone,
     },
+    /// A retry announcement; updates in place so a retry storm is one line.
+    Retry {
+        /// The retry text.
+        text: String,
+        /// How loud the notice is.
+        tone: Tone,
+    },
     /// Reasoning text, muted.
     Reasoning {
         /// The raw text.
@@ -218,6 +225,23 @@ impl Transcript {
         self.first_visible = u16::MAX;
     }
 
+    /// Report a retry; the previous retry line is rewritten in place so a
+    /// failure streak stays one line. A streak separated from an older one
+    /// by other items starts a new line.
+    pub(crate) fn push_retry(&mut self, text: String, tone: Tone) {
+        if let Some(Item::Retry {
+            text: current,
+            tone: current_tone,
+        }) = self.items.last_mut()
+        {
+            *current = text;
+            *current_tone = tone;
+            self.dirty = true;
+            return;
+        }
+        self.push(Item::Retry { text, tone });
+    }
+
     /// Begin the thinking row.
     pub(crate) fn start_thinking(&mut self) {
         if self.thinking.is_none() {
@@ -304,7 +328,7 @@ impl Transcript {
             Item::User { text } | Item::Assistant { text } | Item::Reasoning { text } => {
                 u16::try_from(wrap(text, width).len()).unwrap_or(u16::MAX) + BLOCK_GAP
             }
-            Item::Tool { .. } | Item::Notice { .. } => 2,
+            Item::Tool { .. } | Item::Notice { .. } | Item::Retry { .. } => 2,
             Item::Diff { removed, added } => {
                 u16::try_from(removed.len() + added.len() + 1).unwrap_or(u16::MAX)
             }
@@ -435,7 +459,9 @@ impl View for Transcript {
                     };
                     console.render(shell_rect, buf, cx, theme);
                 }
-                Item::Notice { text, tone } => paint_notice(buf, rect, text, *tone, clip, theme),
+                Item::Notice { text, tone } | Item::Retry { text, tone } => {
+                    paint_notice(buf, rect, text, *tone, clip, theme);
+                }
                 Item::Reasoning { text } => paint_reasoning(buf, rect, text, clip, theme),
             }
         }
@@ -747,3 +773,7 @@ fn paint_thinking(buf: &mut Buffer, area: Rect, elapsed: Duration, theme: &Theme
         );
     }
 }
+
+#[cfg(test)]
+#[path = "transcript_tests.rs"]
+mod tests;
