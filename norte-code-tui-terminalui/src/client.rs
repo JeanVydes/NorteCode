@@ -60,6 +60,8 @@ pub(crate) enum ClientEvent {
         /// What went wrong, in words a person can act on.
         reason: String,
     },
+    /// The full history of the attached session, newest first.
+    History(Vec<norte_code_wire::HistoryItem>),
 }
 
 /// Commands the interface sends to the connection task.
@@ -102,6 +104,11 @@ pub(crate) enum UiCommand {
         question: String,
         /// The answer text.
         answer: String,
+    },
+    /// Attach to an existing session, leaving the current stream behind.
+    OpenSession {
+        /// The session to attach to.
+        session: Box<norte_code_wire::SessionSummary>,
     },
 }
 
@@ -241,19 +248,51 @@ async fn connection(
             return;
         }
     };
-    let session = SessionKey::new(fresh.session_id.clone());
     let _ = events.send(ClientEvent::Sessions(sessions)).await;
+    let mut session = attach_shared(&client, &api, &events, Box::new(fresh)).await;
+    loop {
+        match stream_loop(&client, &api, &mut commands, &events, &session).await {
+            StreamOutcome::Detached | StreamOutcome::Retry => return,
+            StreamOutcome::Switch(summary) => {
+                session = attach_shared(&client, &api, &events, summary).await;
+            }
+        }
+    }
+}
+
+/// Send the attachment frames for a session and fill the surrounding views.
+async fn attach_shared(
+    client: &Arc<RemoteClient>,
+    api: &Arc<RestClient>,
+    events: &Sender<ClientEvent>,
+    summary: Box<norte_code_wire::SessionSummary>,
+) -> SessionKey {
+    let session = SessionKey::new(summary.session_id.clone());
     let _ = events
-        .send(ClientEvent::Attached {
-            session: fresh.clone(),
-        })
+        .send(ClientEvent::Attached { session: *summary })
         .await;
-    // The views are filled from the same REST calls the service serves.
-    Box::pin(fetch_views(&api, session.as_str(), &events)).await;
+    Box::pin(fetch_history(api, session.as_str(), events)).await;
+    Box::pin(fetch_views(api, session.as_str(), events)).await;
     if let Ok(sessions) = client.list_sessions().await {
         let _ = events.send(ClientEvent::Sessions(sessions)).await;
     }
-    Box::pin(stream_loop(&client, &api, &mut commands, &events, &session)).await;
+    session
+}
+
+/// Fetch the session's history; best effort.
+async fn fetch_history(api: &Arc<RestClient>, session: &str, events: &Sender<ClientEvent>) {
+    if let Ok(items) = api.history(session).await {
+        let _ = events.send(ClientEvent::History(items)).await;
+    }
+}
+
+enum StreamOutcome {
+    /// The stream closed; the caller should re-open it.
+    Retry,
+    /// The user asked another session.
+    Switch(Box<norte_code_wire::SessionSummary>),
+    /// The stream cannot be recovered; the interface reports the detach.
+    Detached,
 }
 
 /// Owns the session's event stream; driven by both the stream and commands.
@@ -263,12 +302,12 @@ async fn stream_loop(
     commands: &mut Receiver<UiCommand>,
     events: &Sender<ClientEvent>,
     session: &SessionKey,
-) {
+) -> StreamOutcome {
     let mut attempt = 0u32;
     loop {
         match client.open_events(session.as_str()).await {
             Ok(mut stream) => {
-                let finished = Box::pin(drive_stream(
+                match Box::pin(drive_stream(
                     &mut stream,
                     commands,
                     events,
@@ -276,9 +315,10 @@ async fn stream_loop(
                     api,
                     session,
                 ))
-                .await;
-                if finished {
-                    return;
+                .await
+                {
+                    StreamOutcome::Switch(summary) => return StreamOutcome::Switch(summary),
+                    StreamOutcome::Retry | StreamOutcome::Detached => {}
                 }
                 attempt = attempt.saturating_add(1);
             }
@@ -290,7 +330,7 @@ async fn stream_loop(
                             reason: format!("could not subscribe to the stream: {error}"),
                         })
                         .await;
-                    return;
+                    return StreamOutcome::Detached;
                 }
             }
         }
@@ -300,14 +340,13 @@ async fn stream_loop(
                     reason: "the stream keeps closing; check the raep server".into(),
                 })
                 .await;
-            return;
+            return StreamOutcome::Detached;
         }
         tokio::time::sleep(Duration::from_millis(RETRY_BASE_MS * (1 << attempt.min(4)))).await;
     }
 }
 
-/// Pump events from the stream while dispatching commands; returns `true`
-/// when the caller should stop (the turn completed and the stream closed).
+/// Pump events from the stream while dispatching commands.
 async fn drive_stream(
     stream: &mut EventStream,
     commands: &mut Receiver<UiCommand>,
@@ -315,11 +354,14 @@ async fn drive_stream(
     client: &Arc<RemoteClient>,
     api: &Arc<RestClient>,
     session: &SessionKey,
-) -> bool {
+) -> StreamOutcome {
     loop {
         tokio::select! {
             Some(command) = commands.recv() => {
                 match command {
+                    UiCommand::OpenSession { session: summary } => {
+                        return StreamOutcome::Switch(summary);
+                    }
                     UiCommand::Send { session: target, text, queue_mode } => {
                         let _ = api
                             .send_prompt(
@@ -393,7 +435,7 @@ async fn drive_stream(
                     Some(event) => {
                         let _ = events.send(ClientEvent::Server(Box::new(event))).await;
                     }
-                    None => return false,
+                    None => return StreamOutcome::Retry,
                 }
             }
         }

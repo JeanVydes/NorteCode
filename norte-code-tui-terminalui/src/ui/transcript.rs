@@ -184,7 +184,13 @@ impl Transcript {
                 }),
                 "system_event" | "tool" | "tool_call" | "tool_result" => {
                     let call_id = item.id.clone();
-                    let summary = item.content.lines().next().unwrap_or("tool").trim().to_owned();
+                    let summary = item
+                        .content
+                        .lines()
+                        .next()
+                        .unwrap_or("tool")
+                        .trim()
+                        .to_owned();
                     self.items.push(Item::Tool {
                         call_id,
                         name: if summary.len() > 40 {

@@ -5,6 +5,7 @@
 //! then restores everything on drop.
 
 use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::{
     event::{
@@ -19,6 +20,54 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 pub(crate) struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     active: bool,
+}
+
+/// Set by the signal watcher; the run loop polls it to leave cleanly.
+pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Spawn a thread that flips [`SHUTDOWN`] when the terminal dies.
+///
+/// A TUI that is killed by the terminal closing (SIGHUP) or by something
+/// external (SIGTERM, SIGINT) would otherwise leave the terminal in raw mode
+/// with the kitty keyboard flags on, and every later keystroke arrives as
+/// escape noise.
+pub(crate) fn watch_exit_signals() {
+    std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        runtime.block_on(async {
+            let Ok(mut interrupt) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            else {
+                return;
+            };
+            let Ok(mut terminate) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            else {
+                return;
+            };
+            let Ok(mut hangup) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            else {
+                return;
+            };
+            let Ok(mut quit) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())
+            else {
+                return;
+            };
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+                _ = hangup.recv() => {}
+                _ = quit.recv() => {}
+            }
+            SHUTDOWN.store(true, Ordering::Relaxed);
+        });
+    });
 }
 
 impl TerminalSession {
