@@ -7,6 +7,7 @@ mod focus_tests;
 mod header;
 mod inspector;
 mod key_prompt;
+mod models_page;
 mod pages;
 mod question_prompt;
 mod rail;
@@ -19,7 +20,8 @@ use terminalui::Pane;
 pub(crate) use composer::Composer;
 pub(crate) use header::Header;
 pub(crate) use inspector::Inspector;
-pub(crate) use key_prompt::{KeyPrompt, provider_has_key};
+pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
+pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
 pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::Rail;
 pub(crate) use selector::Selector;
@@ -69,7 +71,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
         Pane::new(vec![
             chat,
             node("sessions", pages::session(model)),
-            node("models", pages::models(model)),
+            node("models", models_page::ModelsPage::new()),
             node("plans", pages::plans(model)),
             node("jobs", pages::jobs(model)),
             node("telemetry", pages::telemetry(model)),
@@ -124,7 +126,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
                         .right(vec![
                             node(
                                 "hint",
-                                Text::new("⏎ send · ⇧⏎ newline")
+                                Text::new("alt+1-9 tabs · ⏎ send · ⇧⏎ newline")
                                     .with_style(TextStyle::default().fg(theme.muted)),
                             ),
                             node(
@@ -189,14 +191,37 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     }
 }
 
+fn update_models(tree: &mut Tree, model: &UiModel) {
+    let mut key_status = std::collections::HashMap::new();
+    if let Some(catalog) = model.catalog.as_ref() {
+        for provider in &catalog.providers {
+            key_status.insert(
+                provider.provider_id.clone(),
+                key_prompt::provider_has_key(&provider.provider_id, &provider.environment_keys),
+            );
+        }
+    }
+    let active = model.active_model.as_ref().map(|agent| {
+        (
+            model.active_provider.clone().unwrap_or_default(),
+            agent.id.clone(),
+        )
+    });
+    if let Some(page) = tree.find_mut::<models_page::ModelsPage>("models") {
+        page.set_data(ModelsData {
+            models: model.models.clone(),
+            key_status,
+            active,
+        });
+    }
+}
+
 /// Refresh the inspectors from the latest model snapshot; called after data arrives.
 pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("sessions") {
         *inspector = pages::session(model);
     }
-    if let Some(inspector) = tree.find_mut::<inspector::Inspector>("models") {
-        *inspector = pages::models(model);
-    }
+    update_models(tree, model);
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("plans") {
         *inspector = pages::plans(model);
     }

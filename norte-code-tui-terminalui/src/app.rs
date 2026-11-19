@@ -199,14 +199,16 @@ fn handle_key(
                 pass_to_tree = false;
             }
         }
-        (KeyModifiers::ALT, KeyCode::Char(digit)) => {
+        (KeyModifiers::CONTROL | KeyModifiers::ALT, KeyCode::Char(digit)) => {
             if let Some(tab) = Tab::from_digit(digit) {
                 model.tab = tab;
                 ui::sync_views(tree, model);
                 pass_to_tree = false;
             }
         }
-        (KeyModifiers::NONE, KeyCode::Char(digit)) if model.tab != Tab::Chat => {
+        (KeyModifiers::NONE, KeyCode::Char(digit))
+            if model.tab != Tab::Chat && model.tab != Tab::Models =>
+        {
             if let Some(tab) = Tab::from_digit(digit) {
                 model.tab = tab;
                 ui::sync_views(tree, model);
@@ -220,6 +222,7 @@ fn handle_key(
         let _ = tree.handle_event(&input);
     }
     drain_question_answer(tree, commands, model);
+    drain_models_actions(tree, commands, model);
     sync_selectors(tree, commands, model);
     drain_tab_request(tree, model);
     ui::sync_views(tree, model);
@@ -353,10 +356,8 @@ fn handle_enter(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) {
-    match model.tab {
-        Tab::Models => handle_models_enter(tree, commands, model),
-        Tab::Sessions => handle_sessions_enter(tree, commands, model),
-        _ => {}
+    if model.tab == Tab::Sessions {
+        handle_sessions_enter(tree, commands, model);
     }
 }
 
@@ -374,56 +375,124 @@ fn handle_sessions_enter(
     let Some(commands) = commands.as_ref() else {
         return;
     };
-    let _ = commands.try_send(UiCommand::OpenSession { session: Box::new(summary) });
+    let _ = commands.try_send(UiCommand::OpenSession {
+        session: Box::new(summary),
+    });
     model.tab = Tab::Chat;
     ui::sync_views(tree, model);
 }
 
-fn handle_models_enter(
+fn key_intent_for(provider: String, model_id: Option<String>) -> crate::ui::KeyIntent {
+    match model_id {
+        Some(model) => crate::ui::KeyIntent::SwitchModel { provider, model },
+        None => crate::ui::KeyIntent::Expand { provider },
+    }
+}
+
+/// Set the attached session's model and tell the reader about it.
+fn set_model(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &UiModel,
+    provider: &str,
+    model_id: &str,
+) {
+    if let (Some(commands), Some(session)) = (commands.as_ref(), model.active.clone()) {
+        let _ = commands.try_send(UiCommand::SetModel {
+            session,
+            provider: provider.to_owned(),
+            model: model_id.to_owned(),
+        });
+    }
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.push(ui::Item::Notice {
+            text: format!("model set · {provider} · {model_id}"),
+            tone: ui::Tone::Neutral,
+        });
+    }
+}
+
+/// The environment keys the provider names in the catalogue.
+fn env_keys(model: &UiModel, provider: &str) -> Vec<String> {
+    model
+        .catalog
+        .as_ref()
+        .and_then(|catalog| {
+            catalog
+                .providers
+                .iter()
+                .find(|p| p.provider_id == provider)
+                .map(|p| p.environment_keys.clone())
+        })
+        .unwrap_or_default()
+}
+
+/// Ask for the provider's key, remembering what to do once saved.
+fn open_key_prompt(
+    tree: &mut terminalui::Tree,
+    provider: &str,
+    model_id: Option<String>,
+    env_keys: Vec<String>,
+) {
+    if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt") {
+        prompt.open_with_intent(
+            provider.to_owned(),
+            env_keys,
+            key_intent_for(provider.to_owned(), model_id),
+        );
+    }
+}
+
+/// Drain the models page's pending actions into the client.
+fn drain_models_actions(
     tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) {
-    let index = tree
-        .find::<Inspector>("models")
-        .and_then(Inspector::selected);
-    let Some(index) = index else { return };
-    let Some(model_info) = model.models.get(index) else {
+    let Some(page) = tree.find_mut::<ui::ModelsPage>("models") else {
         return;
     };
-    let provider_id = model_info.provider.clone();
-    let model_id = model_info.model.clone();
-
-    // Does this provider need a key, and is one already on disk/in the environment?
-    let provider_row = model.catalog.as_ref().and_then(|catalog| {
-        catalog
-            .providers
-            .iter()
-            .find(|p| p.provider_id == provider_id)
-    });
-    let env_keys = provider_row
-        .map(|provider| provider.environment_keys.clone())
-        .unwrap_or_default();
-
-    if ui::provider_has_key(&provider_id, &env_keys) {
-        // Key exists: switch this session to the model.
-        if let (Some(commands), Some(session)) = (commands.as_ref(), model.active.clone()) {
-            let _ = commands.try_send(UiCommand::SetModel {
-                session,
-                provider: provider_id.clone(),
-                model: model_id.clone(),
-            });
+    for action in page.take_pending() {
+        match action {
+            ui::ModelsAction::SetModel {
+                provider,
+                model: model_id,
+            } => {
+                set_model(tree, commands, model, &provider, &model_id);
+            }
+            ui::ModelsAction::AskKeyForModel {
+                provider,
+                model: model_id,
+            } => {
+                let keys = env_keys(model, &provider);
+                open_key_prompt(tree, &provider, Some(model_id), keys);
+            }
+            ui::ModelsAction::AskKeyForExpand { provider } => {
+                let keys = env_keys(model, &provider);
+                open_key_prompt(tree, &provider, None, keys);
+            }
+            ui::ModelsAction::ToggleExpand { provider } => {
+                if let Some(page) = tree.find_mut::<ui::ModelsPage>("models") {
+                    page.toggle_expansion(&provider);
+                }
+            }
         }
-        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-            stream.push(ui::Item::Notice {
-                text: format!("model set · {provider_id} · {model_id}"),
-                tone: ui::Tone::Neutral,
-            });
-        }
-    } else {
-        // No key: open the masked prompt so the user can save one.
-        if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt") {
-            prompt.open(provider_id.clone(), env_keys);
+    }
+    if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt") {
+        if let Some(intent) = prompt.take_saved() {
+            match intent {
+                crate::ui::KeyIntent::SwitchModel {
+                    provider,
+                    model: model_id,
+                } => {
+                    set_model(tree, commands, model, &provider, &model_id);
+                }
+                crate::ui::KeyIntent::Expand { provider } => {
+                    if let Some(page) = tree.find_mut::<ui::ModelsPage>("models") {
+                        page.expand(&provider);
+                    }
+                }
+            }
         }
     }
 }

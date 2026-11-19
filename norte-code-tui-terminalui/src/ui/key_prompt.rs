@@ -39,6 +39,23 @@ struct KeyPromptState {
     environment_keys: Vec<String>,
 }
 
+/// What to do after the key is saved.
+#[derive(Clone, Debug)]
+pub(crate) enum KeyIntent {
+    /// Save the key, then switch the session to this model.
+    SwitchModel {
+        /// The provider the model belongs to.
+        provider: String,
+        /// The model id.
+        model: String,
+    },
+    /// Save the key, then expand the provider's models.
+    Expand {
+        /// The provider to expand.
+        provider: String,
+    },
+}
+
 /// A full-area scrim with a centered masked field; used when a provider the
 /// user picked has no key.
 #[derive(Default, Serialize)]
@@ -47,6 +64,12 @@ pub(crate) struct KeyPrompt {
     buffer: String,
     /// The last save attempt's error, shown until the prompt closes.
     error: Option<String>,
+    /// The intent that armed this prompt, cleared when saved.
+    #[serde(skip)]
+    intent: Option<KeyIntent>,
+    /// The intent satisfied by the last save, waiting for the app.
+    #[serde(skip)]
+    saved: Option<KeyIntent>,
 }
 
 impl KeyPrompt {
@@ -56,6 +79,8 @@ impl KeyPrompt {
             state: KeyPromptState::default(),
             buffer: String::new(),
             error: None,
+            intent: None,
+            saved: None,
         }
     }
 
@@ -67,6 +92,24 @@ impl KeyPrompt {
         };
         self.buffer.clear();
         self.error = None;
+        self.intent = None;
+    }
+
+    /// Open the prompt armed with `intent`; the intent is drained after the
+    /// key is saved.
+    pub(crate) fn open_with_intent(
+        &mut self,
+        provider_id: impl Into<String>,
+        environment_keys: Vec<String>,
+        intent: KeyIntent,
+    ) {
+        self.open(provider_id, environment_keys);
+        self.intent = Some(intent);
+    }
+
+    /// Take the saved intent, when the key was just saved.
+    pub(crate) fn take_saved(&mut self) -> Option<KeyIntent> {
+        self.saved.take()
     }
 
     /// Whether the prompt is collecting input.
@@ -79,11 +122,12 @@ impl KeyPrompt {
         self.state.provider.as_deref()
     }
 
-    /// Close the prompt; buffers are cleared.
+    /// Close the prompt; buffers and the pending intent are cleared.
     pub(crate) fn close(&mut self) {
         self.state = KeyPromptState::default();
         self.buffer.clear();
         self.error = None;
+        self.intent = None;
     }
 
     fn masked_visual(&self) -> String {
@@ -102,7 +146,10 @@ impl KeyPrompt {
             return Err("no secrets path".to_string());
         };
         save_secret(&path, &provider, &self.buffer)
-            .map(|()| self.close())
+            .map(|()| {
+                self.saved = self.intent.take();
+                self.close();
+            })
             .map_err(|error| format!("{error}"))
     }
 }
@@ -249,9 +296,8 @@ impl View for KeyPrompt {
                         Outcome::Consumed
                     }
                     (KeyModifiers::NONE, KeyCode::Enter) => {
-                        match self.save() {
-                            Ok(()) => {}
-                            Err(error) => self.error = Some(error),
+                        if let Err(error) = self.save() {
+                            self.error = Some(error);
                         }
                         Outcome::Consumed
                     }
