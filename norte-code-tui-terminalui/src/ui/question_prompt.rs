@@ -331,11 +331,11 @@ impl View for QuestionPrompt {
         let prompt_max = 4usize;
         let mut prompt_lines: Vec<String> =
             full_prompt_lines.iter().take(prompt_max).cloned().collect();
-        if full_prompt_lines.len() > prompt_max {
-            if let Some(last) = prompt_lines.last_mut() {
-                last.truncate(last.len().saturating_sub(1));
-                last.push('…');
-            }
+        if full_prompt_lines.len() > prompt_max
+            && let Some(last) = prompt_lines.last_mut()
+        {
+            last.truncate(last.len().saturating_sub(1));
+            last.push('…');
         }
         let options_lines = self.visible_rows().len();
         let answer_rows = if self.mode == InputMode::Answer { 2 } else { 0 };
