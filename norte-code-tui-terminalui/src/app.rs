@@ -333,6 +333,9 @@ fn send_current_prompt(
         });
         stream.start_thinking();
     }
+    if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
+        composer.push_history(&prompt);
+    }
     if let Some(commands) = commands.as_ref() {
         let queue_mode = match model.preferences.send_mode {
             crate::ui_model::SendMode::Steer => "steer",
@@ -779,9 +782,17 @@ fn fold_error_event(
         ),
         ServerEventKind::RetryScheduled {
             attempt, reason, ..
-        } => notice(tree, format!("retry {attempt} · {reason}"), ui::Tone::Warn),
+        } => {
+            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                stream.push_retry(format!("retry {attempt} · {reason}"), ui::Tone::Warn);
+            }
+            true
+        }
         ServerEventKind::RetryStarted { attempt, .. } => {
-            notice(tree, format!("retry {attempt} running"), ui::Tone::Neutral)
+            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                stream.push_retry(format!("retry {attempt} running"), ui::Tone::Neutral);
+            }
+            true
         }
         ServerEventKind::ReasoningDowngraded { from, to, reason } => notice(
             tree,
