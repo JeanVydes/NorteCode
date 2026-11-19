@@ -1,5 +1,5 @@
 //! The client configuration: the `norte-code` cli.json, reduced to what the
-//! interface needs to attach to the raep.
+//! interface needs to attach to the raep and paint itself.
 
 use std::{
     fs, io,
@@ -8,6 +8,8 @@ use std::{
 
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::theme::CustomThemeConfig;
 
 const CONFIG_FILE: &str = "cli.json";
 
@@ -46,6 +48,17 @@ pub(crate) struct ServiceConfig {
     pub(crate) token: Option<String>,
 }
 
+/// The interface configuration, under the `ui` key.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct UiConfig {
+    /// Name of the active theme, built-in or configured.
+    #[serde(default)]
+    pub(crate) theme: Option<String>,
+    /// Extra themes, in cycle order.
+    #[serde(default)]
+    pub(crate) themes: Vec<CustomThemeConfig>,
+}
+
 /// The client configuration.
 #[derive(Clone, Deserialize)]
 pub(crate) struct ClientConfig {
@@ -54,6 +67,9 @@ pub(crate) struct ClientConfig {
     /// The agent id to attach to; `norte-code` by default.
     #[serde(default = "default_agent")]
     pub(crate) agent_id: String,
+    /// Theme selection and custom themes.
+    #[serde(default)]
+    pub(crate) ui: UiConfig,
 }
 
 fn default_agent() -> String {
@@ -79,6 +95,7 @@ impl ClientConfig {
                     token: None,
                 },
                 agent_id: default_agent(),
+                ui: UiConfig::default(),
             });
         }
         let raw = fs::read_to_string(&path).map_err(|source| ConfigError::Io {

@@ -1,18 +1,17 @@
-//! Norte themes, all built on a vivid magenta primary.
+//! Theme selection: the built-ins plus themes declared in the UI config.
 //!
-//! The four built-in themes cover the four common preferences: a dark
-//! default, a blinding white, a warm bone pastel, and a true OLED black.
-//! Everything else in the interface derives from `terminalui::Theme`.
+//! A theme names a palette. Built-ins have fixed palettes; configured themes
+//! overlay their colors on a built-in base. Nothing here paints: the
+//! resolved `Palette` becomes the library's render theme.
 
-use ratatui::style::Color;
+use serde::Deserialize;
 use terminalui::Theme;
 
-const MAGENTA: Color = Color::Rgb(255, 47, 179);
-const MAGENTA_ON_LIGHT: Color = Color::Rgb(210, 20, 180);
-const MAGENTA_ON_BONE: Color = Color::Rgb(204, 51, 153);
+use crate::palette::{Palette, PaletteConfig};
 
 /// Which built-in theme is active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum ThemeKind {
     /// Dark background, the default.
     Dark,
@@ -44,66 +43,157 @@ impl ThemeKind {
             Self::Amoled => Self::Dark,
         }
     }
-}
 
-/// The `Theme` for one of the built-in variants.
-pub fn theme(kind: ThemeKind) -> Theme {
-    match kind {
-        ThemeKind::Dark => Theme {
-            background: Color::Rgb(22, 24, 29),
-            foreground: Color::Rgb(224, 227, 235),
-            primary: MAGENTA,
-            secondary: Color::Rgb(30, 33, 40),
-            muted: Color::Rgb(138, 145, 160),
-            accent: MAGENTA,
-            destructive: Color::Rgb(232, 108, 122),
-            success: Color::Rgb(126, 200, 154),
-            warning: Color::Rgb(230, 180, 105),
-            border: Color::Rgb(58, 62, 74),
-            ring: MAGENTA,
-            border_set: Color::Rgb(58, 62, 74),
-        },
-        ThemeKind::Cegador => Theme {
-            background: Color::Rgb(255, 255, 255),
-            foreground: Color::Rgb(14, 14, 14),
-            primary: MAGENTA_ON_LIGHT,
-            secondary: Color::Rgb(240, 240, 243),
-            muted: Color::Rgb(105, 105, 112),
-            accent: MAGENTA_ON_LIGHT,
-            destructive: Color::Rgb(214, 40, 60),
-            success: Color::Rgb(0, 140, 70),
-            warning: Color::Rgb(190, 110, 0),
-            border: Color::Rgb(220, 220, 226),
-            ring: MAGENTA_ON_LIGHT,
-            border_set: Color::Rgb(220, 220, 226),
-        },
-        ThemeKind::PastelHueso => Theme {
-            background: Color::Rgb(247, 241, 231),
-            foreground: Color::Rgb(66, 57, 48),
-            primary: MAGENTA_ON_BONE,
-            secondary: Color::Rgb(235, 228, 217),
-            muted: Color::Rgb(145, 133, 120),
-            accent: MAGENTA_ON_BONE,
-            destructive: Color::Rgb(205, 95, 100),
-            success: Color::Rgb(92, 152, 108),
-            warning: Color::Rgb(188, 140, 64),
-            border: Color::Rgb(222, 212, 197),
-            ring: MAGENTA_ON_BONE,
-            border_set: Color::Rgb(222, 212, 197),
-        },
-        ThemeKind::Amoled => Theme {
-            background: Color::Rgb(0, 0, 0),
-            foreground: Color::Rgb(245, 245, 245),
-            primary: MAGENTA,
-            secondary: Color::Rgb(14, 14, 14),
-            muted: Color::Rgb(158, 158, 158),
-            accent: MAGENTA,
-            destructive: Color::Rgb(232, 108, 122),
-            success: Color::Rgb(126, 200, 154),
-            warning: Color::Rgb(230, 180, 105),
-            border: Color::Rgb(42, 42, 42),
-            ring: MAGENTA,
-            border_set: Color::Rgb(42, 42, 42),
-        },
+    fn palette(self) -> Palette {
+        match self {
+            Self::Dark => Palette::dark(),
+            Self::Cegador => Palette::cegador(),
+            Self::PastelHueso => Palette::pastel_hueso(),
+            Self::Amoled => Palette::amoled(),
+        }
     }
 }
+
+/// A configured theme: a name and color overrides on a built-in base.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct CustomThemeConfig {
+    /// The name the status chrome shows and `ui.theme` selects.
+    pub name: String,
+    /// Which built-in palette to start from; `dark` by default.
+    #[serde(default, deserialize_with = "deserialize_base")]
+    pub base: Option<ThemeKind>,
+    /// Color overrides; missing roles keep the base color.
+    #[serde(default)]
+    pub palette: PaletteConfig,
+}
+
+/// A configured theme with its palette.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomTheme {
+    /// The name the status chrome shows.
+    pub name: String,
+    /// The palette this theme resolves to.
+    pub palette: Palette,
+}
+
+impl CustomTheme {
+    /// Resolve the configured colors over the base palette.
+    pub fn from_config(config: CustomThemeConfig) -> Self {
+        let base = config.base.unwrap_or(ThemeKind::Dark);
+        Self {
+            name: config.name,
+            palette: Palette::from_config(config.palette, &base.palette()),
+        }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        self.name.eq_ignore_ascii_case(name)
+            || self.name.replace(' ', "_").eq_ignore_ascii_case(name)
+    }
+}
+
+/// Every theme the interface can paint with.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ThemeCatalog {
+    /// Themes declared in the UI config, in cycle order.
+    pub custom: Vec<CustomTheme>,
+}
+
+impl ThemeCatalog {
+    /// Select a theme by name; built-ins keep their names.
+    pub fn choose(&self, name: Option<&str>) -> ThemeChoice {
+        let Some(name) = name else {
+            return ThemeChoice::BuiltIn(ThemeKind::Dark);
+        };
+        for kind in [
+            ThemeKind::Dark,
+            ThemeKind::Cegador,
+            ThemeKind::PastelHueso,
+            ThemeKind::Amoled,
+        ] {
+            if kind.name().eq_ignore_ascii_case(name)
+                || kind.name().replace(' ', "_").eq_ignore_ascii_case(name)
+            {
+                return ThemeChoice::BuiltIn(kind);
+            }
+        }
+        if let Some(theme) = self.custom.iter().find(|theme| theme.matches(name)) {
+            return ThemeChoice::Custom(theme.name.clone());
+        }
+        ThemeChoice::BuiltIn(ThemeKind::Dark)
+    }
+
+    /// The next theme in cycle order: built-ins first, then configured ones.
+    pub fn next(&self, choice: &ThemeChoice) -> ThemeChoice {
+        match choice {
+            ThemeChoice::BuiltIn(kind) => {
+                let next = kind.next();
+                if next == ThemeKind::Dark && !self.custom.is_empty() {
+                    return ThemeChoice::Custom(self.custom[0].name.clone());
+                }
+                ThemeChoice::BuiltIn(next)
+            }
+            ThemeChoice::Custom(name) => {
+                let position = self.custom.iter().position(|theme| &theme.name == name);
+                match position {
+                    Some(index) if index + 1 < self.custom.len() => {
+                        ThemeChoice::Custom(self.custom[index + 1].name.clone())
+                    }
+                    _ => ThemeChoice::BuiltIn(ThemeKind::Dark),
+                }
+            }
+        }
+    }
+
+    /// Resolve a selection to the palette the interface paints with.
+    pub fn palette(&self, choice: &ThemeChoice) -> Palette {
+        match choice {
+            ThemeChoice::BuiltIn(kind) => kind.palette(),
+            ThemeChoice::Custom(name) => self
+                .custom
+                .iter()
+                .find(|theme| &theme.name == name)
+                .map_or_else(|| ThemeKind::Dark.palette(), |theme| theme.palette.clone()),
+        }
+    }
+
+    /// Resolve a selection to the library's render theme.
+    pub fn theme(&self, choice: &ThemeChoice) -> Theme {
+        self.palette(choice).into()
+    }
+}
+
+/// The name shown in the status chrome.
+pub fn theme_name(choice: &ThemeChoice) -> &str {
+    match choice {
+        ThemeChoice::BuiltIn(kind) => kind.name(),
+        ThemeChoice::Custom(name) => name,
+    }
+}
+
+/// A built-in theme or one declared in the UI config.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThemeChoice {
+    /// One of the four built-ins.
+    BuiltIn(ThemeKind),
+    /// A theme declared by the user.
+    Custom(String),
+}
+
+fn deserialize_base<'de, D>(deserializer: D) -> Result<Option<ThemeKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = Option::<String>::deserialize(deserializer)?;
+    Ok(name.and_then(|name| match name.as_str() {
+        "dark" => Some(ThemeKind::Dark),
+        "cegador" => Some(ThemeKind::Cegador),
+        "pastel_hueso" | "pastel hueso" => Some(ThemeKind::PastelHueso),
+        "amoled" => Some(ThemeKind::Amoled),
+        _ => None,
+    }))
+}
+
+#[cfg(test)]
+#[path = "theme_tests.rs"]
+mod tests;

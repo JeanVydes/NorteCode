@@ -13,7 +13,7 @@ use ratatui::style::Style;
 use crate::client::{ClientEvent, UiCommand, start};
 use crate::config::ClientConfig;
 use crate::terminal::TerminalSession;
-use crate::theme;
+use crate::theme::{CustomTheme, ThemeCatalog};
 use crate::ui;
 use crate::ui_model::{SessionAttachmentState, Tab, TurnState, UiModel};
 
@@ -34,6 +34,16 @@ pub(super) fn run() -> io::Result<()> {
     let mut commands = None;
     let mut events = match ClientConfig::load() {
         Ok(loaded) => {
+            model.preferences.catalog = ThemeCatalog {
+                custom: loaded
+                    .ui
+                    .themes
+                    .iter()
+                    .cloned()
+                    .map(CustomTheme::from_config)
+                    .collect(),
+            };
+            model.preferences.theme = model.preferences.catalog.choose(loaded.ui.theme.as_deref());
             let (commands_us, events_rx) = start(loaded.clone());
             config = Some(loaded);
             commands = Some(commands_us);
@@ -65,7 +75,7 @@ pub(super) fn run() -> io::Result<()> {
         }
         sync_chrome(&mut tree, &model);
 
-        let theme = theme::theme(model.preferences.theme);
+        let theme = model.preferences.catalog.theme(&model.preferences.theme);
         session.terminal().draw(|frame| {
             let area = frame.area();
             frame
@@ -181,7 +191,8 @@ fn handle_key(
             pass_to_tree = false;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-            model.preferences.theme = model.preferences.theme.next();
+            let choice = model.preferences.theme.clone();
+            model.preferences.theme = model.preferences.catalog.next(&choice);
             pass_to_tree = false;
         }
         (KeyModifiers::NONE | KeyModifiers::CONTROL, KeyCode::Enter) => {
@@ -1160,7 +1171,7 @@ fn fold_delta(delta: &norte_code_wire::Delta, tree: &mut terminalui::Tree, model
 fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
     if let Some(header) = tree.find_mut::<ui::Header>("header") {
         header.turn = model.turn;
-        header.theme_name = model.preferences.theme.name().to_string();
+        header.theme_name = crate::theme::theme_name(&model.preferences.theme).to_string();
         header.tab = model.tab;
     }
     if let Some(rail) = tree.find_mut::<ui::Rail>("rail") {
