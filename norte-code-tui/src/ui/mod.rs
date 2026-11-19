@@ -22,6 +22,7 @@ mod rail;
 mod rail_tests;
 mod selector;
 mod sessions_page;
+mod telemetry_page;
 mod transcript;
 
 use ratatui::layout::Constraint;
@@ -39,6 +40,7 @@ pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::{Rail, RailPosition};
 pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
+pub(crate) use telemetry_page::TelemetryPage;
 pub(crate) use transcript::{Item, Tone, ToolState, Transcript};
 
 use crate::ui_model::{Tab, UiModel};
@@ -121,7 +123,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
             node("models", models_page::ModelsPage::new()),
             node("plans", pages::plans(model)),
             node("jobs", pages::jobs(model)),
-            node("telemetry", pages::telemetry(model)),
+            node("telemetry", TelemetryPage::new()),
             node("host", pages::host(model)),
             node("plugins", plugins_page::PluginsPage::new()),
             node("costs", pages::costs(model)),
@@ -273,8 +275,8 @@ pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("jobs") {
         *inspector = pages::jobs(model);
     }
-    if let Some(inspector) = tree.find_mut::<inspector::Inspector>("telemetry") {
-        *inspector = pages::telemetry(model);
+    if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
+        page.set_report(model.telemetry.clone());
     }
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("host") {
         *inspector = pages::host(model);

@@ -14,6 +14,8 @@ mod diff;
 mod job_notice;
 mod palette;
 mod shell;
+mod telemetry;
+mod telemetry_series;
 mod terminal;
 mod theme;
 mod ui;
