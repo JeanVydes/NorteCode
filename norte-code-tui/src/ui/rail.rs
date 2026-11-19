@@ -129,7 +129,7 @@ impl Rail {
         let usage = self.context;
         let start = y + 1;
         let bottom = inner.y + inner.height;
-        let room = start + 2 < bottom;
+        let room = start + 3 < bottom;
         if !room {
             // No space to draw, but the tree still dispatches focus to the
             // button; advance the slot here too so both walks agree.
@@ -144,6 +144,11 @@ impl Rail {
             return;
         }
         let dim = Style::default().fg(theme.muted).bg(theme.background);
+        let color = if usage.over_limit() {
+            theme.warning
+        } else {
+            theme.foreground
+        };
 
         buf.set_stringn(
             inner.x + 1,
@@ -152,26 +157,29 @@ impl Rail {
             8,
             dim.add_modifier(Modifier::BOLD),
         );
-        let detail = match usage.window.filter(|window| *window > 0) {
-            Some(window) => format!(
-                "{}/{} · compact {}",
-                human_count(usage.used),
-                human_count(window),
-                human_count(usage.compaction_limit())
-            ),
-            None => "no context reported".to_owned(),
+        let (used, limit) = match usage.window.filter(|window| *window > 0) {
+            Some(window) => (human_count(usage.used), human_count(window)),
+            None => (human_count(usage.used), "?".to_owned()),
         };
-        let color = if usage.over_limit() {
-            theme.warning
-        } else {
-            theme.foreground
-        };
+        let counts = format!("{used} / {limit}");
         buf.set_stringn(
             inner.x + 1,
             start + 2,
-            &detail,
-            detail.chars().count(),
+            &counts,
+            counts.chars().count(),
             Style::default().fg(color).bg(theme.background),
+        );
+        let compact = if usage.window.is_some() {
+            format!("compact at {}", human_count(usage.compaction_limit()))
+        } else {
+            "compact at ?".to_owned()
+        };
+        buf.set_stringn(
+            inner.x + 1,
+            start + 3,
+            &compact,
+            compact.chars().count(),
+            Style::default().fg(theme.muted).bg(theme.background),
         );
 
         let bar_y = start + 1;

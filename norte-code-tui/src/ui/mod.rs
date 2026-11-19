@@ -163,7 +163,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
 
     let mut tree = Tree::new(root);
     if let Some(rail) = tree.find_mut::<Rail>("rail") {
-        rail.set_context(model.context);
+        rail.set_context(model.effective_context());
     }
     tree.focus("composer");
     tree
