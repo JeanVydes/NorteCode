@@ -1537,24 +1537,6 @@ dependencies = [
 name = "norte-code-tui"
 version = "0.1.0"
 dependencies = [
- "crossterm 0.28.1",
- "futures-util",
- "norte-code-client",
- "norte-code-protocol",
- "norte-code-wire",
- "pulldown-cmark",
- "ratatui",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "unicode-width 0.2.0",
-]
-
-[[package]]
-name = "norte-code-tui-terminalui"
-version = "0.1.0"
-dependencies = [
  "crossterm 0.29.0",
  "futures-util",
  "norte-code-client",
@@ -1564,6 +1546,24 @@ dependencies = [
  "serde",
  "serde_json",
  "terminalui",
+ "thiserror",
+ "tokio",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "norte-code-tui-legacy"
+version = "0.1.0"
+dependencies = [
+ "crossterm 0.28.1",
+ "futures-util",
+ "norte-code-client",
+ "norte-code-protocol",
+ "norte-code-wire",
+ "pulldown-cmark",
+ "ratatui",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "unicode-width 0.2.0",

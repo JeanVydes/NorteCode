@@ -1,0 +1,38 @@
+[package]
+name = "norte-code-tui-legacy"
+description = "Terminal user interface for Norte Code, the previous implementation"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+crossterm = "0.28"
+norte-code-client = { path = "../norte-code-client", default-features = false, features = ["native"] }
+norte-code-wire = { path = "../norte-code-wire" }
+pulldown-cmark = "0.13"
+ratatui = { version = "0.29", default-features = false, features = [
+    "crossterm",
+    "unstable-rendered-line-info",
+] }
+serde = { workspace = true }
+norte-code-protocol = { path = "../norte-code-protocol" }
+unicode-width = "0.2"
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
+
+[lib]
+name = "norte_code_tui_legacy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "norte-code-tui-legacy"
+path = "src/main.rs"

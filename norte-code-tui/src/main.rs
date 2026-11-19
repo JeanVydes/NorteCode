@@ -1,9 +1,9 @@
-//! Terminal interface for Norte Code.
+//! The `norte-code-tui` binary.
+//!
+//! The terminal interface delegates here; everything lives in the library.
 
 #![forbid(unsafe_code)]
 
-use norte_code_tui::run_tui;
-
 fn main() -> Result<(), String> {
-    run_tui()
+    norte_code_tui::run_tui()
 }
