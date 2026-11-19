@@ -868,8 +868,16 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
             tool,
             call_id,
             arguments,
+            source,
             ..
-        } => fold_tool_started(tool, call_id, arguments.as_ref(), tree, model),
+        } => fold_tool_started(
+            tool,
+            call_id,
+            arguments.as_ref(),
+            source.as_deref(),
+            tree,
+            model,
+        ),
         ServerEventKind::ToolOutput { call_id, text, .. } => {
             if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
                 stream.append_console_line(call_id, text.clone());
@@ -1130,6 +1138,7 @@ fn fold_tool_started(
     tool: &str,
     call_id: &str,
     arguments: Option<&serde_json::Value>,
+    source: Option<&str>,
     tree: &mut terminalui::Tree,
     model: &mut UiModel,
 ) {
@@ -1145,9 +1154,6 @@ fn fold_tool_started(
         let edit =
             arguments.and_then(|value| serde_json::from_value::<EditArgs>(value.clone()).ok());
         let target = edit.as_ref().and_then(|edit| edit.path.clone()).or(target);
-        if let Some(diff) = edit.as_ref().and_then(Diff::from_edit) {
-            stream.push(ui::Item::Diff { diff });
-        }
         if matches!(tool, "shell" | "bash")
             && let Some(command) = arguments.and_then(|v| v.get("command").and_then(|s| s.as_str()))
         {
@@ -1162,6 +1168,7 @@ fn fold_tool_started(
             target,
             state: ui::ToolState::Running,
             meta: None,
+            diff: edit.as_ref().and_then(|edit| Diff::from_call(source, edit)),
         });
     }
 }

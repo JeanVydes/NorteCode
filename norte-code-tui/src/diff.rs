@@ -27,10 +27,10 @@ pub(crate) struct EditReplacement {
 /// How a code change is drawn.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum DiffMode {
-    /// Removed lines above added lines.
+    /// Changed lines one after another, with context.
     #[default]
     Unified,
-    /// Removed and added lines side by side.
+    /// Removed and added lines side by side, with context.
     Split,
 }
 
@@ -52,47 +52,182 @@ impl DiffMode {
     }
 }
 
-/// The lines an edit removed and added.
-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct Diff {
-    /// Lines that were there before.
-    pub(crate) removed: Vec<String>,
-    /// Lines that are there now.
-    pub(crate) added: Vec<String>,
+/// What one row of the diff contains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub(crate) enum LineKind {
+    /// A line around the change.
+    Context,
+    /// A line before the edit.
+    Removed,
+    /// A line after the edit.
+    Added,
 }
 
+/// One row of the diff.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct Line {
+    /// Whether this line is context, removed or added.
+    pub(crate) kind: LineKind,
+    /// The text of the line.
+    pub(crate) text: String,
+}
+
+/// The change an edit made, with context when the host sent the source.
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct Diff {
+    /// Lines in display order.
+    pub(crate) lines: Vec<Line>,
+}
+
+const CONTEXT: usize = 3;
+
 impl Diff {
-    /// Build the diff from decoded edit arguments, when they carry one.
-    pub(crate) fn from_edit(arguments: &EditArgs) -> Option<Self> {
-        let mut diff = Self::default();
+    /// Build the diff from the decoded call and the file snapshot.
+    pub(crate) fn from_call(source: Option<&str>, arguments: &EditArgs) -> Option<Self> {
+        if let Some(source) = source {
+            let mut after = source.to_owned();
+            for edit in arguments.edits.iter().flatten() {
+                if let (Some(search), Some(replace)) =
+                    (edit.search.as_deref(), edit.replace.as_deref())
+                {
+                    after = after.replacen(search, replace, 1);
+                }
+            }
+            if arguments.edits.is_none()
+                && let (Some(old), Some(new)) = (
+                    arguments.old_string.as_deref(),
+                    arguments.new_string.as_deref(),
+                )
+            {
+                after = after.replacen(old, new, 1);
+            }
+            if after != source {
+                return Some(Self::between(source, &after));
+            }
+        }
+        let mut lines = Vec::new();
         for edit in arguments.edits.iter().flatten() {
             if let Some(old) = edit.search.as_deref() {
-                diff.removed.extend(old.lines().map(str::to_owned));
+                lines.extend(old.lines().map(|line| Line {
+                    kind: LineKind::Removed,
+                    text: line.to_owned(),
+                }));
             }
             if let Some(new) = edit.replace.as_deref() {
-                diff.added.extend(new.lines().map(str::to_owned));
+                lines.extend(new.lines().map(|line| Line {
+                    kind: LineKind::Added,
+                    text: line.to_owned(),
+                }));
             }
         }
-        if diff.removed.is_empty() && diff.added.is_empty() {
+        if lines.is_empty() {
             if let Some(old) = arguments.old_string.as_deref() {
-                diff.removed.extend(old.lines().map(str::to_owned));
+                lines.extend(old.lines().map(|line| Line {
+                    kind: LineKind::Removed,
+                    text: line.to_owned(),
+                }));
             }
             if let Some(new) = arguments.new_string.as_deref() {
-                diff.added.extend(new.lines().map(str::to_owned));
+                lines.extend(new.lines().map(|line| Line {
+                    kind: LineKind::Added,
+                    text: line.to_owned(),
+                }));
             }
         }
-        if diff.removed.is_empty() && diff.added.is_empty() {
-            return None;
-        }
-        Some(diff)
+        (!lines.is_empty()).then_some(Self { lines })
     }
 
-    /// Rows needed to draw the diff in `mode`.
+    /// The changed lines and their surroundings.
+    fn between(before: &str, after: &str) -> Self {
+        let before: Vec<&str> = before.lines().collect();
+        let after: Vec<&str> = after.lines().collect();
+        let mut prefix = 0usize;
+        while prefix < before.len() && prefix < after.len() && before[prefix] == after[prefix] {
+            prefix += 1;
+        }
+        let mut suffix = 0usize;
+        while suffix < before.len() - prefix
+            && suffix < after.len() - prefix
+            && before[before.len() - 1 - suffix] == after[after.len() - 1 - suffix]
+        {
+            suffix += 1;
+        }
+        let context_before = prefix.saturating_sub(CONTEXT);
+        let mut lines = Vec::new();
+        for line in &before[context_before..prefix] {
+            lines.push(Line {
+                kind: LineKind::Context,
+                text: (*line).to_owned(),
+            });
+        }
+        for line in &before[prefix..before.len() - suffix] {
+            lines.push(Line {
+                kind: LineKind::Removed,
+                text: (*line).to_owned(),
+            });
+        }
+        for line in &after[prefix..after.len() - suffix] {
+            lines.push(Line {
+                kind: LineKind::Added,
+                text: (*line).to_owned(),
+            });
+        }
+        let tail_start = before.len() - suffix;
+        for line in &before[tail_start..(tail_start + CONTEXT).min(before.len())] {
+            lines.push(Line {
+                kind: LineKind::Context,
+                text: (*line).to_owned(),
+            });
+        }
+        Self { lines }
+    }
+
+    /// Rows needed inside the code box for a layout.
     pub(crate) fn rows(&self, mode: DiffMode) -> usize {
         match mode {
-            DiffMode::Unified => self.removed.len() + self.added.len() + 1,
-            DiffMode::Split => self.removed.len().max(self.added.len()) + 1,
+            DiffMode::Unified => self.lines.len(),
+            DiffMode::Split => {
+                let mut rows = 0usize;
+                let mut index = 0usize;
+                while index < self.lines.len() {
+                    if self.lines[index].kind == LineKind::Context {
+                        rows += 1;
+                        index += 1;
+                    } else {
+                        let start = index;
+                        while index < self.lines.len()
+                            && self.lines[index].kind != LineKind::Context
+                        {
+                            index += 1;
+                        }
+                        let removed = self.lines[start..index]
+                            .iter()
+                            .filter(|line| line.kind == LineKind::Removed)
+                            .count();
+                        let added = self.lines[start..index]
+                            .iter()
+                            .filter(|line| line.kind == LineKind::Added)
+                            .count();
+                        rows += removed.max(added);
+                    }
+                }
+                rows
+            }
         }
+    }
+
+    /// The count shown in the box title.
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        (
+            self.lines
+                .iter()
+                .filter(|line| line.kind == LineKind::Removed)
+                .count(),
+            self.lines
+                .iter()
+                .filter(|line| line.kind == LineKind::Added)
+                .count(),
+        )
     }
 }
 
