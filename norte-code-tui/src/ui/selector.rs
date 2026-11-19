@@ -38,6 +38,13 @@ impl Selector {
         &self.options[self.index]
     }
 
+    /// Show `value`, when the selector offers it.
+    pub(crate) fn select(&mut self, value: &str) {
+        if let Some(index) = self.options.iter().position(|option| option == value) {
+            self.index = index;
+        }
+    }
+
     /// Step to the next (or previous, with `backwards`) option.
     pub(crate) fn cycle(&mut self, backwards: bool) {
         if self.options.is_empty() {

@@ -12,6 +12,7 @@ use ratatui::style::Style;
 
 use crate::client::{ClientEvent, UiCommand, start};
 use crate::config::ClientConfig;
+use crate::diff::{Diff, EditArgs};
 use crate::terminal::TerminalSession;
 use crate::theme::{CustomTheme, ThemeCatalog};
 use crate::ui;
@@ -123,6 +124,9 @@ fn poll_event(
             drain_tab_request(tree, model);
             drain_models_actions(tree, commands, model);
             drain_plugins_actions(tree, commands);
+            if drain_config_actions(tree, model) {
+                ui::refresh_views(tree, model);
+            }
             drain_sessions_actions(tree, commands, model);
             ui::sync_views(tree, model);
             Ok(false)
@@ -241,6 +245,9 @@ fn handle_key(
     drain_models_actions(tree, commands, model);
     drain_sessions_actions(tree, commands, model);
     drain_plugins_actions(tree, commands);
+    if drain_config_actions(tree, model) {
+        ui::refresh_views(tree, model);
+    }
     sync_selectors(tree, commands, model);
     drain_tab_request(tree, model);
     ui::sync_views(tree, model);
@@ -287,6 +294,12 @@ fn sync_selectors(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) {
+    if let Some(selector) = tree.find_mut::<crate::ui::Selector>("reasoning") {
+        selector.select(model.preferences.reasoning.label());
+    }
+    if let Some(selector) = tree.find_mut::<crate::ui::Selector>("queue") {
+        selector.select(model.preferences.send_mode.label());
+    }
     if let Some(selector) = tree.find_mut::<crate::ui::Selector>("reasoning") {
         let next = match selector.value() {
             "low" => crate::ui_model::ReasoningLevel::Low,
@@ -589,6 +602,30 @@ fn drain_plugins_actions(
             }
         }
     }
+}
+
+/// Apply the preference changes the config tab reported.
+fn drain_config_actions(tree: &mut terminalui::Tree, model: &mut UiModel) -> bool {
+    use crate::ui::{ConfigAction, Setting};
+
+    let Some(page) = tree.find_mut::<ui::ConfigPage>("config") else {
+        return false;
+    };
+    let mut changed = false;
+    for action in page.take_pending() {
+        changed = true;
+        let ConfigAction::Cycle(setting) = action;
+        match setting {
+            Setting::Theme => {
+                let choice = model.preferences.theme.clone();
+                model.preferences.theme = model.preferences.catalog.next(&choice);
+            }
+            Setting::Thinking => model.preferences.reasoning = model.preferences.reasoning.next(),
+            Setting::SendMode => model.preferences.send_mode = model.preferences.send_mode.next(),
+            Setting::DiffMode => model.preferences.diff_mode = model.preferences.diff_mode.next(),
+        }
+    }
+    changed
 }
 
 /// Drain the models page's pending actions into the client.
@@ -1105,23 +1142,11 @@ fn fold_tool_started(
                 .and_then(|v| v.as_str())
                 .map(str::to_owned)
         });
-        let old_string = arguments.and_then(|v| {
-            v.get("old_string")
-                .or_else(|| v.get("old"))
-                .and_then(|s| s.as_str())
-                .map(str::to_owned)
-        });
-        let new_string = arguments.and_then(|v| {
-            v.get("new_string")
-                .or_else(|| v.get("new"))
-                .and_then(|s| s.as_str())
-                .map(str::to_owned)
-        });
-        if let (Some(removed), Some(added)) = (old_string, new_string) {
-            stream.push(ui::Item::Diff {
-                removed: removed.lines().map(str::to_string).collect(),
-                added: added.lines().map(str::to_string).collect(),
-            });
+        let edit =
+            arguments.and_then(|value| serde_json::from_value::<EditArgs>(value.clone()).ok());
+        let target = edit.as_ref().and_then(|edit| edit.path.clone()).or(target);
+        if let Some(diff) = edit.as_ref().and_then(Diff::from_edit) {
+            stream.push(ui::Item::Diff { diff });
         }
         if matches!(tool, "shell" | "bash")
             && let Some(command) = arguments.and_then(|v| v.get("command").and_then(|s| s.as_str()))

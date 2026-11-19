@@ -12,7 +12,7 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 use crate::ui_model::{Tab, TurnState};
 
 /// Every tab, in display order. Rendered in the strip.
-const TABS: [Tab; 9] = [
+const TABS: [Tab; 10] = [
     Tab::Chat,
     Tab::Sessions,
     Tab::Models,
@@ -22,6 +22,7 @@ const TABS: [Tab; 9] = [
     Tab::Host,
     Tab::Plugins,
     Tab::Costs,
+    Tab::Config,
 ];
 
 /// One-row header rendered above everything.
@@ -88,13 +89,46 @@ impl View for Header {
                 .add_modifier(Modifier::BOLD),
         );
 
-        // Tabs start after the wordmark.
+        // Tabs start after the wordmark. Short labels keep the strip clear
+        // of the state chip on narrow screens.
         self.tab_rects.clear();
         let mut x = area.x + 3;
+        let state_width = 2
+            + u16::try_from(
+                format!(
+                    "{}  {} · ⌃T",
+                    match self.turn {
+                        TurnState::Idle => "ready",
+                        TurnState::Connecting => "connecting",
+                        TurnState::Thinking => "thinking",
+                        TurnState::Streaming => "working",
+                        TurnState::AwaitingAnswer => "waiting",
+                    },
+                    self.theme_name
+                )
+                .chars()
+                .count(),
+            )
+            .unwrap_or(u16::MAX)
+            + 1;
+        let status_x = area.x + area.width.saturating_sub(state_width);
+        let full_width: u16 = TABS
+            .iter()
+            .map(|tab| 4 + u16::try_from(tab.label().chars().count()).unwrap_or(0))
+            .sum();
+        let short = x + full_width > status_x;
         for (index, tab) in TABS.iter().enumerate() {
-            let digit = index + 1;
+            let digit = if *tab == Tab::Config {
+                "0".to_string()
+            } else {
+                (index + 1).to_string()
+            };
             let active = *tab == self.tab;
-            let label = tab.label();
+            let label = if short {
+                tab.short_label()
+            } else {
+                tab.label()
+            };
             let text = format!(" {digit} {label} ");
             let style = if active {
                 Style::default()
