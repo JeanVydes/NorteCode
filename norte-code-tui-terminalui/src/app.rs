@@ -102,83 +102,13 @@ fn poll_event(
     }
     match event::read()? {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            let mut pass_to_tree = true;
-            match (key.modifiers, key.code) {
-                (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(true),
-                (KeyModifiers::CONTROL, KeyCode::Tab) => {
-                    model.tab = model.tab.next();
-                    ui::sync_views(tree, model);
-                    pass_to_tree = false;
-                }
-                (KeyModifiers::CONTROL, KeyCode::BackTab) => {
-                    model.tab = model.tab.previous();
-                    ui::sync_views(tree, model);
-                    pass_to_tree = false;
-                }
-                (KeyModifiers::NONE, KeyCode::PageUp) => {
-                    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                        stream.scroll(-6);
-                    }
-                    pass_to_tree = false;
-                }
-                (KeyModifiers::NONE, KeyCode::PageDown) => {
-                    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                        stream.scroll(6);
-                    }
-                    pass_to_tree = false;
-                }
-                (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
-                    if let SessionAttachmentState::Failed { .. } = model.attachment {
-                        if let Some(cfg) = config {
-                            let (commands_us, events_rx) = start(cfg.clone());
-                            *commands = Some(commands_us);
-                            *events = Some(events_rx);
-                            model.attachment = SessionAttachmentState::Connecting;
-                        }
-                    } else if let Some(commands) = commands.as_ref() {
-                        let _ = commands.try_send(UiCommand::Refresh);
-                        let _ = commands.try_send(UiCommand::RefreshViews);
-                    }
-                    pass_to_tree = false;
-                }
-                (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-                    model.preferences.theme = model.preferences.theme.next();
-                    pass_to_tree = false;
-                }
-                (KeyModifiers::CONTROL, KeyCode::Enter) => {
-                    send_current_prompt(tree, commands, model);
-                    pass_to_tree = false;
-                }
-                (KeyModifiers::NONE, KeyCode::Enter) => {
-                    let prompt_open = tree
-                        .find::<ui::KeyPrompt>("key_prompt")
-                        .is_some_and(ui::KeyPrompt::is_open);
-                    if !prompt_open && model.tab != Tab::Chat {
-                        handle_enter(tree, commands, model);
-                        pass_to_tree = false;
-                    }
-                }
-                (KeyModifiers::NONE, KeyCode::Char(digit)) => {
-                    if let Some(tab) = Tab::from_digit(digit) {
-                        model.tab = tab;
-                        ui::sync_views(tree, model);
-                        pass_to_tree = false;
-                    }
-                }
-                _ => {}
-            }
-            if pass_to_tree {
-                let input = terminalui::InputEvent::from(Event::Key(key));
-                let _ = tree.handle_event(&input);
-            }
-            sync_selectors(tree, commands, model);
-            ui::sync_views(tree, model);
-            Ok(false)
+            Ok(handle_key(tree, key, commands, events, model, config))
         }
         Event::Mouse(mouse) => {
             let input = terminalui::InputEvent::from(Event::Mouse(mouse));
             let _ = tree.handle_event(&input);
             sync_selectors(tree, commands, model);
+            drain_tab_request(tree, model);
             ui::sync_views(tree, model);
             Ok(false)
         }
@@ -189,6 +119,110 @@ fn poll_event(
             ui::sync_views(tree, model);
             Ok(false)
         }
+    }
+}
+
+/// Handle one key press; returns `true` when the loop quits.
+fn handle_key(
+    tree: &mut terminalui::Tree,
+    key: crossterm::event::KeyEvent,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
+    model: &mut UiModel,
+    config: Option<&ClientConfig>,
+) -> bool {
+    let mut pass_to_tree = true;
+    match (key.modifiers, key.code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => return true,
+        (KeyModifiers::CONTROL, KeyCode::Tab) => {
+            model.tab = model.tab.next();
+            ui::sync_views(tree, model);
+            pass_to_tree = false;
+        }
+        (KeyModifiers::CONTROL | KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::BackTab) => {
+            model.tab = model.tab.previous();
+            ui::sync_views(tree, model);
+            pass_to_tree = false;
+        }
+        (KeyModifiers::NONE, KeyCode::PageUp) => {
+            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                stream.scroll(-6);
+            }
+            pass_to_tree = false;
+        }
+        (KeyModifiers::NONE, KeyCode::PageDown) => {
+            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                stream.scroll(6);
+            }
+            pass_to_tree = false;
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
+            if let SessionAttachmentState::Failed { .. } = model.attachment {
+                if let Some(cfg) = config {
+                    let (commands_us, events_rx) = start(cfg.clone());
+                    *commands = Some(commands_us);
+                    *events = Some(events_rx);
+                    model.attachment = SessionAttachmentState::Connecting;
+                }
+            } else if let Some(commands) = commands.as_ref() {
+                let _ = commands.try_send(UiCommand::Refresh);
+                let _ = commands.try_send(UiCommand::RefreshViews);
+            }
+            pass_to_tree = false;
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+            model.preferences.theme = model.preferences.theme.next();
+            pass_to_tree = false;
+        }
+        (KeyModifiers::NONE | KeyModifiers::CONTROL, KeyCode::Enter) => {
+            // Plain Enter sends from Chat; Shift+Enter is left to the tree
+            // and lands as a newline in the composer.
+            let prompt_open = tree
+                .find::<ui::KeyPrompt>("key_prompt")
+                .is_some_and(ui::KeyPrompt::is_open);
+            if prompt_open {
+                // Enter belongs to the prompt (save).
+            } else if model.tab == Tab::Chat {
+                send_current_prompt(tree, commands, model);
+                pass_to_tree = false;
+            } else {
+                handle_enter(tree, commands, model);
+                pass_to_tree = false;
+            }
+        }
+        (KeyModifiers::ALT, KeyCode::Char(digit)) => {
+            if let Some(tab) = Tab::from_digit(digit) {
+                model.tab = tab;
+                ui::sync_views(tree, model);
+                pass_to_tree = false;
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Char(digit)) if model.tab != Tab::Chat => {
+            if let Some(tab) = Tab::from_digit(digit) {
+                model.tab = tab;
+                ui::sync_views(tree, model);
+                pass_to_tree = false;
+            }
+        }
+        _ => {}
+    }
+    if pass_to_tree {
+        let input = terminalui::InputEvent::from(Event::Key(key));
+        let _ = tree.handle_event(&input);
+    }
+    sync_selectors(tree, commands, model);
+    drain_tab_request(tree, model);
+    ui::sync_views(tree, model);
+    false
+}
+
+/// Apply a tab the header reported as clicked.
+fn drain_tab_request(tree: &mut terminalui::Tree, model: &mut UiModel) {
+    if let Some(header) = tree.find_mut::<ui::Header>("header")
+        && let Some(tab) = header.take_requested_tab()
+    {
+        model.tab = tab;
+        ui::sync_views(tree, model);
     }
 }
 

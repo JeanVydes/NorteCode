@@ -1,6 +1,9 @@
 //! The view tree: header, rail, stream, composer, status strip, pages.
 
 mod composer;
+#[cfg(test)]
+#[path = "focus_tests.rs"]
+mod focus_tests;
 mod header;
 mod inspector;
 mod key_prompt;
@@ -80,7 +83,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
             .constraints(vec![
                 Constraint::Length(1),
                 Constraint::Fill(1),
-                Constraint::Length(4),
+                Constraint::Length(6),
                 Constraint::Length(1),
             ])
             .children(vec![
@@ -119,7 +122,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
                         .right(vec![
                             node(
                                 "hint",
-                                Text::new("⌃⏎ send")
+                                Text::new("⏎ send · ⇧⏎ newline")
                                     .with_style(TextStyle::default().fg(theme.muted)),
                             ),
                             node(

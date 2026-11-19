@@ -33,6 +33,10 @@ pub(crate) struct Header {
     pub(crate) theme_name: String,
     /// Which tab is active; rendered between the wordmark and the state.
     pub(crate) tab: Tab,
+    #[serde(skip)]
+    tab_rects: Vec<(Rect, Tab)>,
+    #[serde(skip)]
+    requested_tab: Option<Tab>,
 }
 
 impl Header {
@@ -42,7 +46,14 @@ impl Header {
             turn,
             theme_name,
             tab: Tab::Chat,
+            tab_rects: Vec::new(),
+            requested_tab: None,
         }
+    }
+
+    /// Take the tab the user clicked, if any; the host applies the switch.
+    pub(crate) fn take_requested_tab(&mut self) -> Option<Tab> {
+        self.requested_tab.take()
     }
 }
 
@@ -78,6 +89,7 @@ impl View for Header {
         );
 
         // Tabs start after the wordmark.
+        self.tab_rects.clear();
         let mut x = area.x + 3;
         for (index, tab) in TABS.iter().enumerate() {
             let digit = index + 1;
@@ -92,8 +104,10 @@ impl View for Header {
             } else {
                 Style::default().fg(theme.muted).bg(theme.secondary)
             };
+            let width = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
             buf.set_stringn(x, area.y, &text, text.chars().count(), style);
-            x += u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
+            self.tab_rects.push((Rect::new(x, area.y, width, 1), *tab));
+            x += width;
         }
 
         let (dot, label, color) = match self.turn {
@@ -125,7 +139,21 @@ impl View for Header {
         );
     }
 
-    fn handle_event(&mut self, _event: &InputEvent, _cx: &mut Context) -> Outcome {
+    fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
+        if let InputEvent::Mouse(mouse) = event {
+            use crossterm::event::{MouseButton, MouseEventKind};
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                for (rect, tab) in &self.tab_rects {
+                    if mouse.row == rect.y
+                        && mouse.column >= rect.x
+                        && mouse.column < rect.x + rect.width
+                    {
+                        self.requested_tab = Some(*tab);
+                        return Outcome::Consumed;
+                    }
+                }
+            }
+        }
         Outcome::Ignored
     }
 }
