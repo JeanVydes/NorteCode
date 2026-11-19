@@ -138,7 +138,12 @@ fn handle_key(
 ) -> bool {
     let mut pass_to_tree = true;
     match (key.modifiers, key.code) {
-        (KeyModifiers::CONTROL, KeyCode::Char('c')) => return true,
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            if model.turn != TurnState::Idle {
+                return cancel_active_turn(tree, commands, model);
+            }
+            return true;
+        }
         (KeyModifiers::CONTROL, KeyCode::Tab) => {
             model.tab = model.tab.next();
             ui::sync_views(tree, model);
@@ -456,6 +461,45 @@ fn drain_sessions_actions(
     }
 }
 
+/// Ask the host to cancel the running turn; keeps the TUI up.
+fn cancel_active_turn(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) -> bool {
+    let Some(active) = model.active_turn.take() else {
+        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+            stream.push(ui::Item::Notice {
+                text: "a turn seems to be running but its id is unknown; cannot cancel".to_string(),
+                tone: ui::Tone::Warn,
+            });
+        }
+        model.turn = TurnState::Idle;
+        return false;
+    };
+    let Some(commands) = commands.as_ref() else {
+        model.active_turn = Some(active);
+        return false;
+    };
+    let Some(session) = model.active.clone() else {
+        model.active_turn = Some(active);
+        return false;
+    };
+    let _ = commands.try_send(UiCommand::CancelTurn {
+        session,
+        turn_id: active.id,
+    });
+    model.turn = TurnState::Idle;
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.stop_thinking();
+        stream.push(ui::Item::Notice {
+            text: "turn cancelled".to_string(),
+            tone: ui::Tone::Neutral,
+        });
+    }
+    false
+}
+
 /// Ship a plugin operation to the host; it reports back through the stream.
 fn send_plugin_op(
     tree: &mut terminalui::Tree,
@@ -750,8 +794,17 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
         return;
     }
     match &event.kind {
-        ServerEventKind::TurnStarted { .. } | ServerEventKind::InputAccepted { .. } => {
+        ServerEventKind::TurnStarted { .. } => {
             model.turn = TurnState::Connecting;
+            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                stream.start_thinking();
+            }
+        }
+        ServerEventKind::InputAccepted { turn_id, .. } => {
+            model.turn = TurnState::Connecting;
+            model.active_turn = Some(crate::ui_model::ActiveTurn {
+                id: turn_id.clone(),
+            });
             if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
                 stream.start_thinking();
             }
@@ -811,6 +864,8 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
         }
         ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. } => {
             model.turn = TurnState::Idle;
+            model.active_turn = None;
+            model.question = None;
             if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
                 stream.stop_thinking();
                 stream.complete_running_tools();

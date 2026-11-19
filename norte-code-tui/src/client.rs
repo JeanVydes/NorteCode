@@ -134,6 +134,13 @@ pub(crate) enum UiCommand {
         /// The session to delete.
         session: norte_code_wire::SessionKey,
     },
+    /// Ask the host to cancel the running turn.
+    CancelTurn {
+        /// The session running the turn.
+        session: norte_code_wire::SessionKey,
+        /// The turn the host assigned.
+        turn_id: String,
+    },
 }
 
 /// A plugin operation the host can do for us.
@@ -166,6 +173,29 @@ pub(crate) enum PluginOp {
 }
 
 const RETRY_BASE_MS: u64 = 400;
+
+/// Ask the host to cancel the running turn.
+async fn cancel_turn(
+    api: &Arc<RestClient>,
+    events: &Sender<ClientEvent>,
+    target: &SessionKey,
+    turn_id: String,
+) {
+    let result = match norte_code_client::TurnId::new(&turn_id) {
+        Ok(turn) => api
+            .cancel_turn(target.as_str(), &turn)
+            .await
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(format!("the running turn has an unusable id: {error}")),
+    };
+    if let Err(reason) = result {
+        let _ = events
+            .send(ClientEvent::SendFailed {
+                reason: format!("cancel refused: {reason}"),
+            })
+            .await;
+    }
+}
 
 enum BackgroundOp {
     /// A plugin operation.
@@ -612,6 +642,9 @@ async fn drive_stream(
                             Arc::clone(api),
                             events.clone(),
                         );
+                    }
+                    UiCommand::CancelTurn { session, turn_id } => {
+                        cancel_turn(api, events, &session, turn_id).await;
                     }
                     UiCommand::Send { session: target, text, queue_mode } => {
                         send_prompt(api, &target, text, queue_mode).await;
