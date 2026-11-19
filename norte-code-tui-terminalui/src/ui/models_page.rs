@@ -450,6 +450,8 @@ impl View for ModelsPage {
                             let index = self.offset + (y - self.area.y - 1) as usize;
                             if index < self.rows().len() {
                                 self.selected = index;
+                                self.clamp_view();
+                                self.activate();
                             }
                         }
                     }

@@ -25,6 +25,9 @@ pub(crate) struct TerminalSession {
 /// Set by the signal watcher; the run loop polls it to leave cleanly.
 pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// Set once the terminal is restored; the restore is idempotent.
+static RESTORED: AtomicBool = AtomicBool::new(false);
+
 /// Spawn a thread that flips [`SHUTDOWN`] when the terminal dies.
 ///
 /// A TUI that is killed by the terminal closing (SIGHUP) or by something
@@ -65,6 +68,7 @@ pub(crate) fn watch_exit_signals() {
                 _ = hangup.recv() => {}
                 _ = quit.recv() => {}
             }
+            restore_terminal();
             SHUTDOWN.store(true, Ordering::Relaxed);
         });
     });
@@ -84,23 +88,19 @@ impl TerminalSession {
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
             )
         ) {
             let _ = disable_raw_mode();
             return Err(error);
         }
         if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
-            let _ = execute!(stdout, PopKeyboardEnhancementFlags);
-            let _ = disable_raw_mode();
+            restore_terminal();
             return Err(error);
         }
         let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => terminal,
             Err(error) => {
-                let mut stdout = io::stdout();
-                let _ = execute!(stdout, PopKeyboardEnhancementFlags, LeaveAlternateScreen);
-                let _ = disable_raw_mode();
+                restore_terminal();
                 return Err(error);
             }
         };
@@ -118,24 +118,49 @@ impl TerminalSession {
     /// How to restore. Never panics, never fails silently.
     pub(crate) fn leave(mut self) {
         self.active = false;
-        Self::restore();
+        restore_terminal();
     }
+}
 
-    fn restore() {
-        let _ = execute!(
-            io::stdout(),
-            PopKeyboardEnhancementFlags,
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        );
-        let _ = disable_raw_mode();
+/// Give the terminal back completely; idempotent.
+///
+/// Resets the text attributes, shows the cursor, drops the mouse and the
+/// alternate screen, pops the kitty enhancement flags, and re-enables
+/// canonical mode. Writes to the controlling terminal, not just stdout, so
+/// a redirect cannot strand escape bytes. Anything that fails is reported
+/// to stderr once the shell can see it.
+pub(crate) fn restore_terminal() {
+    if RESTORED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let mut errors: Vec<String> = Vec::new();
+    let mut out: Box<dyn io::Write> = match std::fs::OpenOptions::new().write(true).open("/dev/tty")
+    {
+        Ok(file) => Box::new(file),
+        Err(_) => Box::new(io::stdout()),
+    };
+    if let Err(error) = execute!(
+        out,
+        crossterm::style::ResetColor,
+        crossterm::cursor::Show,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        PopKeyboardEnhancementFlags,
+    ) {
+        errors.push(format!("the escape sequence restore failed: {error}"));
+    }
+    if let Err(error) = disable_raw_mode() {
+        errors.push(format!("the tty mode restore failed: {error}"));
+    }
+    for error in errors {
+        eprintln!("norte-code: warning: {error}");
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         if self.active {
-            Self::restore();
+            restore_terminal();
         }
     }
 }
