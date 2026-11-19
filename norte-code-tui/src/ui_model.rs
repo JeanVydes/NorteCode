@@ -89,11 +89,20 @@ pub(crate) struct Preferences {
     pub(crate) send_mode: SendMode,
 }
 
+/// The turn the host is running, when known.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ActiveTurn {
+    /// The turn id the host assigned.
+    pub(crate) id: String,
+}
+
 /// The one big piece of state the interface reads from.
 pub(crate) struct UiModel {
     pub(crate) preferences: Preferences,
     pub(crate) attachment: SessionAttachmentState,
     pub(crate) turn: TurnState,
+    /// The turn the host is running, when known; cleared on turn end.
+    pub(crate) active_turn: Option<ActiveTurn>,
     pub(crate) sessions: Vec<SessionSummary>,
     /// The session the interface is attached to; set on attach.
     pub(crate) active: Option<norte_code_wire::SessionKey>,
@@ -255,6 +264,7 @@ impl UiModel {
             },
             attachment: SessionAttachmentState::Disconnected,
             turn: TurnState::Idle,
+            active_turn: None,
             sessions: Vec::new(),
             active: None,
             models: Vec::new(),
