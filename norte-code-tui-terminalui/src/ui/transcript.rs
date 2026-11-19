@@ -169,6 +169,42 @@ impl Transcript {
         }
     }
 
+    /// Replace the stream with a history page; scroll pins to the bottom.
+    pub(crate) fn replace_history(&mut self, items: Vec<norte_code_wire::HistoryItem>) {
+        self.items.clear();
+        self.thinking = None;
+        for item in items {
+            match item.kind.as_str() {
+                "user" => self.items.push(Item::User { text: item.content }),
+                "assistant" => self.items.push(Item::Assistant { text: item.content }),
+                "reasoning" => self.items.push(Item::Reasoning { text: item.content }),
+                "refusal" => self.items.push(Item::Notice {
+                    text: item.content,
+                    tone: Tone::Warn,
+                }),
+                "system_event" | "tool" | "tool_call" | "tool_result" => {
+                    let call_id = item.id.clone();
+                    let summary = item.content.lines().next().unwrap_or("tool").trim().to_owned();
+                    self.items.push(Item::Tool {
+                        call_id,
+                        name: if summary.len() > 40 {
+                            let clipped: String = summary.chars().take(39).collect();
+                            format!("{clipped}…")
+                        } else {
+                            summary
+                        },
+                        target: None,
+                        state: ToolState::Done,
+                        meta: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        self.dirty = true;
+        self.first_visible = u16::MAX;
+    }
+
     /// Append an item; the view stays pinned to the bottom.
     pub(crate) fn push(&mut self, item: Item) {
         self.items.push(item);

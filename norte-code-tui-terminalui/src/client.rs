@@ -55,6 +55,11 @@ pub(crate) enum ClientEvent {
     Catalog(norte_code_client::CatalogDetail),
     /// The server-reported agents.
     Agents(Vec<norte_code_wire::AgentSummary>),
+    /// A command failed; carry the reason for the transcript.
+    SendFailed {
+        /// What went wrong, in words a person can act on.
+        reason: String,
+    },
 }
 
 /// Commands the interface sends to the connection task.
@@ -89,6 +94,15 @@ pub(crate) enum UiCommand {
     },
     /// Refetch the catalogue views for the current session.
     RefreshViews,
+    /// Answer the question the turn is parked on.
+    AnswerQuestion {
+        /// The session the question belongs to.
+        session: SessionKey,
+        /// The host's id for the question.
+        question: String,
+        /// The answer text.
+        answer: String,
+    },
 }
 
 const MAX_ATTACH_ATTEMPTS: u32 = 3;
@@ -229,9 +243,16 @@ async fn connection(
     };
     let session = SessionKey::new(fresh.session_id.clone());
     let _ = events.send(ClientEvent::Sessions(sessions)).await;
-    let _ = events.send(ClientEvent::Attached { session: fresh }).await;
+    let _ = events
+        .send(ClientEvent::Attached {
+            session: fresh.clone(),
+        })
+        .await;
     // The views are filled from the same REST calls the service serves.
     Box::pin(fetch_views(&api, session.as_str(), &events)).await;
+    if let Ok(sessions) = client.list_sessions().await {
+        let _ = events.send(ClientEvent::Sessions(sessions)).await;
+    }
     Box::pin(stream_loop(&client, &api, &mut commands, &events, &session)).await;
 }
 
@@ -313,6 +334,22 @@ async fn drive_stream(
                     UiCommand::Refresh => {
                         if let Ok(sessions) = client.list_sessions().await {
                             let _ = events.send(ClientEvent::Sessions(sessions)).await;
+                        }
+                    }
+                    UiCommand::AnswerQuestion {
+                        session: target,
+                        question,
+                        answer,
+                    } => {
+                        if let Err(error) = api
+                            .answer_question(target.as_str(), &question, &answer)
+                            .await
+                        {
+                            let _ = events
+                                .send(ClientEvent::SendFailed {
+                                    reason: format!("answer refused: {error}"),
+                                })
+                                .await;
                         }
                     }
                     UiCommand::RefreshViews => {

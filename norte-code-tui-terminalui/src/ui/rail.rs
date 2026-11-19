@@ -104,6 +104,10 @@ impl View for Rail {
     }
 }
 
+fn clipped(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
 fn paint_session(
     buf: &mut Buffer,
     inner: Rect,
@@ -121,15 +125,30 @@ fn paint_session(
         dim.add_modifier(Modifier::BOLD),
     );
     let y = y + 1;
+    let usable = usize::from(inner.width.saturating_sub(2));
     if let Some(session) = session {
+        let chars: Vec<char> = session.chars().collect();
+        let first: String = chars.iter().take(usable).collect();
         buf.set_stringn(
             inner.x + 1,
             y,
-            session,
-            session.len(),
+            &first,
+            first.chars().count(),
             text.add_modifier(Modifier::BOLD),
         );
-        y + 1
+        if chars.len() > usable {
+            let second: String = chars.iter().skip(usable).take(usable).collect();
+            buf.set_stringn(
+                inner.x + 1,
+                y + 1,
+                &second,
+                second.chars().count(),
+                text.add_modifier(Modifier::BOLD),
+            );
+            y + 2
+        } else {
+            y + 1
+        }
     } else {
         buf.set_stringn(inner.x + 1, y, "no session", 10, dim);
         y + 2
@@ -145,12 +164,14 @@ fn paint_model(
     theme: &Theme,
 ) -> u16 {
     let dim = Style::default().fg(theme.muted).bg(theme.background);
+    let usable = usize::from(inner.width.saturating_sub(2));
     if let Some(model) = model {
+        let model = clipped(model, usable);
         buf.set_stringn(
             inner.x + 1,
             y,
-            model,
-            model.len(),
+            &model,
+            model.chars().count(),
             Style::default().fg(theme.accent).bg(theme.background),
         );
     } else {
@@ -158,7 +179,8 @@ fn paint_model(
     }
     let y = y + 1;
     if let Some(provider) = provider {
-        buf.set_stringn(inner.x + 1, y, provider, provider.len(), dim);
+        let provider = clipped(provider, usable);
+        buf.set_stringn(inner.x + 1, y, &provider, provider.chars().count(), dim);
     } else {
         buf.set_stringn(inner.x + 1, y, "—", 1, dim);
     }

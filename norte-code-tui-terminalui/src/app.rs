@@ -177,10 +177,15 @@ fn handle_key(
         (KeyModifiers::NONE | KeyModifiers::CONTROL, KeyCode::Enter) => {
             // Plain Enter sends from Chat; Shift+Enter is left to the tree
             // and lands as a newline in the composer.
+            let question_open = tree
+                .find::<ui::QuestionPrompt>("question_prompt")
+                .is_some_and(ui::QuestionPrompt::is_open);
             let prompt_open = tree
                 .find::<ui::KeyPrompt>("key_prompt")
                 .is_some_and(ui::KeyPrompt::is_open);
-            if prompt_open {
+            if question_open {
+                // Enter goes to the ask-user overlay.
+            } else if prompt_open {
                 // Enter belongs to the prompt (save).
             } else if model.tab == Tab::Chat {
                 send_current_prompt(tree, commands, model);
@@ -210,10 +215,34 @@ fn handle_key(
         let input = terminalui::InputEvent::from(Event::Key(key));
         let _ = tree.handle_event(&input);
     }
+    drain_question_answer(tree, commands, model);
     sync_selectors(tree, commands, model);
     drain_tab_request(tree, model);
     ui::sync_views(tree, model);
     false
+}
+
+/// Ship the answer the ask-user overlay just committed, if any.
+fn drain_question_answer(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) {
+    let Some(prompt) = tree.find_mut::<ui::QuestionPrompt>("question_prompt") else {
+        return;
+    };
+    let Some((question_id, answer)) = prompt.take_pending_answer() else {
+        return;
+    };
+    if let (Some(commands), Some(session)) = (commands.as_ref(), model.active.clone()) {
+        let _ = commands.try_send(UiCommand::AnswerQuestion {
+            session,
+            question: question_id,
+            answer,
+        });
+    }
+    model.question = None;
+    ui::sync_views(tree, model);
 }
 
 /// Apply a tab the header reported as clicked.
@@ -374,6 +403,61 @@ fn handle_models_enter(
     }
 }
 
+/// Track the host-reported model of the attached session from a list refresh.
+fn refresh_active_model(model: &mut UiModel, sessions: &[norte_code_wire::SessionSummary]) {
+    if let Some(active) = model.active.as_ref()
+        && let Some(found) = sessions
+            .iter()
+            .find(|candidate| candidate.session_id == active.as_str())
+    {
+        model.active_model = found.model.clone();
+        model.active_provider = found.provider.clone();
+    }
+}
+
+fn apply_attached(
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    session: &norte_code_wire::SessionSummary,
+) -> bool {
+    let title = session
+        .title
+        .clone()
+        .unwrap_or_else(|| session.session_id.clone());
+    model.attachment = SessionAttachmentState::Attached;
+    model.active_model.clone_from(&session.model);
+    model.active_provider.clone_from(&session.provider);
+    model.active = Some(norte_code_wire::SessionKey::new(session.session_id.clone()));
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.push(ui::Item::Notice {
+            text: format!("attached to {title}"),
+            tone: ui::Tone::Neutral,
+        });
+        if !model.active_session_has_model() {
+            stream.push(ui::Item::Notice {
+                text: "no model selected; 3 Models, Enter to choose".into(),
+                tone: ui::Tone::Warn,
+            });
+        }
+    }
+    true
+}
+
+fn apply_detached(tree: &mut terminalui::Tree, model: &mut UiModel, reason: String) -> bool {
+    model.attachment = SessionAttachmentState::Failed {
+        reason: reason.clone(),
+    };
+    model.turn = TurnState::Idle;
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.stop_thinking();
+        stream.push(ui::Item::Notice {
+            text: reason,
+            tone: ui::Tone::Error,
+        });
+    }
+    true
+}
+
 fn drain_server_events(
     events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
     tree: &mut terminalui::Tree,
@@ -386,41 +470,13 @@ fn drain_server_events(
     loop {
         match receiver.try_recv() {
             Ok(ClientEvent::Attached { session }) => {
-                let title = session
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| session.session_id.clone());
-                model.attachment = SessionAttachmentState::Attached;
-                model.active = Some(norte_code_wire::SessionKey::new(session.session_id));
-                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                    stream.push(ui::Item::Notice {
-                        text: format!("attached to {title}"),
-                        tone: ui::Tone::Neutral,
-                    });
-                    if !model.active_session_has_model() {
-                        stream.push(ui::Item::Notice {
-                            text: "no model selected; 3 Models, Enter to choose".into(),
-                            tone: ui::Tone::Warn,
-                        });
-                    }
-                }
-                changed = true;
+                changed = apply_attached(tree, model, &session) || changed;
             }
             Ok(ClientEvent::Detached { reason }) => {
-                model.attachment = SessionAttachmentState::Failed {
-                    reason: reason.clone(),
-                };
-                model.turn = TurnState::Idle;
-                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                    stream.stop_thinking();
-                    stream.push(ui::Item::Notice {
-                        text: reason,
-                        tone: ui::Tone::Error,
-                    });
-                }
-                changed = true;
+                changed = apply_detached(tree, model, reason) || changed;
             }
             Ok(ClientEvent::Sessions(sessions)) => {
+                refresh_active_model(model, &sessions);
                 model.sessions = sessions;
                 changed = true;
             }
@@ -464,6 +520,15 @@ fn drain_server_events(
             }
             Ok(ClientEvent::Agents(agents)) => {
                 model.agents = agents;
+                changed = true;
+            }
+            Ok(ClientEvent::SendFailed { reason }) => {
+                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                    stream.push(ui::Item::Notice {
+                        text: reason,
+                        tone: ui::Tone::Error,
+                    });
+                }
                 changed = true;
             }
             Ok(ClientEvent::Server(event)) => fold(&event, tree, model),
@@ -511,6 +576,19 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
             }
         }
         ServerEventKind::Delta { delta, .. } => fold_delta(delta, tree, model),
+        ServerEventKind::QuestionAnswered { .. } => {
+            model.question = None;
+            if model.turn == TurnState::AwaitingAnswer {
+                model.turn = TurnState::Connecting;
+            }
+            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                stream.start_thinking();
+                stream.push(ui::Item::Notice {
+                    text: "question answered".to_string(),
+                    tone: ui::Tone::Neutral,
+                });
+            }
+        }
         ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. } => {
             model.turn = TurnState::Idle;
             if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
@@ -529,6 +607,14 @@ fn fold_error_event(
     model: &mut UiModel,
 ) -> bool {
     match kind {
+        ServerEventKind::Error { message, .. } if message.starts_with("RAEP sequence gap") => {
+            // The reader resyncs on the next frame; not a turn failure.
+            notice(
+                tree,
+                "stream skipped events · resyncing".to_owned(),
+                ui::Tone::Neutral,
+            )
+        }
         ServerEventKind::Error { message, .. } => stop_with_notice(
             tree,
             model,
@@ -557,12 +643,24 @@ fn fold_error_event(
             format!("budget warning · {scope:?} · {spent:.2}/{limit:.2} {unit:?}"),
             ui::Tone::Warn,
         ),
-        ServerEventKind::QuestionAsked { prompt, .. } => {
+        ServerEventKind::QuestionAsked {
+            question,
+            prompt,
+            options,
+            multiple,
+            ..
+        } => {
             model.turn = TurnState::AwaitingAnswer;
+            model.question = Some(crate::ui_model::PendingQuestion {
+                question: question.clone(),
+                prompt: prompt.clone(),
+                options: options.clone(),
+                multiple: *multiple,
+            });
             if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
                 stream.stop_thinking();
                 stream.push(ui::Item::Notice {
-                    text: format!("the model asks · {prompt} (answer from another client)"),
+                    text: format!("the model asks · {prompt}"),
                     tone: ui::Tone::Warn,
                 });
             }
