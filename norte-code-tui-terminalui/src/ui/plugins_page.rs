@@ -133,6 +133,12 @@ pub(crate) struct PluginsPage {
     /// The hovered toolbar button, for the accent swap.
     #[serde(skip)]
     hovered: Option<usize>,
+    /// The operation in flight, when the host reports one.
+    #[serde(skip)]
+    job: Option<crate::ui_model::PluginJob>,
+    /// A validation message shown in the prompts.
+    #[serde(skip)]
+    error: Option<String>,
 }
 
 impl PluginsPage {
@@ -149,7 +155,15 @@ impl PluginsPage {
             toolbar: Rect::new(0, 0, 0, 0),
             pending: Vec::new(),
             hovered: None,
+            job: None,
+            error: None,
         }
+    }
+
+    /// Replace the operation in flight; `None` clears the progress row.
+    pub(crate) fn set_job(&mut self, job: Option<crate::ui_model::PluginJob>) {
+        self.job = job;
+        self.clamp_view();
     }
 
     /// Replace the plugin list; selection is preserved when possible.
@@ -165,7 +179,9 @@ impl PluginsPage {
     }
 
     fn body_rows(&self) -> usize {
-        self.area.height.saturating_sub(1) as usize
+        self.area
+            .height
+            .saturating_sub(1 + u16::from(self.job.is_some())) as usize
     }
 
     fn selected_plugin(&self) -> Option<&norte_code_client::PluginSummary> {
@@ -188,6 +204,7 @@ impl PluginsPage {
     fn start_install(&mut self) {
         self.repository.clear();
         self.package.clear();
+        self.error = None;
         self.mode = Mode::Repository;
     }
 
@@ -217,20 +234,27 @@ impl PluginsPage {
             url,
             package: (!package.is_empty()).then(|| package.to_owned()),
         });
+        self.package.clear();
+        self.repository.clear();
         self.mode = Mode::Listing;
     }
 
     fn type_path(&mut self, key: &crossterm::event::KeyEvent) -> bool {
-        use crossterm::event::{KeyCode, KeyModifiers};
-        if key.modifiers != KeyModifiers::NONE {
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+        if key.kind != KeyEventKind::Press {
+            return false;
+        }
+        if !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
             return false;
         }
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Listing;
+                self.error = None;
                 true
             }
             KeyCode::Backspace => {
+                self.error = None;
                 match self.mode {
                     Mode::Repository => {
                         self.repository.pop();
@@ -243,13 +267,24 @@ impl PluginsPage {
                 true
             }
             KeyCode::Enter => match self.mode {
-                Mode::Repository if !self.repository.trim().is_empty() => {
-                    self.mode = Mode::Package;
+                Mode::Repository => {
+                    if looks_like_repo_url(&self.repository) {
+                        self.error = None;
+                        self.mode = Mode::Package;
+                    } else {
+                        self.error = Some("not a git repository URL".to_string());
+                    }
                     true
                 }
-                Mode::Repository => true,
                 Mode::Package => {
-                    self.submit_install();
+                    let package = self.package.trim();
+                    if package.is_empty() || looks_like_package_name(package) {
+                        self.error = None;
+                        self.submit_install();
+                    } else {
+                        self.error =
+                            Some("packages are lowercase letters, digits, - and _".to_string());
+                    }
                     true
                 }
                 Mode::ConfirmRemove => {
@@ -264,6 +299,7 @@ impl PluginsPage {
                 Mode::Listing => false,
             },
             KeyCode::Char(character) => {
+                self.error = None;
                 match self.mode {
                     Mode::Repository => self.repository.push(character),
                     Mode::Package => self.package.push(character),
@@ -277,7 +313,7 @@ impl PluginsPage {
 
     fn handle_listing_key(&mut self, key: &crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
-        if key.modifiers != KeyModifiers::NONE {
+        if !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
             return;
         }
         match key.code {
@@ -339,8 +375,11 @@ impl PluginsPage {
                     self.run(ACTIONS[index]);
                     return Outcome::Consumed;
                 }
-                if mouse.row > self.area.y {
-                    let index = self.offset + (mouse.row - self.area.y - 1) as usize;
+                let base = self.area.y + 1 + u16::from(self.job.is_some());
+                if mouse.row >= base
+                    && mouse.row < base + u16::try_from(self.body_rows()).unwrap_or(0)
+                {
+                    let index = self.offset + (mouse.row - base) as usize;
                     if index < self.plugins.len() {
                         self.selected = index;
                         self.clamp_view();
@@ -387,16 +426,22 @@ impl View for PluginsPage {
         self.area = area;
         buf.set_style(area, Style::default().bg(theme.background));
         self.paint_toolbar(area, buf, theme);
+        if let Some(job) = &self.job {
+            Self::paint_job(area, buf, theme, job);
+        }
         match self.mode {
             Mode::Repository => {
                 Self::paint_prompt(
                     area,
                     buf,
                     theme,
-                    "install plugin",
-                    "Repository URL",
-                    &self.repository.clone(),
-                    "Enter continues, Esc cancels",
+                    &PromptArgs {
+                        title: "install plugin",
+                        caption: "Repository URL",
+                        value: &self.repository,
+                        error: self.error.as_deref(),
+                        controls: "Enter continues, Esc cancels",
+                    },
                 );
                 return;
             }
@@ -405,10 +450,13 @@ impl View for PluginsPage {
                     area,
                     buf,
                     theme,
-                    "install plugin",
-                    "Workspace package (optional, Enter installs all)",
-                    &self.package.clone(),
-                    "Enter installs, Esc cancels",
+                    &PromptArgs {
+                        title: "install plugin",
+                        caption: "Workspace package (optional, Enter installs all)",
+                        value: &self.package,
+                        error: self.error.as_deref(),
+                        controls: "Enter installs, Esc cancels",
+                    },
                 );
                 return;
             }
@@ -421,10 +469,13 @@ impl View for PluginsPage {
                     area,
                     buf,
                     theme,
-                    "remove plugin",
-                    &format!("Remove {name}?"),
-                    "",
-                    "Enter removes, Esc cancels",
+                    &PromptArgs {
+                        title: "remove plugin",
+                        caption: &format!("Remove {name}?"),
+                        value: "",
+                        error: None,
+                        controls: "Enter removes, Esc cancels",
+                    },
                 );
                 return;
             }
@@ -454,6 +505,20 @@ impl View for PluginsPage {
             _ => Outcome::Ignored,
         }
     }
+}
+
+/// The text every prompt asks for.
+struct PromptArgs<'a> {
+    /// The prompt heading, e.g. `install plugin`.
+    title: &'a str,
+    /// What the field wants.
+    caption: &'a str,
+    /// The current value; drawn with the caret.
+    value: &'a str,
+    /// A validation message, when the value does not qualify.
+    error: Option<&'a str>,
+    /// The key legend under the field.
+    controls: &'a str,
 }
 
 impl PluginsPage {
@@ -496,33 +561,28 @@ impl PluginsPage {
         };
     }
 
-    fn paint_prompt(
-        area: Rect,
-        buf: &mut Buffer,
-        theme: &Theme,
-        title: &str,
-        caption: &str,
-        value: &str,
-        controls: &str,
-    ) {
+    fn paint_prompt(area: Rect, buf: &mut Buffer, theme: &Theme, prompt: &PromptArgs<'_>) {
         let caption_rows = [
-            (caption.to_string(), Style::default().fg(theme.muted)),
+            (prompt.caption.to_string(), Style::default().fg(theme.muted)),
             (String::new(), Style::default()),
             (
-                format!("{value}▏"),
+                format!("{}▏", prompt.value),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             (String::new(), Style::default()),
-            (controls.to_string(), Style::default().fg(theme.muted)),
+            (
+                prompt.controls.to_string(),
+                Style::default().fg(theme.muted),
+            ),
         ];
         let mut y = area.y + 3;
         buf.set_stringn(
             area.x + 1,
             y,
-            title,
-            title.chars().count(),
+            prompt.title,
+            prompt.title.chars().count(),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -532,13 +592,53 @@ impl PluginsPage {
             buf.set_stringn(area.x + 1, y, &line, line.chars().count(), style);
             y += 1;
         }
+        if let Some(error) = prompt.error {
+            buf.set_stringn(
+                area.x + 1,
+                y,
+                error,
+                error.chars().count(),
+                Style::default().fg(theme.destructive),
+            );
+        }
+    }
+
+    fn paint_job(area: Rect, buf: &mut Buffer, theme: &Theme, job: &crate::ui_model::PluginJob) {
+        let y = area.y + 1;
+        let total = job.total.max(1);
+        let cells = 16u16;
+        let filled = u16::try_from((u64::from(cells) * job.step.min(total)).div_ceil(total))
+            .unwrap_or(0)
+            .min(cells);
+        let bar = format!(
+            "{}{}",
+            "█".repeat(usize::from(filled)),
+            "░".repeat(usize::from(cells - filled))
+        );
+        let line = format!(
+            "{} · {bar} {}/{} · {}",
+            job.operation,
+            job.step.min(total),
+            total,
+            job.stage
+        );
+        buf.set_stringn(
+            area.x + 1,
+            y,
+            &line,
+            usize::from(area.width.saturating_sub(1)),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        );
     }
 
     fn paint_list(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
         let rows = self.body_rows();
         let end = (self.offset + rows).min(self.plugins.len());
+        let base = area.y + 1 + u16::from(self.job.is_some());
         for (offset, index) in (self.offset..end).enumerate() {
-            let y = area.y + 1 + u16::try_from(offset).unwrap_or(0);
+            let y = base + u16::try_from(offset).unwrap_or(0);
             let selected = self.selected == index;
             if selected {
                 buf.set_style(
@@ -620,6 +720,38 @@ fn clip(text: &str, limit: usize) -> String {
     let mut out: String = text.chars().take(limit.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// Accepts `http(s)`, `ssh`, `git` URLs and `git@host:path`-style references.
+fn looks_like_repo_url(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.contains(char::is_whitespace) {
+        return false;
+    }
+    if let Some(rest) = trimmed.strip_prefix("git@") {
+        return rest.split_once(':').is_some_and(|(host, path)| {
+            !host.is_empty() && !path.is_empty() && !host.contains(':')
+        });
+    }
+    for scheme in ["https://", "http://", "ssh://", "git://"] {
+        if let Some(rest) = trimmed.strip_prefix(scheme) {
+            let host = rest.split('/').next().unwrap_or("");
+            return !host.is_empty();
+        }
+    }
+    false
+}
+
+/// Cargo package names: lowercase letters, digits, '-', '_'; at least one char.
+fn looks_like_package_name(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 /// Which toolbar button sits under a column.

@@ -230,6 +230,7 @@ fn update_models(tree: &mut Tree, model: &UiModel) {
 fn update_plugins(tree: &mut Tree, model: &UiModel) {
     if let Some(page) = tree.find_mut::<plugins_page::PluginsPage>("plugins") {
         page.set_data(model.plugins.clone());
+        page.set_job(model.plugin_job.clone());
     }
 }
 

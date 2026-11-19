@@ -141,8 +141,11 @@ impl SessionsPage {
     }
 
     fn type_title(&mut self, key: &crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyCode, KeyModifiers};
-        if key.modifiers != KeyModifiers::NONE {
+        use crossterm::event::KeyCode;
+        if !matches!(
+            key.modifiers,
+            crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
+        ) {
             return;
         }
         let Mode::Rename { session, title } = &mut self.mode else {
@@ -169,8 +172,11 @@ impl SessionsPage {
     }
 
     fn confirm_delete(&mut self, key: &crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyCode, KeyModifiers};
-        if key.modifiers != KeyModifiers::NONE {
+        use crossterm::event::KeyCode;
+        if !matches!(
+            key.modifiers,
+            crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
+        ) {
             return;
         }
         match key.code {
@@ -188,8 +194,11 @@ impl SessionsPage {
     }
 
     fn handle_listing_key(&mut self, key: &crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyCode, KeyModifiers};
-        if key.modifiers != KeyModifiers::NONE {
+        use crossterm::event::KeyCode;
+        if !matches!(
+            key.modifiers,
+            crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
+        ) {
             return;
         }
         match key.code {

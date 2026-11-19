@@ -781,6 +781,22 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
             }
         }
         ServerEventKind::Delta { delta, .. } => fold_delta(delta, tree, model),
+        ServerEventKind::PluginProgress {
+            operation,
+            step,
+            total,
+            stage,
+        } => {
+            model.plugin_job = Some(crate::ui_model::PluginJob {
+                operation: operation.clone(),
+                step: *step,
+                total: *total,
+                stage: stage.clone(),
+            });
+        }
+        ServerEventKind::PluginChanged { .. } => {
+            model.plugin_job = None;
+        }
         ServerEventKind::QuestionAnswered { .. } => {
             model.question = None;
             if model.turn == TurnState::AwaitingAnswer {

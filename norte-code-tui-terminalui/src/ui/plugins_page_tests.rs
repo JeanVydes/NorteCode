@@ -1,6 +1,6 @@
 //! The plugins page: toolbar actions, prompts and row toggling.
 
-use super::{Action, PluginsAction, PluginsPage};
+use super::{Action, Mode, PluginsAction, PluginsPage};
 
 fn plugin(name: &str, enabled: bool) -> norte_code_client::PluginSummary {
     norte_code_client::PluginSummary {
@@ -82,6 +82,50 @@ fn install_with_a_blank_package_installs_the_whole_workspace() {
         &actions[..],
         [PluginsAction::Install { package: None, .. }]
     ));
+}
+
+#[test]
+fn an_invalid_repository_url_stays_in_the_prompt() {
+    let mut page = page_with(Vec::new());
+    page.start_install();
+    for character in "not a url".chars() {
+        let _ = page.type_path(&key(character));
+    }
+    assert!(page.type_path(&enter()));
+    assert_eq!(page.mode, Mode::Repository);
+    assert!(page.take_pending().is_empty());
+}
+
+#[test]
+fn an_invalid_package_name_stays_in_the_prompt() {
+    let mut page = page_with(Vec::new());
+    page.start_install();
+    for character in "https://example.com/repo".chars() {
+        let _ = page.type_path(&key(character));
+    }
+    assert!(page.type_path(&enter()));
+    for character in "UPPER _CASE!".chars() {
+        let _ = page.type_path(&key(character));
+    }
+    assert!(page.type_path(&enter()));
+    assert_eq!(page.mode, Mode::Package);
+    assert!(page.take_pending().is_empty());
+}
+
+#[test]
+fn a_job_occupies_one_row() {
+    let mut page = page_with(vec![plugin("kept", true)]);
+    page.area = ratatui::layout::Rect::new(0, 0, 80, 20);
+    let baseline = page.body_rows();
+    page.set_job(Some(crate::ui_model::PluginJob {
+        operation: "install".to_string(),
+        step: 2,
+        total: 5,
+        stage: "cloning".to_string(),
+    }));
+    assert_eq!(page.body_rows(), baseline - 1);
+    page.set_job(None);
+    assert_eq!(page.body_rows(), baseline);
 }
 
 #[test]
