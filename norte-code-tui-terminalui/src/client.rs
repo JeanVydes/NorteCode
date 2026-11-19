@@ -62,6 +62,11 @@ pub(crate) enum ClientEvent {
     },
     /// The full history of the attached session, newest first.
     History(Vec<norte_code_wire::HistoryItem>),
+    /// Something the host did, worth telling the reader.
+    Notice {
+        /// The words.
+        text: String,
+    },
 }
 
 /// Commands the interface sends to the connection task.
@@ -110,10 +115,72 @@ pub(crate) enum UiCommand {
         /// The session to attach to.
         session: Box<norte_code_wire::SessionSummary>,
     },
+    /// Run a plugin operation on the host; completion re-lists the plugins.
+    Plugin(PluginOp),
+}
+
+/// A plugin operation the host can do for us.
+#[derive(Clone, Debug)]
+pub(crate) enum PluginOp {
+    /// Install a plugin from a git repository, optionally one package of it.
+    Install {
+        /// The repository URL.
+        url: String,
+        /// One workspace package to install instead of the whole workspace.
+        package: Option<String>,
+    },
+    /// Update one plugin, or every plugin with a recorded source.
+    Update {
+        /// The plugin to update; `None` updates all.
+        name: Option<String>,
+    },
+    /// Remove one plugin.
+    Remove {
+        /// The plugin to remove.
+        name: String,
+    },
+    /// Enable or disable one plugin.
+    SetEnabled {
+        /// The plugin to toggle.
+        name: String,
+        /// What it should be after the change.
+        enabled: bool,
+    },
 }
 
 const MAX_ATTACH_ATTEMPTS: u32 = 3;
 const RETRY_BASE_MS: u64 = 400;
+
+/// Run one plugin operation and re-list the plugins afterwards.
+async fn run_plugin_op(api: &Arc<RestClient>, op: PluginOp, events: &Sender<ClientEvent>) {
+    let outcome = match &op {
+        PluginOp::Install { url, package } => {
+            api.install_plugin(url, package.as_deref(), false).await
+        }
+        PluginOp::Update { name } => api.update_plugin(name.as_deref()).await,
+        PluginOp::Remove { name } => api.remove_plugin(name).await,
+        PluginOp::SetEnabled { name, enabled } => api.set_plugin_enabled(name, *enabled).await,
+    };
+    match outcome {
+        Ok(change) => {
+            let _ = events
+                .send(ClientEvent::Notice {
+                    text: format!("plugin {} · {}", change.name, change.operation),
+                })
+                .await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: format!("plugin operation failed · {error}"),
+                })
+                .await;
+        }
+    }
+    if let Ok(plugins) = api.plugins().await {
+        let _ = events.send(ClientEvent::Plugins(plugins)).await;
+    }
+}
 
 /// Fetch everything the interface needs right after attach.
 async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<ClientEvent>) {
@@ -361,6 +428,13 @@ async fn drive_stream(
                 match command {
                     UiCommand::OpenSession { session: summary } => {
                         return StreamOutcome::Switch(summary);
+                    }
+                    UiCommand::Plugin(op) => {
+                        let api = Arc::clone(api);
+                        let events = events.clone();
+                        tokio::spawn(async move {
+                            run_plugin_op(&api, op, &events).await;
+                        });
                     }
                     UiCommand::Send { session: target, text, queue_mode } => {
                         let _ = api
