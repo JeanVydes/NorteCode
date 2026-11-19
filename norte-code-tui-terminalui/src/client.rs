@@ -327,6 +327,9 @@ async fn drive_stream(
                         if let Ok(models) = api.models().await {
                             let _ = events.send(ClientEvent::Models(models)).await;
                         }
+                        if let Ok(sessions) = client.list_sessions().await {
+                            let _ = events.send(ClientEvent::Sessions(sessions)).await;
+                        }
                     }
                     UiCommand::SetReasoning {
                         session: target,
