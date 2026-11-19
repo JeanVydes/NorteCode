@@ -123,6 +123,8 @@ pub(crate) struct UiModel {
     pub(crate) cost: Option<norte_code_client::CostReport>,
     /// Which tab is showing.
     pub(crate) tab: Tab,
+    /// The title of the session the stream is attached to, for the attach notice.
+    pub(crate) attached_title: Option<String>,
 }
 
 /// The tabs of the interface.
@@ -253,6 +255,7 @@ impl UiModel {
             active_provider: None,
             question: None,
             tab: Tab::Chat,
+            attached_title: None,
         }
     }
 }

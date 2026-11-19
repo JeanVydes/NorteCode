@@ -606,21 +606,21 @@ fn apply_attached(
         .title
         .clone()
         .unwrap_or_else(|| session.session_id.clone());
+    let changed_session = model
+        .active
+        .as_ref()
+        .is_none_or(|active| active.as_str() != session.session_id);
     model.attachment = SessionAttachmentState::Attached;
     model.active_model.clone_from(&session.model);
     model.active_provider.clone_from(&session.provider);
     model.active = Some(norte_code_wire::SessionKey::new(session.session_id.clone()));
-    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-        stream.push(ui::Item::Notice {
-            text: format!("attached to {title}"),
-            tone: ui::Tone::Neutral,
-        });
-        if !model.active_session_has_model() {
-            stream.push(ui::Item::Notice {
-                text: "no model selected; 3 Models, Enter to choose".into(),
-                tone: ui::Tone::Warn,
-            });
-        }
+    model.attached_title = Some(title.clone());
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream")
+        && changed_session
+    {
+        // Never show another session's content under this session's label;
+        // the attach notice is pushed once the history has been replayed.
+        stream.clear_all();
     }
     true
 }
@@ -723,10 +723,10 @@ fn drain_server_events(
                 changed = true;
             }
             Ok(ClientEvent::History(items)) => {
-                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                    stream.replace_history(items);
-                }
-                changed = true;
+                changed = fold_history_event(tree, model, items) || changed;
+            }
+            Ok(ClientEvent::HistoryFailed { reason }) => {
+                changed = fold_history_failure(tree, model, &reason) || changed;
             }
             Ok(ClientEvent::Server(event)) => {
                 fold(&event, tree, model);
@@ -797,6 +797,52 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
             }
         }
         _ => {}
+    }
+}
+
+/// Replay a session's history into the stream, replacing what is there.
+fn fold_history_event(
+    tree: &mut terminalui::Tree,
+    model: &crate::ui_model::UiModel,
+    items: Vec<norte_code_wire::HistoryItem>,
+) -> bool {
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.replace_history(items);
+        push_attach_notice(stream, model);
+    }
+    true
+}
+
+/// Report a history fetch that failed; an empty stream beats a stale one.
+fn fold_history_failure(
+    tree: &mut terminalui::Tree,
+    model: &crate::ui_model::UiModel,
+    reason: &str,
+) -> bool {
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.push(ui::Item::Notice {
+            text: format!("could not load the session's history · {reason}"),
+            tone: ui::Tone::Warn,
+        });
+        push_attach_notice(stream, model);
+    }
+    true
+}
+
+/// The attach notice rides along with the replayed history.
+fn push_attach_notice(stream: &mut ui::Transcript, model: &crate::ui_model::UiModel) {
+    let Some(title) = model.attached_title.clone() else {
+        return;
+    };
+    stream.push(ui::Item::Notice {
+        text: format!("attached to {title}"),
+        tone: ui::Tone::Neutral,
+    });
+    if !model.active_session_has_model() {
+        stream.push(ui::Item::Notice {
+            text: "no model selected; 3 Models, Enter to choose".into(),
+            tone: ui::Tone::Warn,
+        });
     }
 }
 
