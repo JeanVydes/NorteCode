@@ -7,7 +7,9 @@
 
 mod app;
 mod client;
+mod compact_notice;
 mod config;
+mod context;
 mod diff;
 mod job_notice;
 mod palette;

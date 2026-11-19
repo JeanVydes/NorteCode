@@ -3,6 +3,7 @@
 //! The view reads this; only the client layer mutates it. Everything here
 //! is plain data, free of any notion of terminal or layout.
 
+use crate::context::ContextUsage;
 use crate::diff::DiffMode;
 use crate::theme::{ThemeCatalog, ThemeChoice, ThemeKind};
 use crate::ui::RailPosition;
@@ -180,6 +181,8 @@ pub(crate) struct UiModel {
     pub(crate) agents: Vec<norte_code_wire::AgentSummary>,
     /// The telemetry for the attached session.
     pub(crate) telemetry_session: Option<norte_code_wire::TelemetryReport>,
+    /// How full the session's context window is.
+    pub(crate) context: ContextUsage,
     /// The fleet-wide cost total, when the providers report one.
     pub(crate) cost: Option<norte_code_client::CostReport>,
     /// Which tab is showing.
@@ -352,6 +355,7 @@ impl UiModel {
             catalog: None,
             agents: Vec::new(),
             telemetry_session: None,
+            context: ContextUsage::default(),
             cost: None,
             active_model: None,
             active_provider: None,

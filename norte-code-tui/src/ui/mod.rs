@@ -17,6 +17,9 @@ mod pages;
 mod plugins_page;
 mod question_prompt;
 mod rail;
+#[cfg(test)]
+#[path = "rail_tests.rs"]
+mod rail_tests;
 mod selector;
 mod sessions_page;
 mod transcript;
@@ -159,6 +162,9 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
     );
 
     let mut tree = Tree::new(root);
+    if let Some(rail) = tree.find_mut::<Rail>("rail") {
+        rail.set_context(model.context);
+    }
     tree.focus("composer");
     tree
 }

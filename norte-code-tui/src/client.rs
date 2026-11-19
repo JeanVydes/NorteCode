@@ -141,6 +141,11 @@ pub(crate) enum UiCommand {
         /// The turn the host assigned.
         turn_id: String,
     },
+    /// Compact the attached session now.
+    Compact {
+        /// The session to compact.
+        session: norte_code_wire::SessionKey,
+    },
 }
 
 /// A plugin operation the host can do for us.
@@ -491,6 +496,21 @@ async fn answer_question(
     }
 }
 
+/// Ask the host to compact a session now; failures reach the transcript.
+async fn compact_session(
+    api: &RestClient,
+    session: &norte_code_wire::SessionKey,
+    events: &Sender<ClientEvent>,
+) {
+    if let Err(error) = api.compact(session.as_str()).await {
+        let _ = events
+            .send(ClientEvent::SendFailed {
+                reason: format!("compact refused: {error}"),
+            })
+            .await;
+    }
+}
+
 /// Send the attachment frames for a session.
 async fn attach_shared(
     client: &Arc<RemoteClient>,
@@ -645,6 +665,9 @@ async fn drive_stream(
                     }
                     UiCommand::CancelTurn { session, turn_id } => {
                         cancel_turn(api, events, &session, turn_id).await;
+                    }
+                    UiCommand::Compact { session: target } => {
+                        compact_session(api, &target, events).await;
                     }
                     UiCommand::Send { session: target, text, queue_mode } => {
                         send_prompt(api, &target, text, queue_mode).await;
