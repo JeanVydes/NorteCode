@@ -103,29 +103,68 @@ pub(crate) enum Item {
 }
 
 fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let needed = if current.is_empty() {
-            word.len()
-        } else {
-            current.len() + 1 + word.len()
-        };
-        if needed > width && !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
+    if width == 0 {
+        return vec![String::new()];
     }
-    if !current.is_empty() {
+    let mut lines = Vec::new();
+    for logical in text.lines() {
+        if logical.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut cells = 0usize;
+        for word in logical.split_whitespace() {
+            let word_cells = display_width(word);
+            let needed = if cells == 0 {
+                word_cells
+            } else {
+                cells + 1 + word_cells
+            };
+            if needed > width && cells > 0 {
+                lines.push(std::mem::take(&mut current));
+                cells = 0;
+            }
+            if word_cells > width {
+                let mut chunk = String::new();
+                let mut chunk_cells = 0usize;
+                for character in word.chars() {
+                    let size = char_width(character);
+                    if chunk_cells + size > width && !chunk.is_empty() {
+                        lines.push(std::mem::take(&mut chunk));
+                        chunk_cells = 0;
+                    }
+                    chunk.push(character);
+                    chunk_cells += size;
+                }
+                current = chunk;
+                cells = chunk_cells;
+                continue;
+            }
+            if cells > 0 {
+                current.push(' ');
+                cells += 1;
+            }
+            current.push_str(word);
+            cells += word_cells;
+        }
         lines.push(current);
+    }
+    if text.ends_with('\n') {
+        lines.push(String::new());
     }
     if lines.is_empty() {
         lines.push(String::new());
     }
     lines
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars().map(char_width).sum()
+}
+
+fn char_width(character: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(character).unwrap_or(0)
 }
 
 /// The conversation stream, bottom-pinned.
@@ -994,7 +1033,7 @@ fn paint_inline_code(buf: &mut Buffer, x: u16, y: u16, line: &str, theme: &Theme
         }
         let style = if in_code { code } else { normal };
         buf.set_stringn(col, y, segment, segment.chars().count(), style);
-        col += u16::try_from(segment.chars().count()).unwrap_or(u16::MAX);
+        col += u16::try_from(display_width(segment)).unwrap_or(u16::MAX);
         in_code = !in_code;
     }
 }
