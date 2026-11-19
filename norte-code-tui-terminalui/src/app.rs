@@ -194,10 +194,12 @@ fn handle_key(
             } else if model.tab == Tab::Chat {
                 send_current_prompt(tree, commands, model);
                 pass_to_tree = false;
-            } else {
+            } else if model.tab == Tab::Sessions {
                 handle_enter(tree, commands, model);
                 pass_to_tree = false;
             }
+            // Other tabs let Enter fall through to the tree, which routes
+            // it to the page's own handler (models, plugins, ...).
         }
         (KeyModifiers::CONTROL | KeyModifiers::ALT, KeyCode::Char(digit)) => {
             if let Some(tab) = Tab::from_digit(digit) {
@@ -223,6 +225,7 @@ fn handle_key(
     }
     drain_question_answer(tree, commands, model);
     drain_models_actions(tree, commands, model);
+    drain_plugins_actions(tree, commands);
     sync_selectors(tree, commands, model);
     drain_tab_request(tree, model);
     ui::sync_views(tree, model);
@@ -446,6 +449,86 @@ fn open_key_prompt(
     }
 }
 
+/// Ship a plugin operation to the host; it reports back through the stream.
+fn send_plugin_op(
+    tree: &mut terminalui::Tree,
+    commands: Option<&tokio::sync::mpsc::Sender<UiCommand>>,
+    op: crate::client::PluginOp,
+    summary: String,
+) {
+    if let Some(commands) = commands {
+        let _ = commands.try_send(UiCommand::Plugin(op));
+    }
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.push(ui::Item::Notice {
+            text: summary,
+            tone: ui::Tone::Neutral,
+        });
+    }
+}
+
+/// Drain the plugins page's pending actions into the client.
+fn drain_plugins_actions(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+) {
+    let Some(page) = tree.find_mut::<ui::PluginsPage>("plugins") else {
+        return;
+    };
+    for action in page.take_pending() {
+        match action {
+            ui::PluginsAction::Install { url, package } => {
+                send_plugin_op(
+                    tree,
+                    commands.as_ref(),
+                    crate::client::PluginOp::Install {
+                        url: url.clone(),
+                        package: package.clone(),
+                    },
+                    format!("plugin install started · {url}"),
+                );
+            }
+            ui::PluginsAction::Update { name } => {
+                let summary = match &name {
+                    Some(name) => format!("plugin update started · {name}"),
+                    None => "updating every plugin".to_owned(),
+                };
+                send_plugin_op(
+                    tree,
+                    commands.as_ref(),
+                    crate::client::PluginOp::Update { name },
+                    summary,
+                );
+            }
+            ui::PluginsAction::Remove { name } => {
+                send_plugin_op(
+                    tree,
+                    commands.as_ref(),
+                    crate::client::PluginOp::Remove { name: name.clone() },
+                    format!("plugin remove started · {name}"),
+                );
+            }
+            ui::PluginsAction::SetEnabled { name, enabled } => {
+                let verb = if enabled { "enabling" } else { "disabling" };
+                send_plugin_op(
+                    tree,
+                    commands.as_ref(),
+                    crate::client::PluginOp::SetEnabled {
+                        name: name.clone(),
+                        enabled,
+                    },
+                    format!("{verb} plugin · {name}"),
+                );
+            }
+            ui::PluginsAction::Refresh => {
+                if let Some(commands) = commands.as_ref() {
+                    let _ = commands.try_send(UiCommand::RefreshViews);
+                }
+            }
+        }
+    }
+}
+
 /// Drain the models page's pending actions into the client.
 fn drain_models_actions(
     tree: &mut terminalui::Tree,
@@ -624,6 +707,15 @@ fn drain_server_events(
                     stream.push(ui::Item::Notice {
                         text: reason,
                         tone: ui::Tone::Error,
+                    });
+                }
+                changed = true;
+            }
+            Ok(ClientEvent::Notice { text }) => {
+                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                    stream.push(ui::Item::Notice {
+                        text,
+                        tone: ui::Tone::Neutral,
                     });
                 }
                 changed = true;

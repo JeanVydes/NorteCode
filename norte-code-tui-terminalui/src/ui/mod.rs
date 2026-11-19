@@ -9,6 +9,7 @@ mod inspector;
 mod key_prompt;
 mod models_page;
 mod pages;
+mod plugins_page;
 mod question_prompt;
 mod rail;
 mod selector;
@@ -22,6 +23,7 @@ pub(crate) use header::Header;
 pub(crate) use inspector::Inspector;
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
+pub(crate) use plugins_page::{PluginsAction, PluginsPage};
 pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::Rail;
 pub(crate) use selector::Selector;
@@ -76,7 +78,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
             node("jobs", pages::jobs(model)),
             node("telemetry", pages::telemetry(model)),
             node("host", pages::host(model)),
-            node("plugins", pages::plugins(model)),
+            node("plugins", plugins_page::PluginsPage::new()),
             node("costs", pages::costs(model)),
         ]),
     );
@@ -216,6 +218,12 @@ fn update_models(tree: &mut Tree, model: &UiModel) {
     }
 }
 
+fn update_plugins(tree: &mut Tree, model: &UiModel) {
+    if let Some(page) = tree.find_mut::<plugins_page::PluginsPage>("plugins") {
+        page.set_data(model.plugins.clone());
+    }
+}
+
 /// Refresh the inspectors from the latest model snapshot; called after data arrives.
 pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("sessions") {
@@ -234,9 +242,7 @@ pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("host") {
         *inspector = pages::host(model);
     }
-    if let Some(inspector) = tree.find_mut::<inspector::Inspector>("plugins") {
-        *inspector = pages::plugins(model);
-    }
+    update_plugins(tree, model);
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("costs") {
         *inspector = pages::costs(model);
     }

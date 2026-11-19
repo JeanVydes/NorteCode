@@ -187,29 +187,6 @@ pub(crate) fn host(model: &UiModel) -> Inspector {
     inspector
 }
 
-pub(crate) fn plugins(model: &UiModel) -> Inspector {
-    let mut inspector = Inspector::new("plugins · extensibility points", Selection::Browse);
-    let mut rows: Vec<Row> = model
-        .plugins
-        .iter()
-        .map(|plugin| {
-            let state = if plugin.loaded {
-                "loaded"
-            } else if let Some(reason) = &plugin.load_error {
-                return Row::new(plugin.name.clone()).with_secondary(clip(reason, 48));
-            } else {
-                "disabled"
-            };
-            Row::new(plugin.name.clone()).with_secondary(state)
-        })
-        .collect();
-    if rows.is_empty() {
-        rows.push(Row::new("no plugins installed").with_secondary("host starts without any"));
-    }
-    inspector.set_rows(rows);
-    inspector
-}
-
 pub(crate) fn costs(model: &UiModel) -> Inspector {
     let mut inspector = Inspector::new("costs · provider-reported spend", Selection::Browse);
     let mut rows = Vec::new();
