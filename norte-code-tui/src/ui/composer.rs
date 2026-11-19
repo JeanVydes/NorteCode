@@ -84,34 +84,38 @@ pub(crate) struct Composer {
     history: History,
 }
 
+/// The input chrome, rebuilt from the theme in use.
+fn input_style(theme: &Theme) -> InputStyle {
+    InputStyle {
+        border: Some(Border {
+            set: BorderSet::Rounded,
+            color: Some(theme.accent),
+            radius: Radius::Small,
+        }),
+        radius: Radius::Small,
+        background: Some(theme.secondary),
+        foreground: Some(theme.foreground),
+        placeholder: Some(theme.muted),
+        cursor: Some(theme.accent),
+        scrollbar: ScrollbarStyle::default(),
+        cursor_style: CursorStyle {
+            shape: CursorShape::Line,
+            mode: CursorMode::Pulse,
+            blink_ms: 530,
+            opacity: 1.0,
+            easing: terminalui::Easing::EaseInOutSine,
+        },
+    }
+}
+
 impl Composer {
     /// Creates a composer reading from the given theme.
     pub(crate) fn new(theme: &Theme) -> Self {
-        let style = InputStyle {
-            border: Some(Border {
-                set: BorderSet::Rounded,
-                color: Some(theme.accent),
-                radius: Radius::Small,
-            }),
-            radius: Radius::Small,
-            background: Some(theme.secondary),
-            foreground: Some(theme.foreground),
-            placeholder: Some(theme.muted),
-            cursor: Some(theme.accent),
-            scrollbar: ScrollbarStyle::default(),
-            cursor_style: CursorStyle {
-                shape: CursorShape::Line,
-                mode: CursorMode::Pulse,
-                blink_ms: 530,
-                opacity: 1.0,
-                easing: terminalui::Easing::EaseInOutSine,
-            },
-        };
         Self {
             input: Input::new()
                 .multiline(true)
                 .with_placeholder("Ask NORTE to do anything...")
-                .with_style(style),
+                .with_style(input_style(theme)),
             history: History::default(),
         }
     }
@@ -230,6 +234,7 @@ impl View for Composer {
         cx: &mut Context,
         theme: &Theme,
     ) {
+        self.input.style = input_style(theme);
         self.input.render(area, buf, cx, theme);
     }
 
