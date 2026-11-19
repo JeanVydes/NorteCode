@@ -46,6 +46,58 @@ fn reasoning_blocks_toggle_with_clicks() {
 }
 
 #[test]
+fn reasoning_deltas_merge_into_one_block_per_turn() {
+    let mut transcript = Transcript::new();
+    transcript.push(Item::User {
+        text: "run several tools".to_string(),
+    });
+    transcript.push_reasoning_text("I should ");
+    transcript.push_assistant_text("ok ");
+    transcript.push(Item::Tool {
+        call_id: "1".to_string(),
+        name: "read".to_string(),
+        target: None,
+        state: super::ToolState::Done,
+        meta: None,
+    });
+    transcript.push_reasoning_text("explore the repo.");
+    let thoughts: Vec<_> = transcript
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Reasoning { text, .. } = item {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(thoughts, vec!["I should explore the repo."]);
+}
+
+#[test]
+fn reasoning_in_a_new_turn_gets_its_own_block() {
+    let mut transcript = Transcript::new();
+    transcript.push_reasoning_text("first turn");
+    transcript.push(Item::User {
+        text: "next".to_string(),
+    });
+    transcript.push_reasoning_text("second turn");
+    let thoughts: Vec<_> = transcript
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Reasoning { text, .. } = item {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(thoughts, vec!["first turn", "second turn"]);
+}
+
+#[test]
 fn non_reasoning_rows_are_not_toggleable() {
     let mut transcript = Transcript::new();
     transcript.push(Item::Notice {
