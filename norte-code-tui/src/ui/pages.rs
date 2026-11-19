@@ -4,8 +4,6 @@
 //! rendered by the shared [`Inspector`] view. The rows come straight from
 //! the live data the client holds; nothing here invents mock content.
 
-use std::fmt::Write;
-
 use crate::ui_model::UiModel;
 
 use super::inspector::{Inspector, Row, Selection};
@@ -68,53 +66,6 @@ pub(crate) fn jobs(model: &UiModel) -> Inspector {
         .collect();
     if rows.is_empty() {
         rows.push(Row::new("no jobs").with_secondary("nothing running"));
-    }
-    inspector.set_rows(rows);
-    inspector
-}
-
-fn request_status_label(status: norte_code_wire::RequestStatus) -> &'static str {
-    match status {
-        norte_code_wire::RequestStatus::Ok => "ok",
-        norte_code_wire::RequestStatus::Error => "failed",
-        norte_code_wire::RequestStatus::Cancelled => "cancelled",
-    }
-}
-
-pub(crate) fn telemetry(model: &UiModel) -> Inspector {
-    let mut inspector = Inspector::new("telemetry · session requests", Selection::Browse);
-    let mut rows = Vec::new();
-    if let Some(report) = &model.telemetry {
-        let summary = &report.summary;
-        let mut totals = format!("{} requests", summary.requests);
-        if summary.errors > 0 {
-            let _ = write!(&mut totals, " · {} errors", summary.errors);
-        }
-        if summary.cancelled > 0 {
-            let _ = write!(&mut totals, " · {} cancelled", summary.cancelled);
-        }
-        rows.push(Row::new(totals).with_secondary("totals"));
-        rows.push(
-            Row::new(format!(
-                "{} in / {} out",
-                summary.input_tokens, summary.output_tokens
-            ))
-            .with_secondary("tokens"),
-        );
-        rows.push(
-            Row::new(format!("{} cached reads", summary.cache_read_tokens)).with_secondary("cache"),
-        );
-        rows.push(Row::new(format!("{} ms total", summary.duration_ms)).with_secondary("duration"));
-
-        for record in report.records.iter().rev().take(10) {
-            let duration = human_duration(record.duration_ms);
-            let model_name = record.model.clone();
-            let status = request_status_label(record.status);
-            rows.push(Row::new(model_name).with_secondary(format!("{status} · {duration}")));
-        }
-    }
-    if rows.is_empty() {
-        rows.push(Row::new("telemetry not loaded yet").with_secondary("waiting for attach"));
     }
     inspector.set_rows(rows);
     inspector
