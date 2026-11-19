@@ -3,7 +3,7 @@
 //! The view reads this; only the client layer mutates it. Everything here
 //! is plain data, free of any notion of terminal or layout.
 
-use crate::theme::ThemeKind;
+use crate::theme::{ThemeCatalog, ThemeChoice, ThemeKind};
 use norte_code_wire::SessionSummary;
 
 /// Where the active turn is.
@@ -81,8 +81,10 @@ pub(crate) enum SendMode {
 /// The preferences the client keeps across sessions.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Preferences {
-    /// Which built-in theme to paint.
-    pub(crate) theme: ThemeKind,
+    /// Which theme to paint, built-in or configured.
+    pub(crate) theme: ThemeChoice,
+    /// Every theme the interface can paint with.
+    pub(crate) catalog: ThemeCatalog,
     /// Reasoning effort, sent with every turn.
     pub(crate) reasoning: ReasoningLevel,
     /// What to do with a message sent while a turn is running.
@@ -258,7 +260,8 @@ impl UiModel {
     pub(crate) fn detached() -> Self {
         Self {
             preferences: Preferences {
-                theme: ThemeKind::Dark,
+                theme: ThemeChoice::BuiltIn(ThemeKind::Dark),
+                catalog: ThemeCatalog::default(),
                 reasoning: ReasoningLevel::Auto,
                 send_mode: SendMode::Steer,
             },

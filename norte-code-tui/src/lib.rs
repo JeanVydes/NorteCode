@@ -8,6 +8,7 @@
 mod app;
 mod client;
 mod config;
+mod palette;
 mod terminal;
 mod theme;
 mod ui;

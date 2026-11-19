@@ -31,7 +31,6 @@ pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
 pub(crate) use transcript::{Item, Tone, ToolState, Transcript};
 
-use crate::theme;
 use crate::ui_model::{Tab, UiModel};
 
 use terminalui::{Stack, Text, TextStyle, Tree, node};
@@ -52,13 +51,54 @@ fn tab_index(tab: Tab) -> usize {
     }
 }
 
-pub(crate) fn build_tree(model: &UiModel) -> Tree {
-    let theme = theme::theme(model.preferences.theme);
+/// The bottom strip: queue, reasoning, hints and the connection chip.
+fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
+    node(
+        "status",
+        StatusBar::new()
+            .left(vec![
+                node(
+                    "queue",
+                    selector::Selector::new(
+                        "queue",
+                        vec!["steer", "queue", "interrupt", "reject"],
+                        0,
+                    ),
+                ),
+                node(
+                    "reasoning",
+                    selector::Selector::new(
+                        "reasoning",
+                        vec!["auto", "low", "medium", "high"],
+                        match model.preferences.reasoning {
+                            crate::ui_model::ReasoningLevel::Auto => 0,
+                            crate::ui_model::ReasoningLevel::Low => 1,
+                            crate::ui_model::ReasoningLevel::Medium => 2,
+                            crate::ui_model::ReasoningLevel::High => 3,
+                        },
+                    ),
+                ),
+            ])
+            .right(vec![
+                node(
+                    "hint",
+                    Text::new("alt+1-9 tabs · ⏎ send · ⇧⏎ newline")
+                        .with_style(TextStyle::default().fg(theme.muted)),
+                ),
+                node(
+                    "state",
+                    Text::new("● ready").with_style(TextStyle::default().fg(theme.success).bold()),
+                ),
+            ])
+            .with_style(StatusBarStyle {
+                background: Some(theme.secondary),
+                separator: Some(theme.border),
+            }),
+    )
+}
 
-    let status_style = StatusBarStyle {
-        background: Some(theme.secondary),
-        separator: Some(theme.border),
-    };
+pub(crate) fn build_tree(model: &UiModel) -> Tree {
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
 
     let chat = node(
         "chat",
@@ -97,50 +137,14 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
             .children(vec![
                 node(
                     "header",
-                    header::Header::new(model.turn, model.preferences.theme.name().to_string()),
+                    header::Header::new(
+                        model.turn,
+                        crate::theme::theme_name(&model.preferences.theme).to_string(),
+                    ),
                 ),
                 middle,
                 node("composer", composer::Composer::new(&theme)),
-                node(
-                    "status",
-                    StatusBar::new()
-                        .left(vec![
-                            node(
-                                "queue",
-                                selector::Selector::new(
-                                    "queue",
-                                    vec!["steer", "queue", "interrupt", "reject"],
-                                    0,
-                                ),
-                            ),
-                            node(
-                                "reasoning",
-                                selector::Selector::new(
-                                    "reasoning",
-                                    vec!["auto", "low", "medium", "high"],
-                                    match model.preferences.reasoning {
-                                        crate::ui_model::ReasoningLevel::Auto => 0,
-                                        crate::ui_model::ReasoningLevel::Low => 1,
-                                        crate::ui_model::ReasoningLevel::Medium => 2,
-                                        crate::ui_model::ReasoningLevel::High => 3,
-                                    },
-                                ),
-                            ),
-                        ])
-                        .right(vec![
-                            node(
-                                "hint",
-                                Text::new("alt+1-9 tabs · ⏎ send · ⇧⏎ newline")
-                                    .with_style(TextStyle::default().fg(theme.muted)),
-                            ),
-                            node(
-                                "state",
-                                Text::new("● ready")
-                                    .with_style(TextStyle::default().fg(theme.success).bold()),
-                            ),
-                        ])
-                        .with_style(status_style),
-                ),
+                status_bar(model, &theme),
             ]),
     );
 
