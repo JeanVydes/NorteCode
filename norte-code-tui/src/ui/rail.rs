@@ -9,7 +9,7 @@ use std::any::Any;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius, draw_box};
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
@@ -17,6 +17,47 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 use crate::ui_model::SessionAttachmentState;
 
 const RAIL_WIDTH: u16 = 26;
+
+/// Where the session rail sits relative to the conversation.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RailPosition {
+    /// No rail.
+    Hide,
+    /// Left of the stream.
+    #[default]
+    Left,
+    /// Right of the stream.
+    Right,
+    /// Above the stream, below the tabs.
+    Top,
+    /// Below the stream, above the composer.
+    Bottom,
+}
+
+impl RailPosition {
+    /// The label shown in the config page.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Hide => "hide",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    /// The next position in the cycle.
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::Hide => Self::Left,
+            Self::Left => Self::Right,
+            Self::Right => Self::Top,
+            Self::Top => Self::Bottom,
+            Self::Bottom => Self::Hide,
+        }
+    }
+}
 
 /// The fixed rail.
 #[derive(Debug, Clone, Serialize)]

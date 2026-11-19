@@ -1,5 +1,6 @@
 //! The view tree: header, rail, stream, composer, status strip, pages.
 
+mod chat_layout;
 mod composer;
 mod config_page;
 #[cfg(test)]
@@ -8,6 +9,9 @@ mod focus_tests;
 mod header;
 mod inspector;
 mod key_prompt;
+#[cfg(test)]
+#[path = "layout_tests.rs"]
+mod layout_tests;
 mod models_page;
 mod pages;
 mod plugins_page;
@@ -20,6 +24,7 @@ mod transcript;
 use ratatui::layout::Constraint;
 use terminalui::Pane;
 
+pub(crate) use chat_layout::ChatLayout;
 pub(crate) use composer::Composer;
 pub(crate) use config_page::{ConfigAction, ConfigData, ConfigPage, Setting};
 pub(crate) use header::Header;
@@ -28,7 +33,7 @@ pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
 pub(crate) use plugins_page::{PluginsAction, PluginsPage};
 pub(crate) use question_prompt::QuestionPrompt;
-pub(crate) use rail::Rail;
+pub(crate) use rail::{Rail, RailPosition};
 pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
 pub(crate) use transcript::{Item, Tone, ToolState, Transcript};
@@ -103,15 +108,7 @@ fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
 pub(crate) fn build_tree(model: &UiModel) -> Tree {
     let theme = model.preferences.catalog.theme(&model.preferences.theme);
 
-    let chat = node(
-        "chat",
-        Stack::horizontal()
-            .constraints(vec![Constraint::Length(28), Constraint::Fill(1)])
-            .children(vec![
-                node("rail", rail::Rail::detached()),
-                node("stream", transcript::Transcript::new()),
-            ]),
-    );
+    let chat = node("chat", ChatLayout::new(model.preferences.rail_position));
 
     let middle = node(
         "middle",
@@ -249,10 +246,14 @@ fn update_config(tree: &mut Tree, model: &UiModel) {
             thinking: model.preferences.reasoning.label().to_string(),
             send_mode: model.preferences.send_mode.label().to_string(),
             diff_mode: model.preferences.diff_mode.label().to_string(),
+            rail_position: model.preferences.rail_position.label().to_string(),
         });
     }
     if let Some(stream) = tree.find_mut::<Transcript>("stream") {
         stream.set_diff_mode(model.preferences.diff_mode);
+    }
+    if let Some(chat) = tree.find_mut::<ChatLayout>("chat") {
+        chat.set_position(model.preferences.rail_position);
     }
 }
 

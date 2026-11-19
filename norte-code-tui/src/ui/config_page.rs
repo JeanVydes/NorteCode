@@ -23,10 +23,18 @@ pub(crate) enum Setting {
     SendMode,
     /// How edit diffs are drawn.
     DiffMode,
+    /// Where the session rail sits.
+    RailPosition,
 }
 
 impl Setting {
-    const ALL: [Self; 4] = [Self::Theme, Self::Thinking, Self::SendMode, Self::DiffMode];
+    const ALL: [Self; 5] = [
+        Self::Theme,
+        Self::Thinking,
+        Self::SendMode,
+        Self::DiffMode,
+        Self::RailPosition,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
@@ -34,6 +42,7 @@ impl Setting {
             Self::Thinking => "thinking",
             Self::SendMode => "send mode",
             Self::DiffMode => "diff mode",
+            Self::RailPosition => "rail",
         }
     }
 }
@@ -55,6 +64,8 @@ pub(crate) struct ConfigData {
     pub(crate) send_mode: String,
     /// The diff layout.
     pub(crate) diff_mode: String,
+    /// The rail position.
+    pub(crate) rail_position: String,
 }
 
 /// The preferences page.
@@ -81,6 +92,7 @@ impl ConfigPage {
                 thinking: String::new(),
                 send_mode: String::new(),
                 diff_mode: String::new(),
+                rail_position: String::new(),
             },
         }
     }
@@ -101,6 +113,7 @@ impl ConfigPage {
             Setting::Thinking => &self.values.thinking,
             Setting::SendMode => &self.values.send_mode,
             Setting::DiffMode => &self.values.diff_mode,
+            Setting::RailPosition => &self.values.rail_position,
         }
     }
 

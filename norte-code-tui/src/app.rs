@@ -46,6 +46,7 @@ pub(super) fn run() -> io::Result<()> {
                     .collect(),
             };
             model.preferences.theme = model.preferences.catalog.choose(loaded.ui.theme.as_deref());
+            model.preferences.rail_position = loaded.ui.rail_position.unwrap_or_default();
             let (commands_us, events_rx) = start(loaded.clone());
             config = Some(loaded);
             commands = Some(commands_us);
@@ -624,6 +625,9 @@ fn drain_config_actions(tree: &mut terminalui::Tree, model: &mut UiModel) -> boo
             Setting::Thinking => model.preferences.reasoning = model.preferences.reasoning.next(),
             Setting::SendMode => model.preferences.send_mode = model.preferences.send_mode.next(),
             Setting::DiffMode => model.preferences.diff_mode = model.preferences.diff_mode.next(),
+            Setting::RailPosition => {
+                model.preferences.rail_position = model.preferences.rail_position.next();
+            }
         }
     }
     changed
