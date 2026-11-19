@@ -30,34 +30,6 @@ fn human_duration(ms: u64) -> String {
     }
 }
 
-pub(crate) fn session(model: &UiModel) -> Inspector {
-    let mut inspector = Inspector::new("sessions · newest first", Selection::Activate);
-    let active = model.active.as_ref().map(|key| key.as_str().to_string());
-    let mut rows: Vec<Row> = model
-        .sessions
-        .iter()
-        .map(|session| {
-            let is_active = active.as_deref() == Some(session.session_id.as_str());
-            let marker = if is_active {
-                "▸ "
-            } else if session.pinned {
-                "◆ "
-            } else {
-                "  "
-            };
-            let title = session.title.as_deref().unwrap_or(&session.session_id);
-            let primary = format!("{marker}{}", clip(title, 44));
-            let provider = session.provider.as_deref().unwrap_or("unknown");
-            Row::new(primary).with_secondary(clip(provider, 22))
-        })
-        .collect();
-    if rows.is_empty() {
-        rows.push(Row::new("no sessions yet").with_secondary("detached"));
-    }
-    inspector.set_rows(rows);
-    inspector
-}
-
 pub(crate) fn plans(model: &UiModel) -> Inspector {
     let mut inspector = Inspector::new("plans · newest first", Selection::Browse);
     let mut rows: Vec<Row> = model

@@ -96,11 +96,6 @@ impl Inspector {
         }
     }
 
-    /// The selected index, when one exists.
-    pub(crate) fn selected(&self) -> Option<usize> {
-        self.selected
-    }
-
     /// Move the selection by one; returns whether it moved.
     pub(crate) fn move_up(&mut self) -> bool {
         self.move_by(-1)
