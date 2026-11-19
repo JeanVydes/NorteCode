@@ -148,7 +148,6 @@ pub(crate) enum PluginOp {
     },
 }
 
-const MAX_ATTACH_ATTEMPTS: u32 = 3;
 const RETRY_BASE_MS: u64 = 400;
 
 /// Run one plugin operation and re-list the plugins afterwards.
@@ -319,7 +318,7 @@ async fn connection(
     let mut session = attach_shared(&client, &api, &events, Box::new(fresh)).await;
     loop {
         match stream_loop(&client, &api, &mut commands, &events, &session).await {
-            StreamOutcome::Detached | StreamOutcome::Retry => return,
+            StreamOutcome::Retry => return,
             StreamOutcome::Switch(summary) => {
                 session = attach_shared(&client, &api, &events, summary).await;
             }
@@ -353,16 +352,26 @@ async fn fetch_history(api: &Arc<RestClient>, session: &str, events: &Sender<Cli
     }
 }
 
+/// After this many consecutive failures or short-lived streams, surface a
+/// notice once; the reconnect keeps going in the background regardless.
+const GIVE_UP_ATTEMPTS: u32 = 3;
+/// A stream that stays up at least this long counts as healthy.
+const HEALTHY_STREAM: Duration = Duration::from_secs(10);
+const RETRY_MAX_MS: u64 = 5000;
+
 enum StreamOutcome {
     /// The stream closed; the caller should re-open it.
     Retry,
     /// The user asked another session.
     Switch(Box<norte_code_wire::SessionSummary>),
-    /// The stream cannot be recovered; the interface reports the detach.
-    Detached,
 }
 
 /// Owns the session's event stream; driven by both the stream and commands.
+///
+/// Reconnects forever with a capped backoff: the server supports resume
+/// from `last-event-id`, so a close is only a hiccup. The interface hears
+/// about sustained trouble once, not per attempt; Ctrl+R forces a fresh
+/// attach from the session list.
 async fn stream_loop(
     client: &Arc<RemoteClient>,
     api: &Arc<RestClient>,
@@ -371,9 +380,11 @@ async fn stream_loop(
     session: &SessionKey,
 ) -> StreamOutcome {
     let mut attempt = 0u32;
+    let mut announced = false;
     loop {
         match client.open_events(session.as_str()).await {
             Ok(mut stream) => {
+                let opened_at = std::time::Instant::now();
                 match Box::pin(drive_stream(
                     &mut stream,
                     commands,
@@ -385,31 +396,39 @@ async fn stream_loop(
                 .await
                 {
                     StreamOutcome::Switch(summary) => return StreamOutcome::Switch(summary),
-                    StreamOutcome::Retry | StreamOutcome::Detached => {}
+                    StreamOutcome::Retry => {}
                 }
-                attempt = attempt.saturating_add(1);
+                if opened_at.elapsed() >= HEALTHY_STREAM {
+                    attempt = 0;
+                    announced = false;
+                } else {
+                    attempt = attempt.saturating_add(1);
+                }
+                if attempt >= GIVE_UP_ATTEMPTS && !announced {
+                    let _ = events
+                        .send(ClientEvent::Detached {
+                            reason: "the stream keeps closing; retrying in the background — check the raep server".into(),
+                        })
+                        .await;
+                    announced = true;
+                }
             }
             Err(error) => {
                 attempt = attempt.saturating_add(1);
-                if attempt > MAX_ATTACH_ATTEMPTS {
+                if attempt >= GIVE_UP_ATTEMPTS && !announced {
                     let _ = events
                         .send(ClientEvent::Detached {
-                            reason: format!("could not subscribe to the stream: {error}"),
+                            reason: format!(
+                                "lost the stream ({error}); retrying in the background — check the raep server"
+                            ),
                         })
                         .await;
-                    return StreamOutcome::Detached;
+                    announced = true;
                 }
             }
         }
-        if attempt > MAX_ATTACH_ATTEMPTS {
-            let _ = events
-                .send(ClientEvent::Detached {
-                    reason: "the stream keeps closing; check the raep server".into(),
-                })
-                .await;
-            return StreamOutcome::Detached;
-        }
-        tokio::time::sleep(Duration::from_millis(RETRY_BASE_MS * (1 << attempt.min(4)))).await;
+        let delay = (RETRY_BASE_MS << attempt.min(6)).min(RETRY_MAX_MS);
+        tokio::time::sleep(Duration::from_millis(delay)).await;
     }
 }
 
