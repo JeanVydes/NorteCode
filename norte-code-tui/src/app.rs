@@ -147,6 +147,25 @@ fn poll_event(
     }
 }
 
+fn ctrl_c(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) -> bool {
+    if model.turn != TurnState::Idle {
+        return cancel_active_turn(tree, commands, model);
+    }
+    true
+}
+
+fn toggle_telemetry_focus(tree: &mut terminalui::Tree) {
+    // The tree would spend Tab moving focus between the charts and pagers;
+    // here it switches the telemetry page between its two lists.
+    if let Some(page) = tree.find_mut::<ui::TelemetryPage>("telemetry") {
+        page.toggle_focus();
+    }
+}
+
 /// Handle one key press; returns `true` when the loop quits.
 fn handle_key(
     tree: &mut terminalui::Tree,
@@ -159,10 +178,11 @@ fn handle_key(
     let mut pass_to_tree = true;
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-            if model.turn != TurnState::Idle {
-                return cancel_active_turn(tree, commands, model);
-            }
-            return true;
+            return ctrl_c(tree, commands, model);
+        }
+        (KeyModifiers::NONE, KeyCode::Tab) if model.tab == Tab::Telemetry => {
+            toggle_telemetry_focus(tree);
+            pass_to_tree = false;
         }
         (KeyModifiers::CONTROL, KeyCode::Tab) => {
             model.tab = model.tab.next();

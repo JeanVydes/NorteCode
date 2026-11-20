@@ -18,7 +18,7 @@ name = "norte-code-tui"
 path = "src/main.rs"
 
 [dependencies]
-terminalui = { git = "https://github.com/JeanVydes/terminalui.git", rev = "90e4ae7410417eed70d693a91323706924f44411" }
+terminalui = { git = "https://github.com/JeanVydes/terminalui.git", rev = "0fac43fcb1132dd77a4531fe5ad8e958931b0fa1" }
 ratatui = { version = "0.29", features = ["serde"] }
 crossterm = { version = "0.29", features = ["bracketed-paste"] }
 serde = { workspace = true }
