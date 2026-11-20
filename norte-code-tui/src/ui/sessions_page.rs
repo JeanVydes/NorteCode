@@ -17,6 +17,9 @@ use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
 use super::detail_panel::{DetailPanel, Field};
 
+/// Rows shown per page; keeps the pager meaningful on tall terminals.
+const PAGE_ROWS: usize = 10;
+
 /// The interaction mode of the page.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 enum Mode {
@@ -131,17 +134,21 @@ impl SessionsPage {
     }
 
     fn body_rows(&self) -> usize {
-        self.area.height.saturating_sub(3) as usize
+        usize::from(self.area.height.saturating_sub(3)).min(PAGE_ROWS)
     }
 
     fn clamp_view(&mut self) {
         let body = self.body_rows();
+        // Before the first render the area is zero; do not let that seed a
+        // bogus offset that later flips to a random page.
+        if body == 0 {
+            return;
+        }
         if self.sessions.len() <= body {
             self.offset = 0;
-        } else if self.selected < self.offset {
-            self.offset = self.selected;
-        } else if self.selected >= self.offset + body {
-            self.offset = self.selected + 1 - body;
+        } else if self.selected < self.offset || self.selected >= self.offset + body {
+            // Jump whole pages so the pager number and the visible rows agree.
+            self.offset = (self.selected / body) * body;
         }
         let body = body.max(1);
         let page = self.offset / body;
@@ -182,82 +189,12 @@ impl SessionsPage {
         let fields = self.selected_session().map_or_else(
             || vec![Field::new("no session", "select a row")],
             |session| {
-                let title = session
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "untitled".to_owned());
-                let model = session.model.as_ref().map_or_else(
-                    || "unknown".to_owned(),
-                    |model| {
-                        session.provider.as_ref().map_or_else(
-                            || model.id.clone(),
-                            |provider| format!("{provider}/{}", model.id),
-                        )
-                    },
-                );
                 let usage = self
                     .usage
                     .get(&session.session_id)
                     .cloned()
                     .unwrap_or_default();
-                let turns = session.turn_count.unwrap_or(usage.turns.len() as u64);
-                let models = usage
-                    .top_models(2)
-                    .into_iter()
-                    .map(|(model, count)| format!("{model} ×{count}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut fields = vec![
-                    Field::new("title", title),
-                    Field::new("id", clip(&session.session_id, 36)),
-                    Field::new("model", clip(&model, 36)),
-                    Field::new("status", session.status.label().to_owned()),
-                    Field::new(
-                        "agent",
-                        session
-                            .agent
-                            .as_ref()
-                            .map_or_else(|| "unknown".to_owned(), |agent| agent.id.clone()),
-                    ),
-                    Field::new("turns", turns.to_string()),
-                    Field::new("requests", usage.requests.to_string()),
-                    Field::new(
-                        "tokens",
-                        format!(
-                            "{}:{}",
-                            crate::context::human_count(usage.input),
-                            crate::context::human_count(usage.output)
-                        ),
-                    ),
-                    Field::new("cache", format!("{:.0}%", usage.cache_rate())),
-                    Field::new("tools", usage.tools.to_string()),
-                    Field::new(
-                        "models",
-                        if models.is_empty() {
-                            "none".to_owned()
-                        } else {
-                            models
-                        },
-                    ),
-                ];
-                if usage.errors > 0 || usage.cancelled > 0 {
-                    fields.push(Field::new(
-                        "failed",
-                        format!("{} err · {} cancelled", usage.errors, usage.cancelled),
-                    ));
-                }
-                if usage.duration_ms > 0 {
-                    fields.push(Field::new("time", duration(usage.duration_ms)));
-                }
-                if usage.has_cost {
-                    fields.push(Field::new("cost", format!("${:.4}", usage.cost)));
-                }
-                if let Some(parent) = &session.parent_session_id {
-                    fields.push(Field::new("parent", clip(parent, 34)));
-                }
-                fields.push(Field::new("pinned", session.pinned.to_string()));
-                fields.push(Field::new("archived", session.archived.to_string()));
-                fields
+                super::session_detail::fields(session, &usage)
             },
         );
         let title = if self.sessions.is_empty() {
@@ -403,7 +340,10 @@ impl SessionsPage {
                     return Outcome::Ignored;
                 }
                 let y = mouse.row;
-                if y > self.area.y && y < self.area.y + self.area.height {
+                // Leave the hint and pager rows to the components that own them.
+                if y > self.area.y
+                    && y <= self.area.y + u16::try_from(self.body_rows()).unwrap_or(0)
+                {
                     let index = self.offset + (y - self.area.y - 1) as usize;
                     if index < self.sessions.len() {
                         self.selected = index;
@@ -701,17 +641,6 @@ impl SessionsPage {
                 Style::default().fg(theme.muted),
             );
         }
-    }
-}
-
-fn duration(ms: u64) -> String {
-    let secs = ms / 1000;
-    if secs >= 3600 {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    } else if secs >= 60 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
     }
 }
 

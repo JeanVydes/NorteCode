@@ -21,6 +21,13 @@ use crate::telemetry_series::series;
 const SESSION_PAGE: usize = 4;
 const REQUEST_PAGE: usize = 6;
 
+/// Which list Tab currently drives.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+enum TelemetryFocus {
+    Sessions,
+    Requests,
+}
+
 /// The charts share one interval so their x axes line up.
 #[derive(Serialize)]
 pub(crate) struct TelemetryPage {
@@ -30,10 +37,14 @@ pub(crate) struct TelemetryPage {
     pub(crate) records: Vec<norte_code_wire::TelemetryRecord>,
     /// Distinct session ids, newest activity first.
     sessions: Vec<String>,
+    /// Session summaries from the host, for the shared detail panel.
+    session_data: Vec<norte_code_wire::SessionSummary>,
     /// The session whose requests are shown.
     selected_session: usize,
     /// Which panel the detail shows.
     pub(crate) detail_is_request: bool,
+    /// Which list the arrow keys scroll.
+    focus: TelemetryFocus,
     /// Pages the request table was last rebuilt for.
     last_session_page: usize,
     last_request_page: usize,
@@ -50,8 +61,10 @@ impl TelemetryPage {
             report: None,
             records: Vec::new(),
             sessions: Vec::new(),
+            session_data: Vec::new(),
             selected_session: 0,
             detail_is_request: false,
+            focus: TelemetryFocus::Sessions,
             last_session_page: 0,
             last_request_page: 0,
             last_request_row: 0,
@@ -76,6 +89,20 @@ impl TelemetryPage {
                 node("request_detail", DetailPanel::new()),
             ],
         }
+    }
+
+    /// Switch between the session list and the request list.
+    pub(crate) fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            TelemetryFocus::Sessions => TelemetryFocus::Requests,
+            TelemetryFocus::Requests => TelemetryFocus::Sessions,
+        };
+    }
+
+    /// Replace the session summaries used by the shared detail panel.
+    pub(crate) fn set_sessions(&mut self, sessions: Vec<norte_code_wire::SessionSummary>) {
+        self.session_data = sessions;
+        self.sync_detail();
     }
 
     /// Replace the report the charts, session list and request table use.
@@ -280,35 +307,16 @@ impl TelemetryPage {
         } else {
             let id = self.selected_id().unwrap_or("");
             let usage = crate::session_stats::by_session(&self.records);
-            usage.get(id).map_or_else(
-                || vec![Field::new("no session", "no telemetry")],
-                |usage| {
-                    vec![
-                        Field::new("session", clip(id, 34)),
-                        Field::new("requests", usage.requests.to_string()),
-                        Field::new("turns", usage.turns.len().to_string()),
-                        Field::new(
-                            "tokens",
-                            format!(
-                                "{}:{}",
-                                crate::context::human_count(usage.input),
-                                crate::context::human_count(usage.output)
-                            ),
-                        ),
-                        Field::new("cache", format!("{:.0}%", usage.cache_rate())),
-                        Field::new("tools", usage.tools.to_string()),
-                        Field::new(
-                            "models",
-                            usage
-                                .top_models(3)
-                                .into_iter()
-                                .map(|(model, count)| format!("{model} ×{count}"))
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        ),
-                    ]
-                },
-            )
+            self.session_data
+                .iter()
+                .find(|session| session.session_id == id)
+                .map_or_else(
+                    || vec![Field::new("no session", "no summary")],
+                    |session| {
+                        let empty = crate::session_stats::SessionUsage::default();
+                        super::session_detail::fields(session, usage.get(id).unwrap_or(&empty))
+                    },
+                )
         };
         let title = if self.detail_is_request {
             "request"
@@ -324,9 +332,21 @@ impl TelemetryPage {
         }
     }
 
-    fn select_session(&mut self, index: usize) {
-        self.selected_session = index;
+    /// Select a session by its absolute index, moving both the pager and the
+    /// highlighted row so they never disagree.
+    fn select_session(&mut self, absolute: usize) {
+        let page = absolute / SESSION_PAGE;
+        self.selected_session = absolute.saturating_sub(page * SESSION_PAGE);
         self.detail_is_request = false;
+        self.focus = TelemetryFocus::Sessions;
+        if let Some(pager) = self
+            .children
+            .get_mut(3)
+            .and_then(|node| node.view.as_any().downcast_mut::<Pagination>())
+        {
+            pager.go_to(page);
+        }
+        self.last_session_page = page;
         if let Some(pager) = self
             .children
             .get_mut(5)
@@ -334,8 +354,39 @@ impl TelemetryPage {
         {
             pager.go_to(0);
         }
+        self.last_request_page = 0;
         self.rebuild_request_table();
         self.sync_detail();
+    }
+
+    /// Move the highlighted request row within the selected session.
+    fn move_request(&mut self, delta: isize) {
+        let id = self.selected_id().map(str::to_owned);
+        let total = self
+            .records
+            .iter()
+            .filter(|record| Some(record.session.as_str()) == id.as_deref())
+            .count();
+        let max = total
+            .saturating_sub(self.request_page() * REQUEST_PAGE)
+            .min(REQUEST_PAGE);
+        if max == 0 {
+            return;
+        }
+        let Some(table) = self
+            .children
+            .get_mut(4)
+            .and_then(|node| node.view.as_any().downcast_mut::<Table>())
+        else {
+            return;
+        };
+        let current = isize::try_from(table.state.selected).unwrap_or(isize::MAX);
+        let last = isize::try_from(max.saturating_sub(1)).unwrap_or(isize::MAX);
+        let next = usize::try_from((current + delta).clamp(0, last)).unwrap_or(0);
+        table.state.selected = next;
+        self.detail_is_request = true;
+        self.focus = TelemetryFocus::Requests;
+        self.last_request_row = next;
     }
 
     fn cycle_interval(&mut self, backwards: bool) {
@@ -466,15 +517,17 @@ impl TelemetryPage {
         let left_width = area.width.saturating_sub(detail_width + 1);
         let lower_h = area.y + area.height - lower_y;
 
-        buf.set_stringn(
-            area.x + 1,
-            lower_y,
-            "sessions",
-            8,
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::BOLD),
-        );
+        let mut sessions_style = Style::default().fg(theme.muted);
+        let mut requests_style = Style::default().fg(theme.muted);
+        let active = if self.focus == TelemetryFocus::Sessions {
+            &mut sessions_style
+        } else {
+            &mut requests_style
+        };
+        *active = Style::default()
+            .fg(theme.foreground)
+            .add_modifier(Modifier::BOLD);
+        buf.set_stringn(area.x + 1, lower_y, "sessions", 8, sessions_style);
         let sessions_rect = Rect {
             x: area.x,
             y: lower_y + 1,
@@ -506,9 +559,7 @@ impl TelemetryPage {
             req_title_y,
             "requests · selected session",
             27,
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::BOLD),
+            requests_style,
         );
         let table_rect = Rect {
             x: area.x,
@@ -586,7 +637,7 @@ impl View for TelemetryPage {
             usize::from(area.width.saturating_sub(2)),
             Style::default().fg(theme.muted),
         );
-        let hint = "[ ] interval · j/k session · arrows select request";
+        let hint = "Tab switch list · j/k navigate · [ ] interval";
         if area.width > 52 {
             let w = u16::try_from(hint.len()).unwrap_or(u16::MAX);
             buf.set_stringn(
@@ -598,7 +649,7 @@ impl View for TelemetryPage {
             );
         }
 
-        let chart_height = (area.height.saturating_sub(16) / 3).max(6);
+        let chart_height = (area.height.saturating_sub(16) / 3).max(8);
         self.paint_charts(
             Rect {
                 y: area.y + 1,
@@ -633,17 +684,24 @@ impl View for TelemetryPage {
                     return Outcome::Consumed;
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
-                    let start = self.session_page() * SESSION_PAGE;
-                    let next = (start + self.selected_session + 1)
-                        .min(self.sessions.len().saturating_sub(1));
-                    self.select_session(next.saturating_sub(start));
+                    if self.focus == TelemetryFocus::Sessions {
+                        let current = self.session_page() * SESSION_PAGE + self.selected_session;
+                        let next = (current + 1).min(self.sessions.len().saturating_sub(1));
+                        self.select_session(next);
+                    } else {
+                        self.move_request(1);
+                        self.sync_detail();
+                    }
                     return Outcome::Consumed;
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    let start = self.session_page() * SESSION_PAGE;
-                    let current = start + self.selected_session;
-                    let next = current.saturating_sub(1);
-                    self.select_session(next.saturating_sub(start));
+                    if self.focus == TelemetryFocus::Sessions {
+                        let current = self.session_page() * SESSION_PAGE + self.selected_session;
+                        self.select_session(current.saturating_sub(1));
+                    } else {
+                        self.move_request(-1);
+                        self.sync_detail();
+                    }
                     return Outcome::Consumed;
                 }
                 _ => {}

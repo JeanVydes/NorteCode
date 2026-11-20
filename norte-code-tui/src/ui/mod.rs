@@ -22,6 +22,7 @@ mod rail;
 #[path = "rail_tests.rs"]
 mod rail_tests;
 mod selector;
+mod session_detail;
 mod sessions_page;
 mod telemetry_page;
 #[cfg(test)]
@@ -288,6 +289,7 @@ pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
     }
     if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
         page.set_report(model.telemetry.clone());
+        page.set_sessions(model.sessions.clone());
     }
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("host") {
         *inspector = pages::host(model);
