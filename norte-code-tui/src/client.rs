@@ -154,6 +154,20 @@ pub(crate) enum UiCommand {
         /// The session to compact.
         session: norte_code_wire::SessionKey,
     },
+    /// Fork the session, optionally at a turn.
+    Fork {
+        /// The session to fork.
+        session: norte_code_wire::SessionKey,
+        /// The turn to fork from, when known.
+        turn: Option<u64>,
+    },
+    /// Rewind the session to a turn.
+    Rewind {
+        /// The session to rewind.
+        session: norte_code_wire::SessionKey,
+        /// The turn to rewind to, when known.
+        turn: Option<u64>,
+    },
 }
 
 /// A plugin operation the host can do for us.
@@ -539,6 +553,66 @@ async fn compact_session(
     }
 }
 
+async fn fork_session(
+    api: &RestClient,
+    session: &norte_code_wire::SessionKey,
+    turn: Option<u64>,
+    events: &Sender<ClientEvent>,
+) {
+    let id = turn.map(|turn| format!("turn_{turn}"));
+    match api.fork(session.as_str(), id.as_deref(), None).await {
+        Ok(forked) => {
+            let _ = events
+                .send(ClientEvent::Notice {
+                    text: format!("forked session {forked}"),
+                })
+                .await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: format!("fork failed: {error}"),
+                })
+                .await;
+        }
+    }
+}
+
+async fn rewind_session(
+    api: &RestClient,
+    session: &norte_code_wire::SessionKey,
+    turn: Option<u64>,
+    events: &Sender<ClientEvent>,
+) {
+    let Some(turn) = turn else {
+        let _ = events
+            .send(ClientEvent::Notice {
+                text: "rewind needs a turn from a replayed message".to_owned(),
+            })
+            .await;
+        return;
+    };
+    match api
+        .rewind(session.as_str(), &format!("turn_{turn}"), true)
+        .await
+    {
+        Ok(rewound) => {
+            let _ = events
+                .send(ClientEvent::Notice {
+                    text: format!("rewound {} turns", rewound.len()),
+                })
+                .await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: format!("rewind failed: {error}"),
+                })
+                .await;
+        }
+    }
+}
+
 /// Send the attachment frames for a session.
 async fn attach_shared(
     client: &Arc<RemoteClient>,
@@ -696,6 +770,12 @@ async fn drive_stream(
                     }
                     UiCommand::Compact { session: target } => {
                         compact_session(api, &target, events).await;
+                    }
+                    UiCommand::Fork { session: target, turn } => {
+                        fork_session(api, &target, turn, events).await;
+                    }
+                    UiCommand::Rewind { session: target, turn } => {
+                        rewind_session(api, &target, turn, events).await;
                     }
                     UiCommand::Send { session: target, text, queue_mode } => {
                         send_prompt(api, &target, text, queue_mode).await;

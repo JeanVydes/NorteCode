@@ -79,6 +79,34 @@ fn a_selection_never_includes_the_scrollbar_column() {
 }
 
 #[test]
+fn clicking_a_message_opens_the_menu_and_queues_actions() {
+    let mut transcript = Transcript::new();
+    transcript.area = Rect::new(0, 0, 40, 10);
+    transcript.push(Item::User {
+        turn: Some(3),
+        text: "hello".to_string(),
+    });
+    transcript.heights = vec![2];
+    transcript.first_visible = 0;
+
+    transcript.open_menu(0);
+    assert!(transcript.menu.is_some());
+
+    transcript.activate_menu(0);
+    assert_eq!(
+        transcript.take_message_actions(),
+        vec![super::MessageAction::Fork { turn: Some(3) }]
+    );
+
+    transcript.open_menu(0);
+    transcript.activate_menu(2);
+    assert_eq!(
+        transcript.take_message_actions(),
+        vec![super::MessageAction::Rewind { turn: Some(3) }]
+    );
+}
+
+#[test]
 fn consecutive_retry_lines_update_the_same_item() {
     let mut transcript = Transcript::new();
     transcript.push_retry("retry 1 · overloaded".to_string(), Tone::Warn);
@@ -125,10 +153,11 @@ fn reasoning_blocks_toggle_with_clicks() {
 fn reasoning_deltas_merge_into_one_block_per_turn() {
     let mut transcript = Transcript::new();
     transcript.push(Item::User {
+        turn: None,
         text: "run several tools".to_string(),
     });
     transcript.push_reasoning_text("I should ");
-    transcript.push_assistant_text("ok ");
+    transcript.push_assistant_text("ok ", None);
     transcript.push(Item::Tool {
         call_id: "1".to_string(),
         name: "read".to_string(),
@@ -158,6 +187,7 @@ fn reasoning_in_a_new_turn_gets_its_own_block() {
     let mut transcript = Transcript::new();
     transcript.push_reasoning_text("first turn");
     transcript.push(Item::User {
+        turn: None,
         text: "next".to_string(),
     });
     transcript.push_reasoning_text("second turn");
@@ -406,6 +436,7 @@ fn painted_flags_mark_notice_rows_as_not_copyable() {
 
     let mut transcript = Transcript::new();
     transcript.push(Item::User {
+        turn: None,
         text: "hi".to_string(),
     });
     transcript.push(Item::Notice {
@@ -432,6 +463,7 @@ fn a_retry_after_other_items_starts_a_new_line() {
     let mut transcript = Transcript::new();
     transcript.push_retry("retry 1 · overloaded".to_string(), Tone::Warn);
     transcript.push(Item::Assistant {
+        turn: None,
         text: "partial reply".to_string(),
     });
     transcript.push_retry("retry 1 · overloaded again".to_string(), Tone::Warn);

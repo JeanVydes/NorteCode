@@ -131,6 +131,7 @@ fn poll_event(
             drain_tab_request(tree, model);
             drain_models_actions(tree, commands, model);
             drain_plugins_actions(tree, commands);
+            drain_message_actions(tree, commands, model);
             if drain_config_actions(tree, model) {
                 ui::refresh_views(tree, model);
             }
@@ -148,6 +149,44 @@ fn poll_event(
     }
 }
 
+fn drain_message_actions(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &UiModel,
+) {
+    use crate::ui::MessageAction;
+    let Some(stream) = tree.find_mut::<ui::Transcript>("stream") else {
+        return;
+    };
+    let actions = stream.take_message_actions();
+    let Some(session) = model.active.clone() else {
+        return;
+    };
+    for action in actions {
+        match action {
+            MessageAction::Copy { text } => {
+                let _ = terminalui::osc52_write(&text);
+            }
+            MessageAction::Fork { turn } => {
+                if let Some(commands) = commands.as_ref() {
+                    let _ = commands.try_send(UiCommand::Fork {
+                        session: session.clone(),
+                        turn,
+                    });
+                }
+            }
+            MessageAction::Rewind { turn } => {
+                if let Some(commands) = commands.as_ref() {
+                    let _ = commands.try_send(UiCommand::Rewind {
+                        session: session.clone(),
+                        turn,
+                    });
+                }
+            }
+        }
+    }
+}
+
 fn ctrl_c(
     tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
@@ -157,6 +196,12 @@ fn ctrl_c(
         return cancel_active_turn(tree, commands, model);
     }
     true
+}
+
+fn cycle_theme(tree: &mut terminalui::Tree, model: &mut UiModel) {
+    let choice = model.preferences.theme.clone();
+    model.preferences.theme = model.preferences.catalog.next(&choice);
+    ui::refresh_views(tree, model);
 }
 
 fn toggle_list_focus(tree: &mut terminalui::Tree, tab: Tab) {
@@ -234,8 +279,7 @@ fn handle_key(
             pass_to_tree = false;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-            let choice = model.preferences.theme.clone();
-            model.preferences.theme = model.preferences.catalog.next(&choice);
+            cycle_theme(tree, model);
             pass_to_tree = false;
         }
         (KeyModifiers::NONE | KeyModifiers::CONTROL, KeyCode::Enter) => {
@@ -285,6 +329,7 @@ fn handle_key(
     drain_models_actions(tree, commands, model);
     drain_sessions_actions(tree, commands, model);
     drain_plugins_actions(tree, commands);
+    drain_message_actions(tree, commands, model);
     if drain_config_actions(tree, model) {
         ui::refresh_views(tree, model);
     }
@@ -401,6 +446,13 @@ fn send_current_prompt(
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
         stream.push(ui::Item::User {
             text: prompt.clone(),
+            turn: model.active_turn.as_ref().and_then(|turn| {
+                turn.id
+                    .strip_prefix("turn_")
+                    .unwrap_or(&turn.id)
+                    .parse()
+                    .ok()
+            }),
         });
         stream.start_thinking();
     }
@@ -1319,7 +1371,7 @@ fn fold_delta(delta: &norte_code_wire::Delta, tree: &mut terminalui::Tree, model
             model.turn = TurnState::Streaming;
             if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
                 stream.stop_thinking();
-                stream.push_assistant_text(text);
+                stream.push_assistant_text(text, model.active_turn.as_ref());
             }
         }
         norte_code_wire::Delta::Reasoning { text, .. } => {

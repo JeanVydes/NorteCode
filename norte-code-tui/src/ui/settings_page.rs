@@ -6,6 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position as RatatuiPosition, Rect};
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
+use terminalui::components::panel::Panel;
 use terminalui::components::table::{Table, TableCell, TableRow};
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
@@ -64,8 +65,8 @@ pub(crate) struct SettingsPage {
     plugin_actions: Vec<PluginsAction>,
     #[serde(skip)]
     config_actions: Vec<ConfigAction>,
-    /// The plugins table, composed as a child so the tree routes events to it.
-    table: Node,
+    /// Host panel at index 0, plugin table at index 1.
+    children: Vec<Node>,
 }
 
 impl SettingsPage {
@@ -100,10 +101,25 @@ impl SettingsPage {
             prefs_y: 0,
             plugin_actions: Vec::new(),
             config_actions: Vec::new(),
-            table: node(
-                "plugin_table",
-                Table::new().with_header(node("header", header)),
-            ),
+            children: vec![
+                node(
+                    "host_panel",
+                    Panel::line().children(vec![node(
+                        "host_table",
+                        Table::new().with_header(node(
+                            "header",
+                            TableRow::header(vec![
+                                node("h-field", TableCell::text("field").with_weight(4)),
+                                node("h-value", TableCell::text("value").with_weight(10)),
+                            ]),
+                        )),
+                    )]),
+                ),
+                node(
+                    "plugin_table",
+                    Table::new().with_header(node("header", header)),
+                ),
+            ],
         }
     }
 
@@ -383,7 +399,6 @@ impl SettingsPage {
 
 impl SettingsPage {
     fn paint_sections(&mut self, page: &mut Buffer, area: Rect, cx: &mut Context, theme: &Theme) {
-        let dim = Style::default().fg(theme.muted).bg(theme.background);
         let bold = Style::default()
             .fg(theme.foreground)
             .bg(theme.background)
@@ -391,20 +406,45 @@ impl SettingsPage {
         let normal = Style::default().fg(theme.foreground).bg(theme.background);
         let mut y = 0u16;
 
-        page.set_stringn(0, y, "host", 4, bold);
-        y += 1;
-        for field in &self.host {
-            page.set_stringn(0, y, &field.label, 14, dim);
-            page.set_stringn(
-                15,
-                y,
-                &field.value,
-                usize::from(area.width.saturating_sub(16)),
-                normal,
+        let host_rows: Vec<Node> = self
+            .host
+            .iter()
+            .map(|field| {
+                node(
+                    format!("field-{}", field.label),
+                    TableRow::body(vec![
+                        node("label", TableCell::text(field.label.clone()).with_weight(4)),
+                        node(
+                            "value",
+                            TableCell::text(field.value.clone()).with_weight(10),
+                        ),
+                    ]),
+                )
+            })
+            .collect();
+        if let Some(panel) = self.children.first_mut() {
+            if let Some(table) = panel
+                .view
+                .children_mut()
+                .first_mut()
+                .and_then(|node| node.view.as_any().downcast_mut::<Table>())
+            {
+                table.set_rows(host_rows);
+            }
+            panel.view.render(
+                Rect {
+                    x: 0,
+                    y,
+                    width: area.width,
+                    height: Self::rows(self.host.len(), 3),
+                },
+                page,
+                cx,
+                theme,
             );
-            y += 1;
         }
-        y += 1;
+        let (host, _, _) = self.section_heights();
+        y += host;
 
         page.set_stringn(
             0,
@@ -416,21 +456,27 @@ impl SettingsPage {
         y += 1;
         self.plugins_y = y + 1;
         let plugin_rows = self.plugin_rows();
-        if let Some(table) = self.table.view.as_any().downcast_mut::<Table>() {
+        if let Some(table) = self
+            .children
+            .get_mut(1)
+            .and_then(|node| node.view.as_any().downcast_mut::<Table>())
+        {
             table.set_rows(plugin_rows);
             table.state.selected = self.plugin_selected;
         }
-        self.table.view.render(
-            Rect {
-                x: 0,
-                y,
-                width: area.width,
-                height: Self::rows(self.plugins.len(), 3),
-            },
-            page,
-            cx,
-            theme,
-        );
+        if let Some(node) = self.children.get_mut(1) {
+            node.view.render(
+                Rect {
+                    x: 0,
+                    y,
+                    width: area.width,
+                    height: Self::rows(self.plugins.len(), 3),
+                },
+                page,
+                cx,
+                theme,
+            );
+        }
         let (_, plugins, _) = self.section_heights();
         y += plugins.saturating_sub(1) + 1;
 
@@ -603,10 +649,10 @@ impl View for SettingsPage {
     }
 
     fn children(&self) -> &[Node] {
-        std::slice::from_ref(&self.table)
+        &self.children
     }
     fn children_mut(&mut self) -> &mut [Node] {
-        std::slice::from_mut(&mut self.table)
+        &mut self.children
     }
 
     fn focusable(&self) -> bool {
