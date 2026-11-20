@@ -12,10 +12,12 @@ use std::collections::HashSet;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use serde::Serialize;
+use terminalui::components::table::{Table, TableCell, TableRow};
+use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
-use terminalui::{Context, InputEvent, Outcome, Theme, View};
+use super::detail_panel::{DetailPanel, Field};
 
 /// How a provider is rendered: header row, then its models when expanded.
 #[derive(Clone)]
@@ -100,6 +102,8 @@ pub(crate) struct ModelsPage {
     /// Actions to drain.
     #[serde(skip)]
     pending: Vec<ModelsAction>,
+    /// The catalogue table and the selected row's detail panel.
+    children: Vec<Node>,
 }
 
 impl ModelsPage {
@@ -115,6 +119,20 @@ impl ModelsPage {
             offset: 0,
             area: Rect::new(0, 0, 0, 0),
             pending: Vec::new(),
+            children: vec![
+                node(
+                    "models_table",
+                    Table::new().with_header(node(
+                        "header",
+                        TableRow::header(vec![
+                            node("h-name", TableCell::text("provider / model").with_weight(6)),
+                            node("h-context", TableCell::text("context").with_weight(2)),
+                            node("h-tools", TableCell::text("tools").with_weight(1)),
+                        ]),
+                    )),
+                ),
+                node("model_detail", DetailPanel::new()),
+            ],
         }
     }
 
@@ -321,6 +339,154 @@ impl ModelsPage {
             self.expanded.insert(provider.to_owned());
         }
     }
+
+    fn sync_detail(&mut self) {
+        let rows = self.rows();
+        let fields = rows.into_iter().nth(self.selected).map_or_else(
+            || vec![Field::new("no model", "nothing selected")],
+            |row| match row {
+                Row::Provider {
+                    name,
+                    count,
+                    signed_in,
+                } => vec![
+                    Field::new("provider", name),
+                    Field::new("models", count.to_string()),
+                    Field::new("key", if signed_in { "available" } else { "missing" }),
+                    Field::new("hint", "Enter expands or asks for a key"),
+                ],
+                Row::Model { model } => {
+                    let mut fields = vec![
+                        Field::new("provider", model.provider),
+                        Field::new("id", model.model),
+                        Field::new("name", model.name),
+                    ];
+                    if let Some(description) = model.description.filter(|d| !d.is_empty()) {
+                        fields.push(Field::new("about", description));
+                    }
+                    fields.push(Field::new(
+                        "context",
+                        model
+                            .max_context
+                            .map_or_else(|| "unknown".to_owned(), human_count),
+                    ));
+                    fields.push(Field::new(
+                        "output",
+                        model
+                            .max_output
+                            .map_or_else(|| "unknown".to_owned(), human_count),
+                    ));
+                    fields.push(Field::new("tools", model.tools.to_string()));
+                    if !model.input.is_empty() {
+                        fields.push(Field::new("input", format!("{:?}", model.input)));
+                    }
+                    if !model.output.is_empty() {
+                        fields.push(Field::new("output", format!("{:?}", model.output)));
+                    }
+                    if model.reasoning.supported {
+                        fields.push(Field::new("reasoning", "supported"));
+                    }
+                    if model.deprecated {
+                        fields.push(Field::new("status", "deprecated"));
+                    }
+                    fields
+                }
+            },
+        );
+        let title = "model";
+        if let Some(panel) = self
+            .children
+            .get_mut(1)
+            .and_then(|node| node.view.as_any().downcast_mut::<DetailPanel>())
+        {
+            panel.set(title, fields);
+        }
+    }
+}
+
+fn human_count(count: u64) -> String {
+    if count < 1_000 {
+        return count.to_string();
+    }
+    if count < 1_000_000 {
+        let thousands = count / 1_000;
+        let rest = (count % 1_000) / 100;
+        return if rest == 0 {
+            format!("{thousands}k")
+        } else {
+            format!("{thousands}.{rest}k")
+        };
+    }
+    let millions = count / 1_000_000;
+    let rest = (count % 1_000_000) / 100_000;
+    if rest == 0 {
+        format!("{millions}m")
+    } else {
+        format!("{millions}.{rest}m")
+    }
+}
+
+impl ModelsPage {
+    fn table_rows(&self, rows: &[Row]) -> Vec<Node> {
+        rows.iter()
+            .map(|row| match row {
+                Row::Provider {
+                    name,
+                    count,
+                    signed_in,
+                } => {
+                    let expanded = !self.query().is_empty() || self.expanded.contains(name);
+                    let marker = if expanded { "▾" } else { "▸" };
+                    let key = if *signed_in { "✓" } else { "·" };
+                    node(
+                        format!("provider-{name}"),
+                        TableRow::body(vec![
+                            node(
+                                "name",
+                                TableCell::text(format!("{marker} {key} {name}")).with_weight(6),
+                            ),
+                            node(
+                                "context",
+                                TableCell::text(format!("{count} models")).with_weight(2),
+                            ),
+                            node("tools", TableCell::text("").with_weight(1)),
+                        ]),
+                    )
+                }
+                Row::Model { model } => {
+                    let current = self.active.as_ref().is_some_and(|(provider, id)| {
+                        provider == &model.provider && id == &model.model
+                    });
+                    let marker = if current { "●" } else { " " };
+                    let label = if model.deprecated {
+                        format!("{marker} {} (deprecated)", model.name)
+                    } else {
+                        format!("{marker} {}", model.name)
+                    };
+                    node(
+                        format!("model-{}-{}", model.provider, model.model),
+                        TableRow::body(vec![
+                            node("name", TableCell::text(label).with_weight(6)),
+                            node(
+                                "context",
+                                TableCell::text(
+                                    model
+                                        .max_context
+                                        .map_or_else(|| "–".to_owned(), human_count),
+                                )
+                                .with_weight(2),
+                            ),
+                            node(
+                                "tools",
+                                TableCell::text(if model.tools { "yes" } else { "–" }.to_owned())
+                                    .with_weight(1),
+                            ),
+                        ]),
+                    )
+                }
+            })
+            .collect()
+    }
 }
 
 impl View for ModelsPage {
@@ -336,12 +502,12 @@ impl View for ModelsPage {
         "models_page"
     }
 
-    fn children(&self) -> &[terminalui::Node] {
-        &[]
+    fn children(&self) -> &[Node] {
+        &self.children
     }
 
-    fn children_mut(&mut self) -> &mut [terminalui::Node] {
-        &mut []
+    fn children_mut(&mut self) -> &mut [Node] {
+        &mut self.children
     }
 
     fn measure(&self) -> Option<(u16, u16)> {
@@ -352,7 +518,7 @@ impl View for ModelsPage {
         true
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _cx: &mut Context, theme: &Theme) {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
         self.area = area;
         let muted = Style::default().fg(theme.muted);
         let filter_label = if self.filter.is_empty() {
@@ -370,65 +536,39 @@ impl View for ModelsPage {
 
         let rows = self.rows();
         self.clamp_view();
-        let body = self.body_rows();
-        let end = (self.offset + body).min(rows.len());
-        for (offset, index) in (self.offset..end).enumerate() {
-            let y = area.y + 1 + u16::try_from(offset).unwrap_or(0);
-            let selected = self.selected == index;
-            let row_style = if selected {
-                Style::default()
-                    .fg(theme.foreground)
-                    .bg(theme.secondary)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.foreground)
-            };
-            if selected {
-                buf.set_style(
-                    Rect {
-                        x: area.x,
-                        y,
-                        width: area.width,
-                        height: 1,
-                    },
-                    Style::default().bg(theme.secondary),
-                );
-            }
-            match &rows[index] {
-                Row::Provider {
-                    name,
-                    count,
-                    signed_in,
-                } => {
-                    let expanded = !self.query().is_empty() || self.expanded.contains(name);
-                    let marker = if expanded { "▾" } else { "▸" };
-                    let key = if *signed_in { "✓ " } else { "  " };
-                    let text = format!("{marker}{key}{name}  ·  {count} models");
-                    buf.set_stringn(area.x + 1, y, &text, text.chars().count(), row_style);
-                }
-                Row::Model { model } => {
-                    let current = self.active.as_ref().is_some_and(|(provider, id)| {
-                        provider == &model.provider && id == &model.model
-                    });
-                    let suffix = if current {
-                        "  current"
-                    } else if model.deprecated {
-                        "  deprecated"
-                    } else {
-                        ""
-                    };
-                    let text = format!("    {}  ({}){suffix}", model.name, model.model);
-                    buf.set_stringn(area.x + 2, y, &text, text.chars().count(), row_style);
-                }
-            }
+        self.sync_detail();
+
+        let detail_width = (area.width / 2)
+            .clamp(30, 52)
+            .min(area.width.saturating_sub(30));
+        let table_width = area.width.saturating_sub(detail_width + 1);
+        let table_rect = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: table_width,
+            height: area.height.saturating_sub(1),
+        };
+        let detail_rect = Rect {
+            x: area.x + table_width + 1,
+            y: area.y,
+            width: detail_width,
+            height: area.height,
+        };
+
+        let table_rows = self.table_rows(&rows);
+        if let Some(table) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<Table>())
+        {
+            table.set_rows(table_rows);
+            table.state.selected = self.selected.min(rows.len().saturating_sub(1));
         }
-        if rows.is_empty() {
-            let text = if self.filter.is_empty() {
-                "catalogue not loaded yet"
-            } else {
-                "nothing matches"
-            };
-            buf.set_stringn(area.x + 1, area.y + 1, text, text.chars().count(), muted);
+        if let Some(child) = self.children.first_mut() {
+            child.view.render(table_rect, buf, cx, theme);
+        }
+        if let Some(child) = self.children.get_mut(1) {
+            child.view.render(detail_rect, buf, cx, theme);
         }
     }
 

@@ -21,10 +21,15 @@ use crate::telemetry_series::series;
 const SESSION_PAGE: usize = 4;
 const REQUEST_PAGE: usize = 6;
 
-/// Which list Tab currently drives.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-enum TelemetryFocus {
+/// Which view Tab currently shows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+enum TelemetryView {
+    /// Three full-height time charts.
+    #[default]
+    Charts,
+    /// The paginated session list and its detail.
     Sessions,
+    /// The selected session's requests and their detail.
     Requests,
 }
 
@@ -47,8 +52,8 @@ pub(crate) struct TelemetryPage {
     selected_session: usize,
     /// Which panel the detail shows.
     pub(crate) detail_is_request: bool,
-    /// Which list the arrow keys scroll.
-    focus: TelemetryFocus,
+    /// Which view is on screen.
+    view: TelemetryView,
     /// Pages the request table was last rebuilt for.
     last_session_page: usize,
     last_request_page: usize,
@@ -70,7 +75,7 @@ impl TelemetryPage {
             session_data: Vec::new(),
             selected_session: 0,
             detail_is_request: false,
-            focus: TelemetryFocus::Sessions,
+            view: TelemetryView::Charts,
             last_session_page: 0,
             last_request_page: 0,
             last_request_row: 0,
@@ -97,11 +102,12 @@ impl TelemetryPage {
         }
     }
 
-    /// Switch between the session list and the request list.
+    /// Tab cycles charts, then the two paginated lists.
     pub(crate) fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            TelemetryFocus::Sessions => TelemetryFocus::Requests,
-            TelemetryFocus::Requests => TelemetryFocus::Sessions,
+        self.view = match self.view {
+            TelemetryView::Charts => TelemetryView::Sessions,
+            TelemetryView::Sessions => TelemetryView::Requests,
+            TelemetryView::Requests => TelemetryView::Charts,
         };
     }
 
@@ -338,7 +344,7 @@ impl TelemetryPage {
         let page = absolute / SESSION_PAGE;
         self.selected_session = absolute.saturating_sub(page * SESSION_PAGE);
         self.detail_is_request = false;
-        self.focus = TelemetryFocus::Sessions;
+        self.view = TelemetryView::Sessions;
         if let Some(pager) = self
             .children
             .get_mut(3)
@@ -381,7 +387,7 @@ impl TelemetryPage {
         let next = usize::try_from((current + delta).clamp(0, last)).unwrap_or(0);
         table.state.selected = next;
         self.detail_is_request = true;
-        self.focus = TelemetryFocus::Requests;
+        self.view = TelemetryView::Requests;
         self.last_request_row = next;
     }
 
@@ -411,44 +417,38 @@ impl TelemetryPage {
         caption
     }
 
-    fn paint_charts(
-        &mut self,
-        area: Rect,
-        height: u16,
-        buf: &mut Buffer,
-        cx: &mut Context,
-        theme: &Theme,
-    ) {
+    fn paint_charts(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
         let titles = [
             "cost · cumulative usd",
             "tokens · in + out",
             "cache · hit rate %",
         ];
-        let width = area.width / 3;
+        let slot = (area.height / 3).max(9);
         for (index, title) in titles.iter().enumerate() {
-            let step = u16::try_from(index).unwrap_or(u16::MAX);
-            let x = area.x.saturating_add(width.saturating_mul(step));
-            let w = if index == 2 {
-                area.width.saturating_sub(width * 2)
-            } else {
-                width
-            };
+            let y = area
+                .y
+                .saturating_add(u16::try_from(index).unwrap_or(0) * slot);
+            if y >= area.y + area.height {
+                break;
+            }
             let rect = Rect {
-                x,
-                y: area.y,
-                width: w,
-                height,
+                x: area.x,
+                y,
+                width: area.width,
+                height: slot.saturating_sub(1).min(area.y + area.height - y),
             };
             buf.set_stringn(
-                x,
-                area.y,
+                area.x + 1,
+                y,
                 title,
                 title.len(),
-                Style::default().fg(theme.muted),
+                Style::default()
+                    .fg(theme.foreground)
+                    .add_modifier(Modifier::BOLD),
             );
             let plot = Rect {
-                y: area.y + 1,
-                height: height.saturating_sub(1),
+                y: y + 1,
+                height: rect.height.saturating_sub(1),
                 ..rect
             };
             if let Some(child) = self.children.get_mut(index) {
@@ -515,7 +515,7 @@ impl TelemetryPage {
 
         let mut sessions_style = Style::default().fg(theme.muted);
         let mut requests_style = Style::default().fg(theme.muted);
-        let active = if self.focus == TelemetryFocus::Sessions {
+        let active = if self.view == TelemetryView::Sessions {
             &mut sessions_style
         } else {
             &mut requests_style
@@ -634,8 +634,8 @@ impl View for TelemetryPage {
             usize::from(area.width.saturating_sub(2)),
             Style::default().fg(theme.muted),
         );
-        let hint = "Tab switch list · j/k navigate · [ ] interval";
-        if area.width > 52 {
+        let hint = "Tab charts/sessions/requests · j/k navigate · [ ] interval";
+        if area.width > 56 {
             let w = u16::try_from(hint.len()).unwrap_or(u16::MAX);
             buf.set_stringn(
                 area.x + area.width.saturating_sub(w + 1),
@@ -645,25 +645,16 @@ impl View for TelemetryPage {
                 Style::default().fg(theme.muted),
             );
         }
-
-        let chart_height = (area.height.saturating_sub(16) / 3).max(8);
-        self.paint_charts(
-            Rect {
-                y: area.y + 1,
-                height: chart_height + 1,
-                ..area
-            },
-            chart_height,
-            buf,
-            cx,
-            theme,
-        );
-
-        let lower_y = area.y + 1 + chart_height + 1;
-        if lower_y + 3 >= area.y + area.height {
-            return;
+        let body = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        if self.view == TelemetryView::Charts {
+            self.paint_charts(body, buf, cx, theme);
+        } else {
+            self.paint_lower(area, area.y + 1, buf, cx, theme);
         }
-        self.paint_lower(area, lower_y, buf, cx, theme);
     }
 
     fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
@@ -680,8 +671,8 @@ impl View for TelemetryPage {
                     self.cycle_interval(false);
                     return Outcome::Consumed;
                 }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if self.focus == TelemetryFocus::Sessions {
+                KeyCode::Char('j') | KeyCode::Down if self.view != TelemetryView::Charts => {
+                    if self.view == TelemetryView::Sessions {
                         let current = self.session_page() * SESSION_PAGE + self.selected_session;
                         let next = (current + 1).min(self.sessions.len().saturating_sub(1));
                         self.select_session(next);
@@ -691,8 +682,8 @@ impl View for TelemetryPage {
                     }
                     return Outcome::Consumed;
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if self.focus == TelemetryFocus::Sessions {
+                KeyCode::Char('k') | KeyCode::Up if self.view != TelemetryView::Charts => {
+                    if self.view == TelemetryView::Sessions {
                         let current = self.session_page() * SESSION_PAGE + self.selected_session;
                         self.select_session(current.saturating_sub(1));
                     } else {
