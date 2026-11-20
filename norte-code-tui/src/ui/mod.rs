@@ -3,6 +3,7 @@
 mod chat_layout;
 mod composer;
 mod config_page;
+mod detail_panel;
 #[cfg(test)]
 #[path = "focus_tests.rs"]
 mod focus_tests;

@@ -11,8 +11,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
+use terminalui::components::pagination::Pagination;
+use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
-use terminalui::{Context, InputEvent, Outcome, Theme, View};
+use super::detail_panel::{DetailPanel, Field};
 
 /// The interaction mode of the page.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -78,6 +80,8 @@ pub(crate) struct SessionsPage {
     /// Requests waiting for the host.
     #[serde(skip)]
     pending: Vec<SessionsAction>,
+    /// The list pager and the selected session's detail panel.
+    children: Vec<Node>,
 }
 
 impl SessionsPage {
@@ -91,6 +95,10 @@ impl SessionsPage {
             mode: Mode::Listing,
             area: Rect::new(0, 0, 0, 0),
             pending: Vec::new(),
+            children: vec![
+                node("sessions_pager", Pagination::new(1)),
+                node("session_detail", DetailPanel::new()),
+            ],
         }
     }
 
@@ -116,19 +124,98 @@ impl SessionsPage {
     }
 
     fn body_rows(&self) -> usize {
-        self.area.height.saturating_sub(2) as usize
+        self.area.height.saturating_sub(3) as usize
     }
 
     fn clamp_view(&mut self) {
         let body = self.body_rows();
         if self.sessions.len() <= body {
             self.offset = 0;
-            return;
-        }
-        if self.selected < self.offset {
+        } else if self.selected < self.offset {
             self.offset = self.selected;
         } else if self.selected >= self.offset + body {
             self.offset = self.selected + 1 - body;
+        }
+        let body = body.max(1);
+        let page = self.offset / body;
+        if let Some(pager) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<Pagination>())
+        {
+            pager.go_to(page);
+        }
+    }
+
+    /// Keep the pager's page count and the list's offset in agreement.
+    fn sync_pager(&mut self) {
+        let body = self.body_rows().max(1);
+        let total = self.sessions.len().div_ceil(body).max(1);
+        let Some(pager) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<Pagination>())
+        else {
+            return;
+        };
+        if pager.total_pages != total {
+            pager.set_total_pages(total);
+        }
+        let expected = (self.offset / body).min(total - 1);
+        if pager.page() != expected {
+            // The pager itself was clicked or keyed; follow its page.
+            self.offset = (pager.page() * body).min(self.sessions.len().saturating_sub(1));
+            self.selected = self.offset;
+            self.clamp_view();
+        }
+    }
+
+    /// Fill the detail panel from the selected session.
+    fn sync_detail(&mut self) {
+        let fields = self.selected_session().map_or_else(
+            || vec![Field::new("no session", "select a row")],
+            |session| {
+                let title = session
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "untitled".to_owned());
+                let model = session.model.as_ref().map_or_else(
+                    || "unknown".to_owned(),
+                    |model| {
+                        session.provider.as_ref().map_or_else(
+                            || model.id.clone(),
+                            |provider| format!("{provider}/{}", model.id),
+                        )
+                    },
+                );
+                vec![
+                    Field::new("title", title),
+                    Field::new("id", clip(&session.session_id, 36)),
+                    Field::new("model", clip(&model, 36)),
+                    Field::new("status", session.status.label().to_owned()),
+                    Field::new(
+                        "agent",
+                        session
+                            .agent
+                            .as_ref()
+                            .map_or_else(|| "unknown".to_owned(), |agent| agent.id.clone()),
+                    ),
+                    Field::new("pinned", session.pinned.to_string()),
+                    Field::new("archived", session.archived.to_string()),
+                ]
+            },
+        );
+        let title = if self.sessions.is_empty() {
+            "session".to_owned()
+        } else {
+            format!("session · {}", self.selected + 1)
+        };
+        if let Some(panel) = self
+            .children
+            .get_mut(1)
+            .and_then(|node| node.view.as_any().downcast_mut::<DetailPanel>())
+        {
+            panel.set(title, fields);
         }
     }
 
@@ -289,12 +376,12 @@ impl View for SessionsPage {
         "sessions_page"
     }
 
-    fn children(&self) -> &[terminalui::Node] {
-        &[]
+    fn children(&self) -> &[Node] {
+        &self.children
     }
 
-    fn children_mut(&mut self) -> &mut [terminalui::Node] {
-        &mut []
+    fn children_mut(&mut self) -> &mut [Node] {
+        &mut self.children
     }
 
     fn measure(&self) -> Option<(u16, u16)> {
@@ -305,14 +392,28 @@ impl View for SessionsPage {
         true
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _cx: &mut Context, theme: &Theme) {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
         self.area = area;
         buf.set_style(area, Style::default().bg(theme.background));
-        Self::paint_caption(area, buf, theme);
-        match &self.mode {
+        let detail_width = (area.width / 2)
+            .clamp(26, 48)
+            .min(area.width.saturating_sub(26));
+        let list_width = area.width.saturating_sub(detail_width + 1);
+        let list_area = Rect {
+            width: list_width,
+            ..area
+        };
+        let detail_area = Rect {
+            x: area.x + list_width + 1,
+            width: detail_width,
+            ..area
+        };
+
+        Self::paint_caption(list_area, buf, theme);
+        let listing = match &self.mode {
             Mode::Rename { title, .. } => {
-                Self::paint_rename(area, buf, theme, title);
-                return;
+                Self::paint_rename(list_area, buf, theme, title);
+                false
             }
             Mode::ConfirmDelete { session } => {
                 let title = self
@@ -321,13 +422,30 @@ impl View for SessionsPage {
                     .find(|candidate| candidate.session_id == *session)
                     .and_then(|session| session.title.clone())
                     .unwrap_or_else(|| clip(session, 48));
-                Self::paint_delete(area, buf, theme, &title);
-                return;
+                Self::paint_delete(list_area, buf, theme, &title);
+                false
             }
-            Mode::Listing => {}
+            Mode::Listing => true,
+        };
+        if listing {
+            self.paint_list(list_area, buf, theme);
+            Self::paint_hint(list_area, buf, theme);
         }
-        self.paint_list(area, buf, theme);
-        Self::paint_hint(area, buf, theme);
+
+        self.sync_pager();
+        self.sync_detail();
+        let pager_rect = Rect {
+            y: area.y + area.height.saturating_sub(1),
+            width: list_width,
+            height: 1,
+            ..list_area
+        };
+        if let Some(child) = self.children.first_mut() {
+            child.view.render(pager_rect, buf, cx, theme);
+        }
+        if let Some(child) = self.children.get_mut(1) {
+            child.view.render(detail_area, buf, cx, theme);
+        }
     }
 
     fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
@@ -363,7 +481,7 @@ impl SessionsPage {
     }
 
     fn paint_hint(area: Rect, buf: &mut Buffer, theme: &Theme) {
-        let y = area.y + area.height.saturating_sub(1);
+        let y = area.y + area.height.saturating_sub(2);
         let hint = "⏎ attach · r rename · d delete";
         buf.set_stringn(
             area.x + 1,

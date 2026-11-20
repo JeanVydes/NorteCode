@@ -1,6 +1,7 @@
 //! The sessions page: attach, rename and delete from the keyboard.
 
 use super::{Mode, SessionsAction, SessionsPage};
+use crate::ui::detail_panel::DetailPanel;
 
 fn session(id: &str, title: Option<&str>) -> norte_code_wire::SessionSummary {
     norte_code_wire::SessionSummary {
@@ -36,6 +37,25 @@ fn enter() -> crossterm::event::KeyEvent {
         kind: KeyEventKind::Press,
         state: crossterm::event::KeyEventState::empty(),
     }
+}
+
+#[test]
+fn the_detail_panel_tracks_the_selected_session() {
+    let mut page = page_with(vec![session("a", None), session("b", Some("Second"))]);
+    page.handle_listing_key(&key('j'));
+    page.sync_detail();
+    let panel = page
+        .children
+        .get(1)
+        .and_then(|node| node.view.as_any_ref().downcast_ref::<DetailPanel>())
+        .expect("detail panel");
+    assert_eq!(panel.title, "session · 2");
+    assert!(
+        panel
+            .fields
+            .iter()
+            .any(|field| field.label == "title" && field.value == "Second")
+    );
 }
 
 #[test]
