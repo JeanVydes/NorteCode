@@ -13,11 +13,14 @@ pub(crate) enum ChartInterval {
     Day,
 }
 
-/// A short bucket label that fits the chart's x-axis gutter.
+/// A short time label for the chart's x axis. Buckets are RFC 3339 prefixes;
+/// minute and hour intervals show the clock time, days show month and day.
 pub(crate) fn short_label(key: &str, interval: ChartInterval) -> String {
     match interval {
         ChartInterval::Minute => key.get(11..16).unwrap_or(key).to_owned(),
-        ChartInterval::Hour => key.get(5..13).unwrap_or(key).replace('T', " "),
+        ChartInterval::Hour => key
+            .get(11..13)
+            .map_or_else(|| key.to_owned(), |hour| format!("{hour}:00")),
         ChartInterval::Day => key.get(5..10).unwrap_or(key).to_owned(),
     }
 }

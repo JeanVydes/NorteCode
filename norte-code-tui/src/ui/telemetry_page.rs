@@ -423,23 +423,18 @@ impl TelemetryPage {
             "tokens · in + out",
             "cache · hit rate %",
         ];
-        let slot = (area.height / 3).max(9);
+        let width = area.width / 3;
         for (index, title) in titles.iter().enumerate() {
-            let y = area
-                .y
-                .saturating_add(u16::try_from(index).unwrap_or(0) * slot);
-            if y >= area.y + area.height {
-                break;
-            }
-            let rect = Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: slot.saturating_sub(1).min(area.y + area.height - y),
+            let step = u16::try_from(index).unwrap_or(0);
+            let x = area.x.saturating_add(width.saturating_mul(step));
+            let w = if index == 2 {
+                area.width.saturating_sub(width * 2)
+            } else {
+                width
             };
             buf.set_stringn(
-                area.x + 1,
-                y,
+                x + 1,
+                area.y,
                 title,
                 title.len(),
                 Style::default()
@@ -447,9 +442,10 @@ impl TelemetryPage {
                     .add_modifier(Modifier::BOLD),
             );
             let plot = Rect {
-                y: y + 1,
-                height: rect.height.saturating_sub(1),
-                ..rect
+                x,
+                y: area.y + 1,
+                width: w,
+                height: area.height.saturating_sub(1),
             };
             if let Some(child) = self.children.get_mut(index) {
                 child.view.render(plot, buf, cx, theme);

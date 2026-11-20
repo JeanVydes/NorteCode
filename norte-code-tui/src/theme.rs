@@ -16,30 +16,43 @@ pub enum ThemeKind {
     /// Dark background, the default.
     Dark,
     /// Blinding white, maximum contrast.
-    Cegador,
+    ByeRetina,
     /// Warm bone pastel.
-    PastelHueso,
+    Bone,
     /// True black, #000, for OLED panels.
     Amoled,
 }
 
 impl ThemeKind {
+    /// Whether a config string names this built-in, ignoring case and word
+    /// separators so `bye retina` and `bye_retina` both match `Bye Retina`.
+    pub fn matches(self, name: &str) -> bool {
+        let normalize = |value: &str| {
+            value
+                .chars()
+                .filter(|ch| *ch != ' ' && *ch != '_' && *ch != '-')
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        normalize(self.name()) == normalize(name)
+    }
+
     /// The display name used by the status chrome.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Dark => "dark",
-            Self::Cegador => "cegador",
-            Self::PastelHueso => "pastel hueso",
-            Self::Amoled => "amoled",
+            Self::Dark => "Dark",
+            Self::ByeRetina => "Bye Retina",
+            Self::Bone => "Bone",
+            Self::Amoled => "Amoled",
         }
     }
 
     /// The next theme in the cycle order.
     pub fn next(self) -> Self {
         match self {
-            Self::Dark => Self::Cegador,
-            Self::Cegador => Self::PastelHueso,
-            Self::PastelHueso => Self::Amoled,
+            Self::Dark => Self::ByeRetina,
+            Self::ByeRetina => Self::Bone,
+            Self::Bone => Self::Amoled,
             Self::Amoled => Self::Dark,
         }
     }
@@ -47,8 +60,8 @@ impl ThemeKind {
     fn palette(self) -> Palette {
         match self {
             Self::Dark => Palette::dark(),
-            Self::Cegador => Palette::cegador(),
-            Self::PastelHueso => Palette::pastel_hueso(),
+            Self::ByeRetina => Palette::bye_retina(),
+            Self::Bone => Palette::bone(),
             Self::Amoled => Palette::amoled(),
         }
     }
@@ -107,13 +120,11 @@ impl ThemeCatalog {
         };
         for kind in [
             ThemeKind::Dark,
-            ThemeKind::Cegador,
-            ThemeKind::PastelHueso,
+            ThemeKind::ByeRetina,
+            ThemeKind::Bone,
             ThemeKind::Amoled,
         ] {
-            if kind.name().eq_ignore_ascii_case(name)
-                || kind.name().replace(' ', "_").eq_ignore_ascii_case(name)
-            {
+            if kind.matches(name) {
                 return ThemeChoice::BuiltIn(kind);
             }
         }
@@ -185,13 +196,17 @@ where
     D: serde::Deserializer<'de>,
 {
     let name = Option::<String>::deserialize(deserializer)?;
-    Ok(name.and_then(|name| match name.as_str() {
-        "dark" => Some(ThemeKind::Dark),
-        "cegador" => Some(ThemeKind::Cegador),
-        "pastel_hueso" | "pastel hueso" => Some(ThemeKind::PastelHueso),
-        "amoled" => Some(ThemeKind::Amoled),
-        _ => None,
-    }))
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    Ok([
+        ThemeKind::Dark,
+        ThemeKind::ByeRetina,
+        ThemeKind::Bone,
+        ThemeKind::Amoled,
+    ]
+    .into_iter()
+    .find(|kind| kind.matches(&name)))
 }
 
 #[cfg(test)]
