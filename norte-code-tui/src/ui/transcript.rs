@@ -11,7 +11,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEventKind};
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 
 use crate::diff::LineKind;
@@ -67,11 +67,15 @@ pub(crate) enum Item {
     User {
         /// The raw text.
         text: String,
+        /// The turn this message belongs to, when known.
+        turn: Option<u64>,
     },
     /// The assistant answered; inline code draws as accented spans.
     Assistant {
         /// The raw text.
         text: String,
+        /// The turn this message belongs to, when known.
+        turn: Option<u64>,
     },
     /// A tool call with a trailing status glyph.
     Tool {
@@ -111,6 +115,10 @@ pub(crate) enum Item {
         /// Whether the block is expanded in place.
         expanded: bool,
     },
+}
+
+fn parse_turn(turn_id: Option<&str>) -> Option<u64> {
+    turn_id.and_then(|id| id.strip_prefix("turn_").unwrap_or(id).parse().ok())
 }
 
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -224,9 +232,35 @@ pub(crate) struct Transcript {
     /// Whether the user is dragging the scrollbar thumb.
     #[serde(skip)]
     dragging_thumb: bool,
+    /// The open message menu, if any.
+    #[serde(skip)]
+    menu: Option<MessageMenu>,
+    /// Message actions waiting for the host.
+    #[serde(skip)]
+    message_actions: Vec<MessageAction>,
     /// How edit diffs are drawn.
     #[serde(skip)]
     diff_mode: crate::diff::DiffMode,
+}
+
+/// What the message menu was asked to do.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MessageAction {
+    /// Fork the session at this message's turn.
+    Fork { turn: Option<u64> },
+    /// Copy this message's text.
+    Copy { text: String },
+    /// Rewind the session to this message's turn.
+    Rewind { turn: Option<u64> },
+}
+
+/// An open message menu.
+#[derive(Clone, Copy, Debug)]
+struct MessageMenu {
+    /// The item the menu belongs to.
+    item: usize,
+    /// Screen row of the menu's top.
+    row: u16,
 }
 
 /// A cell position in transcript coordinates (rows from the transcript's top).
@@ -273,6 +307,8 @@ impl Transcript {
             painted_user: Vec::new(),
             scrollbar: None,
             dragging_thumb: false,
+            menu: None,
+            message_actions: Vec::new(),
             diff_mode: crate::diff::DiffMode::Unified,
             follow_tail: true,
         }
@@ -302,8 +338,14 @@ impl Transcript {
         let mut last_shell: Option<usize> = None;
         for item in items {
             match item.kind.as_str() {
-                "user" => self.items.push(Item::User { text: item.content }),
-                "assistant" => self.items.push(Item::Assistant { text: item.content }),
+                "user" => self.items.push(Item::User {
+                    text: item.content,
+                    turn: parse_turn(item.turn_id.as_deref()),
+                }),
+                "assistant" => self.items.push(Item::Assistant {
+                    text: item.content,
+                    turn: parse_turn(item.turn_id.as_deref()),
+                }),
                 "reasoning" => self.items.push(Item::Reasoning {
                     text: item.content,
                     expanded: false,
@@ -467,14 +509,25 @@ impl Transcript {
     }
 
     /// Append assistant text; merges into the trailing assistant block.
-    pub(crate) fn push_assistant_text(&mut self, text: &str) {
-        if let Some(Item::Assistant { text: existing }) = self.items.last_mut() {
+    pub(crate) fn push_assistant_text(
+        &mut self,
+        text: &str,
+        turn: Option<&crate::ui_model::ActiveTurn>,
+    ) {
+        if let Some(Item::Assistant { text: existing, .. }) = self.items.last_mut() {
             existing.push_str(text);
             self.dirty = true;
             return;
         }
         self.push(Item::Assistant {
             text: text.to_string(),
+            turn: turn.and_then(|turn| {
+                turn.id
+                    .strip_prefix("turn_")
+                    .unwrap_or(&turn.id)
+                    .parse()
+                    .ok()
+            }),
         });
     }
 
@@ -510,8 +563,8 @@ impl Transcript {
 
     fn item_height(item: &Item, width: usize, diff_mode: crate::diff::DiffMode) -> u16 {
         match item {
-            Item::User { text }
-            | Item::Assistant { text }
+            Item::User { text, .. }
+            | Item::Assistant { text, .. }
             | Item::Notice { text, .. }
             | Item::Retry { text, .. } => {
                 u16::try_from(wrap(text, width).len()).unwrap_or(u16::MAX) + BLOCK_GAP
@@ -876,13 +929,22 @@ impl Transcript {
                 Outcome::Consumed
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.click_menu(mouse.column, mouse.row) {
+                    return Outcome::Consumed;
+                }
                 if !inside {
                     return Outcome::Ignored;
                 }
+                let local_row = mouse.row.saturating_sub(self.area.y);
                 let row = mouse
                     .row
                     .saturating_sub(self.origin_y)
                     .saturating_add(self.first_visible);
+                if self.message_at(self.content_row(local_row)).is_some() {
+                    self.open_menu(local_row);
+                    return Outcome::Consumed;
+                }
+                self.menu = None;
                 let _ = self.toggle_reasoning_at(row);
                 self.selection = Some(Selection {
                     anchor: pos,
@@ -908,30 +970,140 @@ impl Transcript {
                 Outcome::Consumed
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(selection) = self.selection.take()
-                    && selection.anchor != selection.cur
-                {
-                    match self.selection_text(selection) {
-                        Some(text) => {
-                            let chars = text.chars().count();
-                            let _ = terminalui::osc52_write(&text);
-                            self.push(Item::Notice {
-                                text: format!("copied {chars} chars to clipboard"),
-                                tone: Tone::Neutral,
-                            });
-                        }
-                        None => {
-                            self.push(Item::Notice {
-                                text: "selection produced no text".to_string(),
-                                tone: Tone::Warn,
-                            });
-                        }
-                    }
-                }
+                self.finish_selection();
                 Outcome::Consumed
             }
             _ => Outcome::Ignored,
         }
+    }
+
+    fn paint_menu(&self, buf: &mut Buffer, theme: &Theme) {
+        let Some(menu) = self.menu else {
+            return;
+        };
+        let rect = Rect {
+            x: self.area.x,
+            y: menu.row,
+            width: 26,
+            height: 2,
+        };
+        buf.set_style(rect, Style::default().bg(theme.secondary));
+        for index in 0..3 {
+            let button = self.menu_button_rect(menu, index);
+            let label = ["fork", "copy", "rewind"][index];
+            buf.set_stringn(
+                button.x,
+                button.y,
+                label,
+                label.len(),
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.secondary)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
+    }
+
+    /// Take the message actions queued by the floating menu.
+    pub(crate) fn take_message_actions(&mut self) -> Vec<MessageAction> {
+        std::mem::take(&mut self.message_actions)
+    }
+
+    /// Which content row is under a screen row.
+    fn content_row(&self, screen_row: u16) -> usize {
+        usize::from(self.first_visible.saturating_add(screen_row))
+    }
+
+    /// The item occupying a content row, if it is a message.
+    fn message_at(&self, row: usize) -> Option<usize> {
+        self.row_items()
+            .get(row)
+            .copied()
+            .flatten()
+            .filter(|index| {
+                matches!(
+                    self.items.get(*index),
+                    Some(Item::User { .. } | Item::Assistant { .. })
+                )
+            })
+    }
+
+    /// Open the menu for a clicked message.
+    fn open_menu(&mut self, screen_row: u16) {
+        let row = self.content_row(screen_row);
+        self.menu = self.message_at(row).map(|item| MessageMenu {
+            item,
+            row: screen_row + self.area.y,
+        });
+    }
+
+    fn finish_selection(&mut self) {
+        let Some(selection) = self.selection.take() else {
+            return;
+        };
+        if selection.anchor == selection.cur {
+            return;
+        }
+        match self.selection_text(selection) {
+            Some(text) => {
+                let chars = text.chars().count();
+                let _ = terminalui::osc52_write(&text);
+                self.push(Item::Notice {
+                    text: format!("copied {chars} chars to clipboard"),
+                    tone: Tone::Neutral,
+                });
+            }
+            None => {
+                self.push(Item::Notice {
+                    text: "selection produced no text".to_string(),
+                    tone: Tone::Warn,
+                });
+            }
+        }
+    }
+
+    fn click_menu(&mut self, column: u16, row: u16) -> bool {
+        let Some(menu) = self.menu else {
+            return false;
+        };
+        for index in 0..3 {
+            if self
+                .menu_button_rect(menu, index)
+                .contains(Position::new(column, row))
+            {
+                self.activate_menu(index);
+                return true;
+            }
+        }
+        self.menu = None;
+        false
+    }
+
+    fn menu_button_rect(&self, menu: MessageMenu, index: usize) -> Rect {
+        Rect {
+            x: self.area.x + 1 + u16::try_from(index).unwrap_or(0) * 8,
+            y: menu.row + 1,
+            width: 8,
+            height: 1,
+        }
+    }
+
+    /// Apply a menu button click.
+    fn activate_menu(&mut self, button: usize) {
+        let Some(menu) = self.menu.take() else {
+            return;
+        };
+        let (turn, text) = match self.items.get(menu.item) {
+            Some(Item::User { turn, text, .. } | Item::Assistant { turn, text, .. }) => {
+                (*turn, text.clone())
+            }
+            _ => return,
+        };
+        self.message_actions.push(match button {
+            0 => MessageAction::Fork { turn },
+            1 => MessageAction::Copy { text },
+            _ => MessageAction::Rewind { turn },
+        });
     }
 
     fn drag_thumb(&mut self, bar: ScrollbarGeometry, local: u16) {
@@ -1023,8 +1195,8 @@ impl View for Transcript {
             };
             let clip = bottom;
             match item {
-                Item::User { text } => paint_user(buf, rect, text, clip, theme),
-                Item::Assistant { text } => paint_assistant(buf, rect, text, clip, theme),
+                Item::User { text, .. } => paint_user(buf, rect, text, clip, theme),
+                Item::Assistant { text, .. } => paint_assistant(buf, rect, text, clip, theme),
                 Item::Tool { .. } => {
                     Self::paint_tool_item(item, rect, buf, cx, clip, self.diff_mode, theme);
                 }
@@ -1065,6 +1237,7 @@ impl View for Transcript {
 
         self.capture_painted(area, buf);
         self.paint_selection(area, buf, theme);
+        self.paint_menu(buf, theme);
     }
 
     fn handle_event(&mut self, event: &InputEvent, cx: &mut Context) -> Outcome {

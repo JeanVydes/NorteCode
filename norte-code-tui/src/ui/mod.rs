@@ -49,7 +49,7 @@ pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
 pub(crate) use settings_page::SettingsPage;
 pub(crate) use telemetry_page::TelemetryPage;
-pub(crate) use transcript::{Item, Tone, ToolState, Transcript};
+pub(crate) use transcript::{Item, MessageAction, Tone, ToolState, Transcript};
 
 use crate::ui_model::{Tab, UiModel};
 

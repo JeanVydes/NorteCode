@@ -42,90 +42,113 @@ pub(crate) fn fields(model: &UiModel) -> Vec<Field> {
             &model.service_url
         },
     ));
-
     if let Some(info) = &model.server_info {
-        fields.push(Field::new("version", &info.server_version));
-        if let Some(protocol) = &info.protocol {
-            fields.push(Field::new(
-                "protocol",
-                format!("{} {}", protocol.name, protocol.version),
-            ));
-        }
-        fields.push(Field::new("default agent", &info.default_agent));
-        if !info.capabilities.is_empty() {
-            fields.push(Field::new("capabilities", info.capabilities.join(", ")));
-        }
-        if !info.extensions.is_empty() {
-            fields.push(Field::new("extensions", info.extensions.join(", ")));
-        }
-        let limits = &info.limits;
-        if let Some(bytes) = limits.frame_bytes {
-            fields.push(Field::new("max frame", human_bytes(bytes)));
-        }
-        if let Some(count) = limits.concurrent_jobs {
-            fields.push(Field::new("max jobs", count.to_string()));
-        }
-        if let Some(bytes) = limits.artifact_bytes {
-            fields.push(Field::new("max artifact", human_bytes(bytes)));
-        }
-        if let Some(bytes) = limits.prompt_bytes {
-            fields.push(Field::new("max prompt", human_bytes(bytes)));
-        }
+        server_fields(&mut fields, info);
     }
-
     if let Some(live) = &model.liveness {
         fields.push(Field::new("liveness", format!("{:?}", live.status)));
     }
     if let Some(ready) = &model.readiness {
-        fields.push(Field::new("readiness", format!("{:?}", ready.status)));
-        fields.push(Field::new("agents", ready.agents.to_string()));
-        fields.push(Field::new("replay", ready.replay.to_string()));
-        fields.push(Field::new("artifacts", ready.artifacts.to_string()));
+        readiness_fields(&mut fields, ready);
+    }
+    if let Some(quota) = &model.quota {
+        quota_fields(&mut fields, quota);
+    }
+    for agent in &model.agents {
+        agent_fields(&mut fields, agent);
+    }
+    fields
+}
+
+fn server_fields(fields: &mut Vec<Field>, info: &norte_code_client::ServerInfo) {
+    fields.push(Field::new("version", &info.server_version));
+    if let Some(protocol) = &info.protocol {
         fields.push(Field::new(
-            "connections",
-            ready.limits.max_connections.to_string(),
-        ));
-        fields.push(Field::new(
-            "timeout",
-            millis(ready.limits.command_timeout_ms),
+            "protocol",
+            format!("{} {}", protocol.name, protocol.version),
         ));
     }
+    fields.push(Field::new("default agent", &info.default_agent));
+    if !info.capabilities.is_empty() {
+        let shown = info
+            .capabilities
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>();
+        let rest = info.capabilities.len().saturating_sub(3);
+        let value = if rest == 0 {
+            shown.join(", ")
+        } else {
+            format!("{}, +{rest} more", shown.join(", "))
+        };
+        fields.push(Field::new("capabilities", value));
+    }
+    if !info.extensions.is_empty() {
+        fields.push(Field::new("extensions", info.extensions.join(", ")));
+    }
+    let limits = &info.limits;
+    if let Some(bytes) = limits.frame_bytes {
+        fields.push(Field::new("max frame", human_bytes(bytes)));
+    }
+    if let Some(count) = limits.concurrent_jobs {
+        fields.push(Field::new("max jobs", count.to_string()));
+    }
+    if let Some(bytes) = limits.artifact_bytes {
+        fields.push(Field::new("max artifact", human_bytes(bytes)));
+    }
+    if let Some(bytes) = limits.prompt_bytes {
+        fields.push(Field::new("max prompt", human_bytes(bytes)));
+    }
+}
 
-    if let Some(quota) = &model.quota {
-        fields.push(Field::new("tenant", &quota.tenant));
+fn readiness_fields(fields: &mut Vec<Field>, ready: &norte_code_client::Readiness) {
+    fields.push(Field::new("readiness", format!("{:?}", ready.status)));
+    fields.push(Field::new("agents", ready.agents.to_string()));
+    fields.push(Field::new("replay", ready.replay.to_string()));
+    fields.push(Field::new("artifacts", ready.artifacts.to_string()));
+    fields.push(Field::new(
+        "connections",
+        ready.limits.max_connections.to_string(),
+    ));
+    fields.push(Field::new(
+        "timeout",
+        millis(ready.limits.command_timeout_ms),
+    ));
+}
+
+fn quota_fields(fields: &mut Vec<Field>, quota: &norte_code_wire::QuotaReport) {
+    fields.push(Field::new("tenant", &quota.tenant));
+    fields.push(Field::new(
+        "quota period",
+        format!(
+            "{} .. {}",
+            epoch(quota.period.start),
+            epoch(quota.period.end)
+        ),
+    ));
+    for dimension in &quota.dimensions {
         fields.push(Field::new(
-            "quota period",
+            dimension.name.label(),
             format!(
-                "{} .. {}",
-                epoch(quota.period.start),
-                epoch(quota.period.end)
+                "{}/{} ({} left)",
+                dimension.used, dimension.limit, dimension.remaining
             ),
         ));
-        for dimension in &quota.dimensions {
-            fields.push(Field::new(
-                dimension.name.label(),
-                format!(
-                    "{}/{} ({} left)",
-                    dimension.used, dimension.limit, dimension.remaining
-                ),
-            ));
-        }
     }
+}
 
-    for agent in &model.agents {
-        let version = if agent.version.is_empty() {
-            String::new()
-        } else {
-            format!(" v{}", agent.version)
-        };
-        fields.push(Field::new("agent", format!("{}{}", agent.id, version)));
-        if let Some(provider) = &agent.provider {
-            fields.push(Field::new("  provider", &provider.id));
-        }
-        if let Some(agent_model) = &agent.model {
-            fields.push(Field::new("  model", &agent_model.id));
-        }
+fn agent_fields(fields: &mut Vec<Field>, agent: &norte_code_wire::AgentSummary) {
+    let version = if agent.version.is_empty() {
+        String::new()
+    } else {
+        format!(" v{}", agent.version)
+    };
+    fields.push(Field::new("agent", format!("{}{}", agent.id, version)));
+    if let Some(provider) = &agent.provider {
+        fields.push(Field::new("  provider", &provider.id));
     }
-
-    fields
+    if let Some(agent_model) = &agent.model {
+        fields.push(Field::new("  model", &agent_model.id));
+    }
 }

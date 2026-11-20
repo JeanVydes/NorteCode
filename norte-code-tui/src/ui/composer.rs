@@ -6,6 +6,7 @@
 
 use std::any::Any;
 
+use ratatui::style::Style;
 use serde::Serialize;
 use terminalui::Node;
 use terminalui::components::chrome::{Border, BorderSet, Radius};
@@ -243,7 +244,18 @@ impl View for Composer {
         if self.visible {
             self.input.render(area, buf, cx, theme);
         } else {
-            // Keep the focus counter in step with the tree's count_focusable.
+            // Erase the box left by previous frames, then keep the focus
+            // counter in step with the tree's count_focusable.
+            buf.set_style(area, Style::default().bg(theme.background));
+            for y in area.y..area.y + area.height {
+                buf.set_stringn(area.x, y, "", 0, Style::default());
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
+                        cell.set_symbol(" ");
+                        cell.set_style(Style::default().bg(theme.background));
+                    }
+                }
+            }
             let _ = cx.is_focused();
         }
     }
