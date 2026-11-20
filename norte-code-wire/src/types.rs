@@ -117,6 +117,12 @@ pub struct PluginInfo {
     /// Why loading failed, when it did; empty when it loaded or never tried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_error: Option<String>,
+    /// The repository it was installed from, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The workspace package installed from that source, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
 }
 
 /// One MCP server visible to the service.

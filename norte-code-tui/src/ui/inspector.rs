@@ -48,11 +48,6 @@ impl Row {
         self.secondary = Some(secondary.into());
         self
     }
-
-    pub(crate) fn with_tag(mut self, tag: impl Into<String>) -> Self {
-        self.tag = Some(tag.into());
-        self
-    }
 }
 
 /// The caption + list pattern every catalogue page shares.

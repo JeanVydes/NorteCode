@@ -126,6 +126,12 @@ pub struct PluginSummary {
     /// Why loading failed, when it did.
     #[serde(default)]
     pub load_error: Option<String>,
+    /// The repository it was installed from, when recorded.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// The workspace package installed from that source, when recorded.
+    #[serde(default)]
+    pub package: Option<String>,
 }
 
 /// The result of a plugin operation.

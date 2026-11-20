@@ -20,12 +20,16 @@ fn model_with_plugins() -> UiModel {
                 enabled: true,
                 loaded: true,
                 load_error: None,
+                source: Some("https://example.invalid/alpha".to_owned()),
+                package: None,
             },
             PluginSummary {
                 name: "beta".to_owned(),
                 enabled: true,
                 loaded: false,
                 load_error: Some("was built against plugin interface 1".to_owned()),
+                source: None,
+                package: Some("beta".to_owned()),
             },
         ],
         ..UiModel::default()
@@ -170,6 +174,8 @@ fn an_enabled_plugin_the_host_did_not_load_is_not_called_failed() {
             enabled: true,
             loaded: false,
             load_error: None,
+            source: None,
+            package: None,
         }],
         ..UiModel::default()
     };

@@ -8,6 +8,7 @@ mod detail_panel;
 #[path = "focus_tests.rs"]
 mod focus_tests;
 mod header;
+mod host_info;
 mod inspector;
 mod key_prompt;
 #[cfg(test)]
@@ -24,6 +25,7 @@ mod rail_tests;
 mod selector;
 mod session_detail;
 mod sessions_page;
+mod settings_page;
 mod telemetry_page;
 #[cfg(test)]
 #[path = "telemetry_page_tests.rs"]
@@ -35,16 +37,17 @@ use terminalui::Pane;
 
 pub(crate) use chat_layout::ChatLayout;
 pub(crate) use composer::Composer;
-pub(crate) use config_page::{ConfigAction, ConfigData, ConfigPage, Setting};
+pub(crate) use config_page::{ConfigAction, ConfigData, Setting};
 pub(crate) use header::Header;
 
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
-pub(crate) use plugins_page::{PluginsAction, PluginsPage};
+pub(crate) use plugins_page::PluginsAction;
 pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::{Rail, RailPosition};
 pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
+pub(crate) use settings_page::SettingsPage;
 pub(crate) use telemetry_page::TelemetryPage;
 pub(crate) use transcript::{Item, Tone, ToolState, Transcript};
 
@@ -62,10 +65,8 @@ fn tab_index(tab: Tab) -> usize {
         Tab::Plans => 3,
         Tab::Jobs => 4,
         Tab::Telemetry => 5,
-        Tab::Host => 6,
-        Tab::Plugins => 7,
-        Tab::Costs => 8,
-        Tab::Config => 9,
+        Tab::Settings => 6,
+        Tab::Costs => 7,
     }
 }
 
@@ -129,10 +130,8 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
             node("plans", pages::plans(model)),
             node("jobs", pages::jobs(model)),
             node("telemetry", TelemetryPage::new()),
-            node("host", pages::host(model)),
-            node("plugins", plugins_page::PluginsPage::new()),
+            node("settings", settings_page::SettingsPage::new()),
             node("costs", pages::costs(model)),
-            node("config", config_page::ConfigPage::new()),
         ]),
     );
 
@@ -185,7 +184,7 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
         pane.set_visible(tab_index(model.tab));
     }
     if let Some(composer) = tree.find_mut::<Composer>("composer") {
-        composer.set_disabled(model.tab != Tab::Chat);
+        composer.set_visible(model.tab == Tab::Chat);
     }
     if let Some(header) = tree.find_mut::<Header>("header") {
         header.tab = model.tab;
@@ -252,22 +251,18 @@ fn update_models(tree: &mut Tree, model: &UiModel) {
     }
 }
 
-fn update_plugins(tree: &mut Tree, model: &UiModel) {
-    if let Some(page) = tree.find_mut::<plugins_page::PluginsPage>("plugins") {
-        page.set_data(model.plugins.clone());
-        page.set_job(model.plugin_job.clone());
-    }
-}
-
 fn update_config(tree: &mut Tree, model: &UiModel) {
-    if let Some(page) = tree.find_mut::<config_page::ConfigPage>("config") {
-        page.set_data(ConfigData {
-            theme: crate::theme::theme_name(&model.preferences.theme).to_string(),
-            thinking: model.preferences.reasoning.label().to_string(),
-            send_mode: model.preferences.send_mode.label().to_string(),
-            diff_mode: model.preferences.diff_mode.label().to_string(),
-            rail_position: model.preferences.rail_position.label().to_string(),
-        });
+    if let Some(page) = tree.find_mut::<SettingsPage>("settings") {
+        page.set_data(
+            model,
+            ConfigData {
+                theme: crate::theme::theme_name(&model.preferences.theme).to_string(),
+                thinking: model.preferences.reasoning.label().to_string(),
+                send_mode: model.preferences.send_mode.label().to_string(),
+                diff_mode: model.preferences.diff_mode.label().to_string(),
+                rail_position: model.preferences.rail_position.label().to_string(),
+            },
+        );
     }
     if let Some(stream) = tree.find_mut::<Transcript>("stream") {
         stream.set_diff_mode(model.preferences.diff_mode);
@@ -291,10 +286,6 @@ pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
         page.set_report(model.telemetry.clone());
         page.set_sessions(model.sessions.clone());
     }
-    if let Some(inspector) = tree.find_mut::<inspector::Inspector>("host") {
-        *inspector = pages::host(model);
-    }
-    update_plugins(tree, model);
     update_config(tree, model);
     if let Some(inspector) = tree.find_mut::<inspector::Inspector>("costs") {
         *inspector = pages::costs(model);

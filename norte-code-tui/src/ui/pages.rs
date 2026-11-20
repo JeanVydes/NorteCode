@@ -71,45 +71,6 @@ pub(crate) fn jobs(model: &UiModel) -> Inspector {
     inspector
 }
 
-pub(crate) fn host(model: &UiModel) -> Inspector {
-    let mut inspector = Inspector::new("host · catalog", Selection::Browse);
-    let mut rows = Vec::new();
-    for agent in &model.agents {
-        let version = if agent.version.is_empty() {
-            String::new()
-        } else {
-            format!(" v{}", agent.version)
-        };
-        rows.push(Row::new(format!("agent {}{}", agent.id, version)).with_secondary("agent"));
-    }
-    if let Some(catalog) = &model.catalog {
-        for provider in &catalog.providers {
-            let from_file = if provider.from_file { "file" } else { "plugin" };
-            let key_tag = if provider.environment_keys.is_empty() {
-                "no key needed"
-            } else {
-                "key required"
-            };
-            rows.push(
-                Row::new(format!(
-                    "{} · {} model(s)",
-                    provider.provider_id, provider.model_count
-                ))
-                .with_secondary(format!("{from_file} · provider"))
-                .with_tag(key_tag),
-            );
-        }
-        rows.push(
-            Row::new(format!("{} models in catalog", catalog.models.len())).with_secondary("total"),
-        );
-    }
-    if rows.is_empty() {
-        rows.push(Row::new("host data not loaded yet").with_secondary("waiting for attach"));
-    }
-    inspector.set_rows(rows);
-    inspector
-}
-
 pub(crate) fn costs(model: &UiModel) -> Inspector {
     let mut inspector = Inspector::new("costs · provider-reported spend", Selection::Browse);
     let mut rows = Vec::new();

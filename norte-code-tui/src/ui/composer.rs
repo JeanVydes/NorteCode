@@ -82,6 +82,9 @@ impl History {
 pub(crate) struct Composer {
     input: Input,
     history: History,
+    /// Hidden outside the chat tab; keeps its focus slot to stay consistent.
+    #[serde(skip)]
+    visible: bool,
 }
 
 /// The input chrome, rebuilt from the theme in use.
@@ -117,7 +120,13 @@ impl Composer {
                 .with_placeholder("Ask NORTE to do anything...")
                 .with_style(input_style(theme)),
             history: History::default(),
+            visible: true,
         }
+    }
+
+    /// Show the composer only on the chat tab.
+    pub(crate) fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
     }
 
     /// The current text, trimmed for dispatch.
@@ -196,10 +205,6 @@ impl Composer {
             _ => false,
         }
     }
-    /// Disable or enable editing; used when a page other than Chat is active.
-    pub(crate) fn set_disabled(&mut self, disabled: bool) {
-        self.input.state.disabled = disabled;
-    }
 }
 
 impl View for Composer {
@@ -235,10 +240,19 @@ impl View for Composer {
         theme: &Theme,
     ) {
         self.input.style = input_style(theme);
-        self.input.render(area, buf, cx, theme);
+        if self.visible {
+            self.input.render(area, buf, cx, theme);
+        } else {
+            // Keep the focus counter in step with the tree's count_focusable.
+            let _ = cx.is_focused();
+        }
     }
 
     fn handle_event(&mut self, event: &InputEvent, cx: &mut Context) -> Outcome {
+        if !self.visible {
+            let _ = cx.is_focused();
+            return Outcome::Ignored;
+        }
         if let InputEvent::Key(key) = event
             && self.handle_history_key(key)
         {
