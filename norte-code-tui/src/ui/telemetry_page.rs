@@ -35,6 +35,10 @@ pub(crate) struct TelemetryPage {
     report: Option<norte_code_wire::TelemetryReport>,
     /// All records, newest first.
     pub(crate) records: Vec<norte_code_wire::TelemetryRecord>,
+    /// Rollup computed once per report, not on every frame.
+    usage: std::collections::BTreeMap<String, crate::session_stats::SessionUsage>,
+    /// The selected session's records, rebuilt only when the session changes.
+    selected_records: Vec<norte_code_wire::TelemetryRecord>,
     /// Distinct session ids, newest activity first.
     sessions: Vec<String>,
     /// Session summaries from the host, for the shared detail panel.
@@ -60,6 +64,8 @@ impl TelemetryPage {
             interval: ChartInterval::Hour,
             report: None,
             records: Vec::new(),
+            usage: std::collections::BTreeMap::new(),
+            selected_records: Vec::new(),
             sessions: Vec::new(),
             session_data: Vec::new(),
             selected_session: 0,
@@ -121,8 +127,10 @@ impl TelemetryPage {
         sessions.sort();
         sessions.dedup();
         self.sessions = sessions;
+        self.usage = crate::session_stats::by_session(&self.records);
         self.selected_session = 0;
         self.detail_is_request = false;
+        self.rebuild_selected();
         self.rebuild_charts();
         self.rebuild_session_pager();
         self.rebuild_request_table();
@@ -182,14 +190,14 @@ impl TelemetryPage {
         self.sessions.get(index).map(String::as_str)
     }
 
-    fn session_records(&self) -> Vec<&norte_code_wire::TelemetryRecord> {
-        let Some(id) = self.selected_id() else {
-            return Vec::new();
-        };
-        self.records
+    fn rebuild_selected(&mut self) {
+        let id = self.selected_id().map(str::to_owned);
+        self.selected_records = self
+            .records
             .iter()
-            .filter(|record| record.session == id)
-            .collect()
+            .filter(|record| Some(record.session.as_str()) == id.as_deref())
+            .cloned()
+            .collect();
     }
 
     fn rebuild_session_pager(&mut self) {
@@ -207,14 +215,7 @@ impl TelemetryPage {
     }
 
     fn rebuild_request_table(&mut self) {
-        let id = self.selected_id().map(str::to_owned);
-        let total = self
-            .records
-            .iter()
-            .filter(|record| Some(record.session.as_str()) == id.as_deref())
-            .count()
-            .div_ceil(REQUEST_PAGE)
-            .max(1);
+        let total = self.selected_records.len().div_ceil(REQUEST_PAGE).max(1);
         if let Some(pager) = self
             .children
             .get_mut(5)
@@ -225,9 +226,9 @@ impl TelemetryPage {
             }
             pager.go_to(pager.page().min(total - 1));
         }
-        let records = self.session_records();
         let start = self.request_page() * REQUEST_PAGE;
-        let rows: Vec<Node> = records
+        let rows: Vec<Node> = self
+            .selected_records
             .iter()
             .skip(start)
             .take(REQUEST_PAGE)
@@ -271,7 +272,7 @@ impl TelemetryPage {
                 .and_then(|node| node.view.as_any_ref().downcast_ref::<Table>())
                 .map_or(0, Table::selected);
             let index = self.request_page() * REQUEST_PAGE + selected;
-            self.session_records().get(index).map_or_else(
+            self.selected_records.get(index).map_or_else(
                 || vec![Field::new("no request", "select a row")],
                 |record| {
                     vec![
@@ -306,15 +307,14 @@ impl TelemetryPage {
             )
         } else {
             let id = self.selected_id().unwrap_or("");
-            let usage = crate::session_stats::by_session(&self.records);
+            let empty = crate::session_stats::SessionUsage::default();
             self.session_data
                 .iter()
                 .find(|session| session.session_id == id)
                 .map_or_else(
                     || vec![Field::new("no session", "no summary")],
                     |session| {
-                        let empty = crate::session_stats::SessionUsage::default();
-                        super::session_detail::fields(session, usage.get(id).unwrap_or(&empty))
+                        super::session_detail::fields(session, self.usage.get(id).unwrap_or(&empty))
                     },
                 )
         };
@@ -355,18 +355,14 @@ impl TelemetryPage {
             pager.go_to(0);
         }
         self.last_request_page = 0;
+        self.rebuild_selected();
         self.rebuild_request_table();
         self.sync_detail();
     }
 
     /// Move the highlighted request row within the selected session.
     fn move_request(&mut self, delta: isize) {
-        let id = self.selected_id().map(str::to_owned);
-        let total = self
-            .records
-            .iter()
-            .filter(|record| Some(record.session.as_str()) == id.as_deref())
-            .count();
+        let total = self.selected_records.len();
         let max = total
             .saturating_sub(self.request_page() * REQUEST_PAGE)
             .min(REQUEST_PAGE);
@@ -550,6 +546,7 @@ impl TelemetryPage {
             self.last_session_page = sess_page;
             self.selected_session = 0;
             self.detail_is_request = false;
+            self.rebuild_selected();
             self.rebuild_request_table();
         }
 

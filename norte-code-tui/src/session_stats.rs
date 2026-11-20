@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use norte_code_wire::{RequestStatus, TelemetryRecord};
 
 /// What one session spent across its reported requests.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub(crate) struct SessionUsage {
     /// Requests reported for the session.
     pub(crate) requests: u64,
