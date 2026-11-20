@@ -215,7 +215,14 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
 fn update_sessions(tree: &mut Tree, model: &UiModel) {
     let active = model.active.as_ref().map(|key| key.as_str().to_string());
     if let Some(page) = tree.find_mut::<sessions_page::SessionsPage>("sessions") {
-        page.set_data(model.sessions.clone(), active);
+        page.set_data(
+            model.sessions.clone(),
+            active,
+            model
+                .telemetry
+                .as_ref()
+                .map_or(&[][..], |report| report.records.as_slice()),
+        );
     }
 }
 
