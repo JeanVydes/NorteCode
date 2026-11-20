@@ -166,9 +166,20 @@ async fn build_services(
             agent.default_provider.as_deref(),
             agent.default_model.as_deref(),
         ) {
-            (Some(provider), Some(model)) => Some(ModelSpec::from_catalog(
-                &agent, &catalog, provider, model, None,
-            )?),
+            (Some(provider), Some(model)) => {
+                match ModelSpec::from_catalog(&agent, &catalog, provider, model, None) {
+                    Ok(spec) => Some(spec),
+                    // A configured default that the catalogue no longer carries must
+                    // not abort startup; config reload already treats it as a warning.
+                    Err(error) => {
+                        eprintln!(
+                            "norte-code: default provider/model not in catalogue for agent `{}`: {error}",
+                            agent.name
+                        );
+                        None
+                    }
+                }
+            }
             (None, None) => None,
             _ => {
                 return Err(format!(
