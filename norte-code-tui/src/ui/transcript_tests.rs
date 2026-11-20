@@ -1,6 +1,82 @@
 //! Retry notices: a failure streak renders as a single updating line.
 
-use super::{Item, Tone, Transcript};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
+use terminalui::Outcome;
+
+use super::{Item, ScrollbarGeometry, Tone, Transcript};
+
+fn scrollable_transcript() -> Transcript {
+    let mut transcript = Transcript::new();
+    for index in 0..50 {
+        transcript.push(Item::Notice {
+            text: format!("line {index}"),
+            tone: Tone::Neutral,
+        });
+    }
+    transcript.area = Rect::new(0, 0, 40, 10);
+    transcript.view_height = 10;
+    transcript.content_height = 100;
+    transcript.first_visible = 0;
+    transcript.scrollbar = Some(ScrollbarGeometry {
+        x: 39,
+        top: 0,
+        size: 1,
+    });
+    transcript
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn clicking_the_scrollbar_track_pages_the_stream() {
+    let mut transcript = scrollable_transcript();
+    let outcome = transcript.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 39, 8));
+    assert_eq!(outcome, Outcome::Consumed);
+    assert_eq!(transcript.first_visible, 10);
+    assert!(!transcript.dragging_thumb);
+}
+
+#[test]
+fn dragging_the_scrollbar_thumb_moves_the_offset() {
+    let mut transcript = scrollable_transcript();
+    transcript.scrollbar = Some(ScrollbarGeometry {
+        x: 39,
+        top: 0,
+        size: 2,
+    });
+    let _ = transcript.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 39, 0));
+    assert!(transcript.dragging_thumb);
+    let _ = transcript.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 39, 6));
+    let _ = transcript.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 39, 6));
+    assert!(!transcript.dragging_thumb);
+    assert!(transcript.first_visible > 0);
+}
+
+#[test]
+fn a_selection_never_includes_the_scrollbar_column() {
+    let mut transcript = scrollable_transcript();
+    let mut line = String::from("hello");
+    line.push_str(&" ".repeat(34));
+    line.push('░');
+    transcript.painted = vec![line; 10];
+    transcript.painted_copyable = vec![true; 10];
+    transcript.painted_user = vec![false; 10];
+    let text = transcript
+        .selection_text(super::Selection {
+            anchor: super::Pos { row: 0, col: 0 },
+            cur: super::Pos { row: 0, col: 39 },
+        })
+        .expect("text");
+    assert_eq!(text, "hello");
+}
 
 #[test]
 fn consecutive_retry_lines_update_the_same_item() {
