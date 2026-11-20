@@ -24,6 +24,9 @@ mod rail_tests;
 mod selector;
 mod sessions_page;
 mod telemetry_page;
+#[cfg(test)]
+#[path = "telemetry_page_tests.rs"]
+mod telemetry_page_tests;
 mod transcript;
 
 use ratatui::layout::Constraint;
