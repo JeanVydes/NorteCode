@@ -669,6 +669,7 @@ pub(crate) fn installed_entries() -> Vec<PathBuf> {
 /// plugin look broken.
 #[must_use]
 pub fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
+    let sources = recorded_sources();
     installed_entries()
         .into_iter()
         .filter_map(|path| {
@@ -694,11 +695,14 @@ pub fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
             } else {
                 None
             };
+            let recorded = sources.get(&name);
             Some(norte_code_wire::PluginInfo {
                 name,
                 enabled: !disabled,
                 loaded,
                 load_error,
+                source: recorded.map(|source| source.0.clone()),
+                package: recorded.and_then(|source| source.1.clone()),
             })
         })
         .collect()

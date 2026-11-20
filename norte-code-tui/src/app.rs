@@ -50,6 +50,7 @@ pub(super) fn run() -> io::Result<()> {
             };
             model.preferences.theme = model.preferences.catalog.choose(loaded.ui.theme.as_deref());
             model.preferences.rail_position = loaded.ui.rail_position.unwrap_or_default();
+            model.service_url.clone_from(&loaded.service.url);
             let (commands_us, events_rx) = start(loaded.clone());
             config = Some(loaded);
             commands = Some(commands_us);
@@ -158,11 +159,21 @@ fn ctrl_c(
     true
 }
 
-fn toggle_telemetry_focus(tree: &mut terminalui::Tree) {
+fn toggle_list_focus(tree: &mut terminalui::Tree, tab: Tab) {
     // The tree would spend Tab moving focus between the charts and pagers;
-    // here it switches the telemetry page between its two lists.
-    if let Some(page) = tree.find_mut::<ui::TelemetryPage>("telemetry") {
-        page.toggle_focus();
+    // here it switches the page between its two lists.
+    match tab {
+        Tab::Telemetry => {
+            if let Some(page) = tree.find_mut::<ui::TelemetryPage>("telemetry") {
+                page.toggle_focus();
+            }
+        }
+        Tab::Settings => {
+            if let Some(page) = tree.find_mut::<ui::SettingsPage>("settings") {
+                page.toggle_focus();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -180,8 +191,10 @@ fn handle_key(
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             return ctrl_c(tree, commands, model);
         }
-        (KeyModifiers::NONE, KeyCode::Tab) if model.tab == Tab::Telemetry => {
-            toggle_telemetry_focus(tree);
+        (KeyModifiers::NONE, KeyCode::Tab)
+            if matches!(model.tab, Tab::Telemetry | Tab::Settings) =>
+        {
+            toggle_list_focus(tree, model.tab);
             pass_to_tree = false;
         }
         (KeyModifiers::CONTROL, KeyCode::Tab) => {
@@ -569,15 +582,15 @@ fn send_plugin_op(
     }
 }
 
-/// Drain the plugins page's pending actions into the client.
+/// Drain the settings page's pending plugin actions into the client.
 fn drain_plugins_actions(
     tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
 ) {
-    let Some(page) = tree.find_mut::<ui::PluginsPage>("plugins") else {
-        return;
-    };
-    for action in page.take_pending() {
+    let actions = tree
+        .find_mut::<ui::SettingsPage>("settings")
+        .map_or_else(Vec::new, ui::SettingsPage::take_plugin_actions);
+    for action in actions {
         match action {
             ui::PluginsAction::Install { url, package } => {
                 send_plugin_op(
@@ -622,11 +635,6 @@ fn drain_plugins_actions(
                     format!("{verb} plugin · {name}"),
                 );
             }
-            ui::PluginsAction::Refresh => {
-                if let Some(commands) = commands.as_ref() {
-                    let _ = commands.try_send(UiCommand::RefreshViews);
-                }
-            }
         }
     }
 }
@@ -635,11 +643,11 @@ fn drain_plugins_actions(
 fn drain_config_actions(tree: &mut terminalui::Tree, model: &mut UiModel) -> bool {
     use crate::ui::{ConfigAction, Setting};
 
-    let Some(page) = tree.find_mut::<ui::ConfigPage>("config") else {
-        return false;
-    };
+    let actions = tree
+        .find_mut::<ui::SettingsPage>("settings")
+        .map_or_else(Vec::new, ui::SettingsPage::take_config_actions);
     let mut changed = false;
-    for action in page.take_pending() {
+    for action in actions {
         changed = true;
         let ConfigAction::Cycle(setting) = action;
         match setting {
@@ -766,6 +774,34 @@ fn apply_detached(tree: &mut terminalui::Tree, model: &mut UiModel, reason: Stri
     true
 }
 
+fn fold_catalog_event(event: &ClientEvent, model: &mut UiModel) -> bool {
+    match event {
+        ClientEvent::Models(models) => model.models.clone_from(models),
+        ClientEvent::Plans(plans) => model.plans.clone_from(plans),
+        ClientEvent::Jobs(jobs) => model.jobs.clone_from(jobs),
+        ClientEvent::Telemetry(report) => model.telemetry = Some(report.clone()),
+        ClientEvent::TelemetrySession(report) => model.telemetry_session = Some(report.clone()),
+        ClientEvent::CostSession(cost) | ClientEvent::CostGlobal(cost) => {
+            model.cost = Some(cost.clone());
+        }
+        ClientEvent::Plugins(plugins) => model.plugins.clone_from(plugins),
+        ClientEvent::Catalog(catalog) => model.catalog = Some(catalog.clone()),
+        ClientEvent::Agents(agents) => model.agents.clone_from(agents),
+        _ => return false,
+    }
+    true
+}
+
+fn fold_host_event(event: &ClientEvent, model: &mut UiModel) {
+    match event {
+        ClientEvent::ServerInfo(info) => model.server_info = Some(info.clone()),
+        ClientEvent::Liveness(live) => model.liveness = Some(live.clone()),
+        ClientEvent::Readiness(ready) => model.readiness = Some(ready.clone()),
+        ClientEvent::Quota(quota) => model.quota = Some(quota.clone()),
+        _ => {}
+    }
+}
+
 fn drain_server_events(
     events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
     tree: &mut terminalui::Tree,
@@ -776,7 +812,8 @@ fn drain_server_events(
     };
     let mut changed = false;
     loop {
-        match receiver.try_recv() {
+        let next_event = receiver.try_recv();
+        match next_event {
             Ok(ClientEvent::Attached { session }) => {
                 changed = apply_attached(tree, model, &session) || changed;
             }
@@ -788,46 +825,27 @@ fn drain_server_events(
                 model.sessions = sessions;
                 changed = true;
             }
-            Ok(ClientEvent::Models(models)) => {
-                model.models = models;
-                changed = true;
+            Ok(
+                event @ (ClientEvent::Models(_)
+                | ClientEvent::Plans(_)
+                | ClientEvent::Jobs(_)
+                | ClientEvent::Telemetry(_)
+                | ClientEvent::TelemetrySession(_)
+                | ClientEvent::CostSession(_)
+                | ClientEvent::CostGlobal(_)
+                | ClientEvent::Plugins(_)
+                | ClientEvent::Catalog(_)
+                | ClientEvent::Agents(_)),
+            ) => {
+                changed = fold_catalog_event(&event, model) || changed;
             }
-            Ok(ClientEvent::Plans(plans)) => {
-                model.plans = plans;
-                changed = true;
-            }
-            Ok(ClientEvent::Jobs(jobs)) => {
-                model.jobs = jobs;
-                changed = true;
-            }
-            Ok(ClientEvent::Telemetry(report)) => {
-                model.telemetry = Some(report);
-                changed = true;
-            }
-            Ok(ClientEvent::TelemetrySession(report)) => {
-                model.telemetry_session = Some(report);
-                changed = true;
-            }
-            Ok(ClientEvent::CostSession(cost)) => {
-                model.cost = Some(cost);
-                changed = true;
-            }
-            Ok(ClientEvent::CostGlobal(cost)) => {
-                // Aggregate: the fleet cost is the sum of session reports when available;
-                // for now keep the global total under the session field so the page shows it.
-                model.cost = Some(cost);
-                changed = true;
-            }
-            Ok(ClientEvent::Plugins(plugins)) => {
-                model.plugins = plugins;
-                changed = true;
-            }
-            Ok(ClientEvent::Catalog(catalog)) => {
-                model.catalog = Some(catalog);
-                changed = true;
-            }
-            Ok(ClientEvent::Agents(agents)) => {
-                model.agents = agents;
+            Ok(
+                event @ (ClientEvent::ServerInfo(_)
+                | ClientEvent::Liveness(_)
+                | ClientEvent::Readiness(_)
+                | ClientEvent::Quota(_)),
+            ) => {
+                fold_host_event(&event, model);
                 changed = true;
             }
             Ok(ClientEvent::SendFailed { reason }) => {

@@ -12,17 +12,15 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 use crate::ui_model::{Tab, TurnState};
 
 /// Every tab, in display order. Rendered in the strip.
-const TABS: [Tab; 10] = [
+const TABS: [Tab; 8] = [
     Tab::Chat,
     Tab::Sessions,
     Tab::Models,
     Tab::Plans,
     Tab::Jobs,
     Tab::Telemetry,
-    Tab::Host,
-    Tab::Plugins,
+    Tab::Settings,
     Tab::Costs,
-    Tab::Config,
 ];
 
 /// One-row header rendered above everything.
@@ -118,11 +116,7 @@ impl View for Header {
             .sum();
         let short = x + full_width > status_x;
         for (index, tab) in TABS.iter().enumerate() {
-            let digit = if *tab == Tab::Config {
-                "0".to_string()
-            } else {
-                (index + 1).to_string()
-            };
+            let digit = (index + 1).to_string();
             let active = *tab == self.tab;
             let label = if short {
                 tab.short_label()

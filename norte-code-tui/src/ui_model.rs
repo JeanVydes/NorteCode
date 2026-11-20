@@ -179,6 +179,16 @@ pub(crate) struct UiModel {
     pub(crate) catalog: Option<norte_code_client::CatalogDetail>,
     /// The agents the server reported.
     pub(crate) agents: Vec<norte_code_wire::AgentSummary>,
+    /// What the server says about itself.
+    pub(crate) server_info: Option<norte_code_client::ServerInfo>,
+    /// The liveness probe answer.
+    pub(crate) liveness: Option<norte_code_client::Liveness>,
+    /// The readiness probe answer.
+    pub(crate) readiness: Option<norte_code_client::Readiness>,
+    /// The tenant's quota report.
+    pub(crate) quota: Option<norte_code_wire::QuotaReport>,
+    /// The configured service URL, shown as the host address.
+    pub(crate) service_url: String,
     /// The telemetry for the attached session.
     pub(crate) telemetry_session: Option<norte_code_wire::TelemetryReport>,
     /// How full the session's context window is.
@@ -222,14 +232,10 @@ pub(crate) enum Tab {
     Jobs,
     /// The telemetry page.
     Telemetry,
-    /// The host overview.
-    Host,
-    /// The plugins page.
-    Plugins,
+    /// The settings page: host, agents, plugins and preferences.
+    Settings,
     /// The costs page.
     Costs,
-    /// The preferences page.
-    Config,
 }
 
 impl Tab {
@@ -242,11 +248,9 @@ impl Tab {
             Self::Models => Self::Plans,
             Self::Plans => Self::Jobs,
             Self::Jobs => Self::Telemetry,
-            Self::Telemetry => Self::Host,
-            Self::Host => Self::Plugins,
-            Self::Plugins => Self::Costs,
-            Self::Costs => Self::Config,
-            Self::Config => Self::Chat,
+            Self::Telemetry => Self::Settings,
+            Self::Settings => Self::Costs,
+            Self::Costs => Self::Chat,
         }
     }
 
@@ -254,16 +258,14 @@ impl Tab {
     #[must_use]
     pub(crate) const fn previous(self) -> Self {
         match self {
-            Self::Chat => Self::Config,
-            Self::Config => Self::Costs,
+            Self::Chat => Self::Costs,
             Self::Sessions => Self::Chat,
             Self::Models => Self::Sessions,
             Self::Plans => Self::Models,
             Self::Jobs => Self::Plans,
             Self::Telemetry => Self::Jobs,
-            Self::Host => Self::Telemetry,
-            Self::Plugins => Self::Host,
-            Self::Costs => Self::Plugins,
+            Self::Settings => Self::Telemetry,
+            Self::Costs => Self::Settings,
         }
     }
 
@@ -276,10 +278,8 @@ impl Tab {
             Self::Plans => "Plans",
             Self::Jobs => "Jobs",
             Self::Telemetry => "Telemetry",
-            Self::Host => "Host",
-            Self::Plugins => "Plugins",
+            Self::Settings => "Settings",
             Self::Costs => "Costs",
-            Self::Config => "Config",
         }
     }
 
@@ -292,10 +292,8 @@ impl Tab {
             Self::Plans => "Plans",
             Self::Jobs => "Jobs",
             Self::Telemetry => "Tele",
-            Self::Host => "Host",
-            Self::Plugins => "Plug",
+            Self::Settings => "Config",
             Self::Costs => "Cost",
-            Self::Config => "Cfg",
         }
     }
 
@@ -308,10 +306,8 @@ impl Tab {
             '4' => Some(Self::Plans),
             '5' => Some(Self::Jobs),
             '6' => Some(Self::Telemetry),
-            '7' => Some(Self::Host),
-            '8' => Some(Self::Plugins),
-            '9' => Some(Self::Costs),
-            '0' => Some(Self::Config),
+            '7' => Some(Self::Settings),
+            '8' => Some(Self::Costs),
             _ => None,
         }
     }
@@ -380,6 +376,11 @@ impl UiModel {
             plugins: Vec::new(),
             catalog: None,
             agents: Vec::new(),
+            server_info: None,
+            liveness: None,
+            readiness: None,
+            quota: None,
+            service_url: String::new(),
             telemetry_session: None,
             context: ContextUsage::default(),
             cost: None,

@@ -55,6 +55,14 @@ pub(crate) enum ClientEvent {
     Catalog(norte_code_client::CatalogDetail),
     /// The server-reported agents.
     Agents(Vec<norte_code_wire::AgentSummary>),
+    /// What the server says about itself.
+    ServerInfo(norte_code_client::ServerInfo),
+    /// The liveness probe answer.
+    Liveness(norte_code_client::Liveness),
+    /// The readiness probe answer.
+    Readiness(norte_code_client::Readiness),
+    /// The tenant's quota report.
+    Quota(norte_code_wire::QuotaReport),
     /// A command failed; carry the reason for the transcript.
     SendFailed {
         /// What went wrong, in words a person can act on.
@@ -331,6 +339,10 @@ async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<Clien
         agents,
         cost_session,
         cost_global,
+        server_info,
+        liveness,
+        readiness,
+        quota,
     ) = tokio::join!(
         api.models(),
         api.plans(session),
@@ -342,6 +354,10 @@ async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<Clien
         api.agents(),
         api.cost_report(Some(session)),
         api.cost_report(None),
+        api.info(),
+        api.health_live(),
+        api.health_ready(),
+        api.quota(),
     );
     if let Ok(models) = models {
         let _ = events.send(ClientEvent::Models(models)).await;
@@ -372,6 +388,18 @@ async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<Clien
     }
     if let Ok(cost) = cost_global {
         let _ = events.send(ClientEvent::CostGlobal(cost)).await;
+    }
+    if let Ok(info) = server_info {
+        let _ = events.send(ClientEvent::ServerInfo(info)).await;
+    }
+    if let Ok(live) = liveness {
+        let _ = events.send(ClientEvent::Liveness(live)).await;
+    }
+    if let Ok(ready) = readiness {
+        let _ = events.send(ClientEvent::Readiness(ready)).await;
+    }
+    if let Ok(quota) = quota {
+        let _ = events.send(ClientEvent::Quota(quota)).await;
     }
 }
 
