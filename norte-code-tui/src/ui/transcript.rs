@@ -24,6 +24,17 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BLOCK_GAP: u16 = 1;
 
+/// Where the scrollbar sits in the last rendered frame.
+#[derive(Clone, Copy, Debug)]
+struct ScrollbarGeometry {
+    /// Absolute column of the one-cell rail.
+    x: u16,
+    /// Thumb top, relative to the transcript's first row.
+    top: u16,
+    /// Thumb height in cells.
+    size: u16,
+}
+
 /// Execution state of a tool block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -207,6 +218,12 @@ pub(crate) struct Transcript {
     /// Whether a row carries the user message's leading bar.
     #[serde(skip)]
     painted_user: Vec<bool>,
+    /// The scrollbar drawn in the last frame, when the content overflows.
+    #[serde(skip)]
+    scrollbar: Option<ScrollbarGeometry>,
+    /// Whether the user is dragging the scrollbar thumb.
+    #[serde(skip)]
+    dragging_thumb: bool,
     /// How edit diffs are drawn.
     #[serde(skip)]
     diff_mode: crate::diff::DiffMode,
@@ -254,6 +271,8 @@ impl Transcript {
             painted: Vec::new(),
             painted_copyable: Vec::new(),
             painted_user: Vec::new(),
+            scrollbar: None,
+            dragging_thumb: false,
             diff_mode: crate::diff::DiffMode::Unified,
             follow_tail: true,
         }
@@ -672,11 +691,15 @@ impl Transcript {
             } else {
                 from
             };
-            let to = if row == end.row {
+            let mut to = if row == end.row {
                 usize::from(end.col).saturating_add(1).min(text_end)
             } else {
                 text_end
             };
+            if let Some(bar) = self.scrollbar {
+                let rail = usize::from(bar.x.saturating_sub(area.x));
+                to = to.min(rail);
+            }
             if from >= to {
                 continue;
             }
@@ -789,11 +812,14 @@ impl Transcript {
             } else {
                 from
             };
-            let to = if row == end.row {
+            let mut to = if row == end.row {
                 usize::from(end.col).saturating_add(1).min(chars.len())
             } else {
                 chars.len()
             };
+            if let Some(bar) = self.scrollbar {
+                to = to.min(usize::from(bar.x.saturating_sub(self.area.x)));
+            }
             if from < to {
                 let slice: String = chars[from..to].iter().collect();
                 out.push_str(slice.trim_end());
@@ -816,10 +842,17 @@ impl Transcript {
             && mouse.row < self.area.y + self.area.height
             && mouse.column >= self.area.x
             && mouse.column < self.area.x + self.area.width;
-        let pos = Pos {
+        let mut pos = Pos {
             row: mouse.row.saturating_sub(self.area.y),
             col: mouse.column.saturating_sub(self.area.x),
         };
+        let bar = self.scrollbar.filter(|_| inside);
+        if let Some(bar) = bar {
+            // The rail is one cell wide; never let text selection cover it.
+            pos.col = pos
+                .col
+                .min(bar.x.saturating_sub(self.area.x).saturating_sub(1));
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.scroll(-3);
@@ -827,6 +860,19 @@ impl Transcript {
             }
             MouseEventKind::ScrollDown => {
                 self.scroll(3);
+                Outcome::Consumed
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if bar.is_some_and(|bar| mouse.column == bar.x) =>
+            {
+                let bar = bar.expect("bar");
+                let local = mouse.row.saturating_sub(self.area.y);
+                if (bar.top..bar.top.saturating_add(bar.size)).contains(&local) {
+                    self.dragging_thumb = true;
+                } else {
+                    let page = isize::try_from(self.view_height.max(1)).unwrap_or(isize::MAX);
+                    self.scroll(if local < bar.top { -page } else { page });
+                }
                 Outcome::Consumed
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -844,11 +890,21 @@ impl Transcript {
                 });
                 Outcome::Consumed
             }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging_thumb => {
+                if let Some(bar) = bar {
+                    self.drag_thumb(bar, mouse.row.saturating_sub(self.area.y));
+                }
+                Outcome::Consumed
+            }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let Some(selection) = &mut self.selection else {
                     return Outcome::Ignored;
                 };
                 selection.cur = pos;
+                Outcome::Consumed
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.dragging_thumb => {
+                self.dragging_thumb = false;
                 Outcome::Consumed
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -876,6 +932,19 @@ impl Transcript {
             }
             _ => Outcome::Ignored,
         }
+    }
+
+    fn drag_thumb(&mut self, bar: ScrollbarGeometry, local: u16) {
+        let track = self.area.height.saturating_sub(bar.size);
+        let top = local.saturating_sub(bar.size / 2).min(track);
+        let max = u32::from(self.max_offset());
+        let offset = if track == 0 {
+            0
+        } else {
+            u16::try_from(u32::from(top) * max / u32::from(track)).unwrap_or(u16::MAX)
+        };
+        self.first_visible = offset.min(self.max_offset());
+        self.follow_tail = self.first_visible >= self.max_offset();
     }
 
     /// Scroll the stream by `delta` rows; negative scrolls toward the top.
@@ -982,7 +1051,16 @@ impl View for Transcript {
                 viewport: usize::from(area.height),
                 total: usize::from(self.content_height),
             };
+            let (top, size) = scroll.thumb();
+            self.scrollbar = Some(ScrollbarGeometry {
+                x: area.x + area.width.saturating_sub(1),
+                top,
+                size,
+            });
             render_scrollbar(buf, area, &scroll_style, theme, &scroll);
+        } else {
+            self.scrollbar = None;
+            self.dragging_thumb = false;
         }
 
         self.capture_painted(area, buf);
