@@ -13,6 +13,7 @@ mod context;
 mod diff;
 mod job_notice;
 mod palette;
+mod session_stats;
 mod shell;
 mod telemetry;
 mod telemetry_series;

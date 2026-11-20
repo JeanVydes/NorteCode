@@ -1,4 +1,4 @@
-//! The telemetry tab: time charts above, a paged request table and its detail.
+//! The telemetry tab: charts, a session pager, and that session's requests.
 
 use std::any::Any;
 use std::fmt::Write;
@@ -17,18 +17,28 @@ use super::detail_panel::{DetailPanel, Field};
 use crate::telemetry::{ChartInterval, short_label};
 use crate::telemetry_series::series;
 
-/// Requests shown per page in the lower table.
-const PAGE_SIZE: usize = 6;
+/// Sessions and requests shown per page.
+const SESSION_PAGE: usize = 4;
+const REQUEST_PAGE: usize = 6;
 
 /// The charts share one interval so their x axes line up.
 #[derive(Serialize)]
 pub(crate) struct TelemetryPage {
     interval: ChartInterval,
     report: Option<norte_code_wire::TelemetryReport>,
-    /// Newest first.
+    /// All records, newest first.
     pub(crate) records: Vec<norte_code_wire::TelemetryRecord>,
-    /// The page the table was last rebuilt for.
-    last_page: usize,
+    /// Distinct session ids, newest activity first.
+    sessions: Vec<String>,
+    /// The session whose requests are shown.
+    selected_session: usize,
+    /// Which panel the detail shows.
+    pub(crate) detail_is_request: bool,
+    /// Pages the request table was last rebuilt for.
+    last_session_page: usize,
+    last_request_page: usize,
+    /// Last highlighted request row, to switch the panel on selection.
+    last_request_row: usize,
     pub(crate) children: Vec<Node>,
 }
 
@@ -39,11 +49,17 @@ impl TelemetryPage {
             interval: ChartInterval::Hour,
             report: None,
             records: Vec::new(),
-            last_page: 0,
+            sessions: Vec::new(),
+            selected_session: 0,
+            detail_is_request: false,
+            last_session_page: 0,
+            last_request_page: 0,
+            last_request_row: 0,
             children: vec![
                 node("cost_chart", CandleChart::new()),
                 node("token_chart", LineChart::new()),
                 node("cache_chart", LineChart::new().with_domain(0.0, 100.0)),
+                node("session_pager", Pagination::new(1)),
                 node(
                     "request_table",
                     Table::new().with_header(node(
@@ -62,7 +78,7 @@ impl TelemetryPage {
         }
     }
 
-    /// Replace the report the charts and table are built from.
+    /// Replace the report the charts, session list and request table use.
     pub(crate) fn set_report(&mut self, report: Option<norte_code_wire::TelemetryReport>) {
         self.report = report;
         self.records = self
@@ -70,8 +86,19 @@ impl TelemetryPage {
             .as_ref()
             .map(|report| report.records.iter().rev().cloned().collect())
             .unwrap_or_default();
+        let mut sessions: Vec<String> = self
+            .records
+            .iter()
+            .map(|record| record.session.clone())
+            .collect();
+        sessions.sort();
+        sessions.dedup();
+        self.sessions = sessions;
+        self.selected_session = 0;
+        self.detail_is_request = false;
         self.rebuild_charts();
-        self.rebuild_table();
+        self.rebuild_session_pager();
+        self.rebuild_request_table();
         self.sync_detail();
     }
 
@@ -107,23 +134,42 @@ impl TelemetryPage {
         }
     }
 
-    fn page(&self) -> usize {
+    fn pager_page(&self, index: usize) -> usize {
         self.children
-            .get(4)
+            .get(index)
             .and_then(|node| node.view.as_any_ref().downcast_ref::<Pagination>())
             .map_or(0, Pagination::page)
     }
 
-    fn page_records(&self) -> &[norte_code_wire::TelemetryRecord] {
-        let start = self.page() * PAGE_SIZE;
-        self.records.get(start..).unwrap_or_default()
+    fn session_page(&self) -> usize {
+        self.pager_page(3)
     }
 
-    fn rebuild_table(&mut self) {
-        let total = self.records.len().div_ceil(PAGE_SIZE).max(1);
+    fn request_page(&self) -> usize {
+        self.pager_page(5)
+    }
+
+    /// The session the request table is filtered to.
+    fn selected_id(&self) -> Option<&str> {
+        let index = self.session_page() * SESSION_PAGE + self.selected_session;
+        self.sessions.get(index).map(String::as_str)
+    }
+
+    fn session_records(&self) -> Vec<&norte_code_wire::TelemetryRecord> {
+        let Some(id) = self.selected_id() else {
+            return Vec::new();
+        };
+        self.records
+            .iter()
+            .filter(|record| record.session == id)
+            .collect()
+    }
+
+    fn rebuild_session_pager(&mut self) {
+        let total = self.sessions.len().div_ceil(SESSION_PAGE).max(1);
         if let Some(pager) = self
             .children
-            .get_mut(4)
+            .get_mut(3)
             .and_then(|node| node.view.as_any().downcast_mut::<Pagination>())
         {
             if pager.total_pages != total {
@@ -131,10 +177,33 @@ impl TelemetryPage {
             }
             pager.go_to(pager.page().min(total - 1));
         }
-        let rows: Vec<Node> = self
-            .page_records()
+    }
+
+    fn rebuild_request_table(&mut self) {
+        let id = self.selected_id().map(str::to_owned);
+        let total = self
+            .records
             .iter()
-            .take(PAGE_SIZE)
+            .filter(|record| Some(record.session.as_str()) == id.as_deref())
+            .count()
+            .div_ceil(REQUEST_PAGE)
+            .max(1);
+        if let Some(pager) = self
+            .children
+            .get_mut(5)
+            .and_then(|node| node.view.as_any().downcast_mut::<Pagination>())
+        {
+            if pager.total_pages != total {
+                pager.set_total_pages(total);
+            }
+            pager.go_to(pager.page().min(total - 1));
+        }
+        let records = self.session_records();
+        let start = self.request_page() * REQUEST_PAGE;
+        let rows: Vec<Node> = records
+            .iter()
+            .skip(start)
+            .take(REQUEST_PAGE)
             .enumerate()
             .map(|(index, record)| {
                 let time = record.started_at.get(11..16).unwrap_or(&record.started_at);
@@ -158,60 +227,115 @@ impl TelemetryPage {
             .collect();
         if let Some(table) = self
             .children
-            .get_mut(3)
+            .get_mut(4)
             .and_then(|node| node.view.as_any().downcast_mut::<Table>())
         {
             table.set_rows(rows);
             table.state.selected = 0;
         }
+        self.last_request_row = 0;
     }
 
-    fn sync_detail(&mut self) {
-        let selected = self
-            .children
-            .get(3)
-            .and_then(|node| node.view.as_any_ref().downcast_ref::<Table>())
-            .map_or(0, Table::selected);
-        let page = self.page() * PAGE_SIZE;
-        let fields = self.records.get(page + selected).map_or_else(
-            || vec![Field::new("no request", "select a row")],
-            |record| {
-                vec![
-                    Field::new("id", clip(&record.id, 34)),
-                    Field::new("model", clip(&record.model, 34)),
-                    Field::new("provider", clip(&record.provider, 34)),
-                    Field::new("status", status_label(record.status)),
-                    Field::new("started", record.started_at.clone()),
-                    Field::new("duration", format!("{} ms", record.duration_ms)),
-                    Field::new(
-                        "tokens",
-                        format!(
-                            "{} in / {} out",
-                            record.input_tokens.unwrap_or(0),
-                            record.output_tokens.unwrap_or(0)
+    pub(crate) fn sync_detail(&mut self) {
+        let fields = if self.detail_is_request {
+            let selected = self
+                .children
+                .get(4)
+                .and_then(|node| node.view.as_any_ref().downcast_ref::<Table>())
+                .map_or(0, Table::selected);
+            let index = self.request_page() * REQUEST_PAGE + selected;
+            self.session_records().get(index).map_or_else(
+                || vec![Field::new("no request", "select a row")],
+                |record| {
+                    vec![
+                        Field::new("id", clip(&record.id, 34)),
+                        Field::new("model", clip(&record.model, 34)),
+                        Field::new("provider", clip(&record.provider, 34)),
+                        Field::new("status", status_label(record.status)),
+                        Field::new("started", record.started_at.clone()),
+                        Field::new("duration", format!("{} ms", record.duration_ms)),
+                        Field::new(
+                            "tokens",
+                            format!(
+                                "{} in / {} out",
+                                record.input_tokens.unwrap_or(0),
+                                record.output_tokens.unwrap_or(0)
+                            ),
                         ),
-                    ),
-                    Field::new(
-                        "cache",
-                        format!("{} read", record.cache_read_tokens.unwrap_or(0)),
-                    ),
-                    Field::new(
-                        "cost",
-                        record.cost_usd.map_or_else(
-                            || "not reported".to_owned(),
-                            |cost| format!("${cost:.4}"),
+                        Field::new(
+                            "cache",
+                            format!("{} read", record.cache_read_tokens.unwrap_or(0)),
                         ),
-                    ),
-                ]
-            },
-        );
+                        Field::new(
+                            "cost",
+                            record.cost_usd.map_or_else(
+                                || "not reported".to_owned(),
+                                |cost| format!("${cost:.4}"),
+                            ),
+                        ),
+                        Field::new("tools", record.tool_calls.len().to_string()),
+                    ]
+                },
+            )
+        } else {
+            let id = self.selected_id().unwrap_or("");
+            let usage = crate::session_stats::by_session(&self.records);
+            usage.get(id).map_or_else(
+                || vec![Field::new("no session", "no telemetry")],
+                |usage| {
+                    vec![
+                        Field::new("session", clip(id, 34)),
+                        Field::new("requests", usage.requests.to_string()),
+                        Field::new("turns", usage.turns.len().to_string()),
+                        Field::new(
+                            "tokens",
+                            format!(
+                                "{}:{}",
+                                crate::context::human_count(usage.input),
+                                crate::context::human_count(usage.output)
+                            ),
+                        ),
+                        Field::new("cache", format!("{:.0}%", usage.cache_rate())),
+                        Field::new("tools", usage.tools.to_string()),
+                        Field::new(
+                            "models",
+                            usage
+                                .top_models(3)
+                                .into_iter()
+                                .map(|(model, count)| format!("{model} ×{count}"))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                    ]
+                },
+            )
+        };
+        let title = if self.detail_is_request {
+            "request"
+        } else {
+            "session"
+        };
         if let Some(panel) = self
             .children
-            .get_mut(5)
+            .get_mut(6)
             .and_then(|node| node.view.as_any().downcast_mut::<DetailPanel>())
         {
-            panel.set("request", fields);
+            panel.set(title, fields);
         }
+    }
+
+    fn select_session(&mut self, index: usize) {
+        self.selected_session = index;
+        self.detail_is_request = false;
+        if let Some(pager) = self
+            .children
+            .get_mut(5)
+            .and_then(|node| node.view.as_any().downcast_mut::<Pagination>())
+        {
+            pager.go_to(0);
+        }
+        self.rebuild_request_table();
+        self.sync_detail();
     }
 
     fn cycle_interval(&mut self, backwards: bool) {
@@ -243,7 +367,7 @@ impl TelemetryPage {
     fn paint_charts(
         &mut self,
         area: Rect,
-        chart_area: u16,
+        height: u16,
         buf: &mut Buffer,
         cx: &mut Context,
         theme: &Theme,
@@ -253,31 +377,181 @@ impl TelemetryPage {
             "tokens · in + out",
             "cache · hit rate %",
         ];
-        let chart_height = chart_area.saturating_sub(4) / 3;
-        let mut y = area.y + 1;
+        let width = area.width / 3;
         for (index, title) in titles.iter().enumerate() {
-            if y >= area.y + area.height {
-                break;
-            }
+            let step = u16::try_from(index).unwrap_or(u16::MAX);
+            let x = area.x.saturating_add(width.saturating_mul(step));
+            let w = if index == 2 {
+                area.width.saturating_sub(width * 2)
+            } else {
+                width
+            };
+            let rect = Rect {
+                x,
+                y: area.y,
+                width: w,
+                height,
+            };
             buf.set_stringn(
-                area.x + 1,
-                y,
+                x,
+                area.y,
                 title,
                 title.len(),
-                Style::default()
-                    .fg(theme.foreground)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.muted),
             );
-            let rect = Rect {
-                x: area.x,
-                y: y + 1,
-                width: area.width,
-                height: chart_height,
+            let plot = Rect {
+                y: area.y + 1,
+                height: height.saturating_sub(1),
+                ..rect
             };
             if let Some(child) = self.children.get_mut(index) {
-                child.view.render(rect, buf, cx, theme);
+                child.view.render(plot, buf, cx, theme);
             }
-            y = y + 1 + chart_height + 1;
+        }
+    }
+
+    fn paint_sessions(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
+        let start = self.session_page() * SESSION_PAGE;
+        for (offset, index) in (start..start + SESSION_PAGE)
+            .take(area.height as usize)
+            .enumerate()
+        {
+            if let Some(id) = self.sessions.get(index) {
+                let y = area
+                    .y
+                    .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
+                let selected = index == self.session_page() * SESSION_PAGE + self.selected_session;
+                if selected {
+                    buf.set_style(
+                        Rect {
+                            x: area.x,
+                            y,
+                            width: area.width,
+                            height: 1,
+                        },
+                        Style::default().bg(theme.secondary),
+                    );
+                }
+                buf.set_stringn(
+                    area.x + 1,
+                    y,
+                    clip(id, usize::from(area.width.saturating_sub(2))),
+                    usize::from(area.width.saturating_sub(2)),
+                    Style::default().fg(theme.foreground),
+                );
+            }
+        }
+        if self.sessions.is_empty() {
+            buf.set_stringn(
+                area.x + 1,
+                area.y,
+                "no sessions in telemetry",
+                24,
+                Style::default().fg(theme.muted),
+            );
+        }
+    }
+
+    fn paint_lower(
+        &mut self,
+        area: Rect,
+        lower_y: u16,
+        buf: &mut Buffer,
+        cx: &mut Context,
+        theme: &Theme,
+    ) {
+        let detail_width = (area.width / 2)
+            .clamp(30, 52)
+            .min(area.width.saturating_sub(32));
+        let left_width = area.width.saturating_sub(detail_width + 1);
+        let lower_h = area.y + area.height - lower_y;
+
+        buf.set_stringn(
+            area.x + 1,
+            lower_y,
+            "sessions",
+            8,
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        );
+        let sessions_rect = Rect {
+            x: area.x,
+            y: lower_y + 1,
+            width: left_width,
+            height: 4,
+        };
+        self.paint_sessions(sessions_rect, buf, theme);
+        let session_pager = Rect {
+            x: area.x,
+            y: lower_y + 5,
+            width: left_width,
+            height: 1,
+        };
+        if let Some(child) = self.children.get_mut(3) {
+            child.view.render(session_pager, buf, cx, theme);
+        }
+
+        let sess_page = self.session_page();
+        if sess_page != self.last_session_page {
+            self.last_session_page = sess_page;
+            self.selected_session = 0;
+            self.detail_is_request = false;
+            self.rebuild_request_table();
+        }
+
+        let req_title_y = lower_y + 6;
+        buf.set_stringn(
+            area.x + 1,
+            req_title_y,
+            "requests · selected session",
+            27,
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        );
+        let table_rect = Rect {
+            x: area.x,
+            y: req_title_y + 1,
+            width: left_width,
+            height: lower_h.saturating_sub(8),
+        };
+        let request_pager = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(1),
+            width: left_width,
+            height: 1,
+        };
+        let detail_rect = Rect {
+            x: area.x + left_width + 1,
+            y: lower_y,
+            width: detail_width,
+            height: lower_h,
+        };
+
+        let req_page = self.request_page();
+        if req_page != self.last_request_page {
+            self.last_request_page = req_page;
+            self.rebuild_request_table();
+        }
+        let request_row = self
+            .children
+            .get(4)
+            .and_then(|node| node.view.as_any_ref().downcast_ref::<Table>())
+            .map_or(0, Table::selected);
+        if request_row != self.last_request_row {
+            self.last_request_row = request_row;
+            self.detail_is_request = true;
+        }
+        self.sync_detail();
+        if let Some(child) = self.children.get_mut(4) {
+            child.view.render(table_rect, buf, cx, theme);
+        }
+        if let Some(child) = self.children.get_mut(5) {
+            child.view.render(request_pager, buf, cx, theme);
+        }
+        if let Some(child) = self.children.get_mut(6) {
+            child.view.render(detail_rect, buf, cx, theme);
         }
     }
 }
@@ -286,23 +560,18 @@ impl View for TelemetryPage {
     fn as_any(&mut self) -> &mut dyn Any {
         self
     }
-
     fn as_any_ref(&self) -> &dyn Any {
         self
     }
-
     fn kind(&self) -> &'static str {
         "telemetry_page"
     }
-
     fn children(&self) -> &[Node] {
         &self.children
     }
-
     fn children_mut(&mut self) -> &mut [Node] {
         &mut self.children
     }
-
     fn focusable(&self) -> bool {
         false
     }
@@ -317,11 +586,11 @@ impl View for TelemetryPage {
             usize::from(area.width.saturating_sub(2)),
             Style::default().fg(theme.muted),
         );
-        let hint = "[ ] interval · arrows scroll cost · wheel zooms";
-        if area.width > 50 {
-            let hint_width = u16::try_from(hint.len()).unwrap_or(u16::MAX);
+        let hint = "[ ] interval · j/k session · arrows select request";
+        if area.width > 52 {
+            let w = u16::try_from(hint.len()).unwrap_or(u16::MAX);
             buf.set_stringn(
-                area.x + area.width.saturating_sub(hint_width.saturating_add(1)),
+                area.x + area.width.saturating_sub(w + 1),
                 area.y,
                 hint,
                 hint.len(),
@@ -329,67 +598,31 @@ impl View for TelemetryPage {
             );
         }
 
-        let chart_area = area.height.saturating_mul(2) / 5;
-        self.paint_charts(area, chart_area, buf, cx, theme);
+        let chart_height = (area.height.saturating_sub(16) / 3).max(6);
+        self.paint_charts(
+            Rect {
+                y: area.y + 1,
+                height: chart_height + 1,
+                ..area
+            },
+            chart_height,
+            buf,
+            cx,
+            theme,
+        );
 
-        let detail_width = (area.width / 2)
-            .clamp(30, 48)
-            .min(area.width.saturating_sub(30));
-        let table_width = area.width.saturating_sub(detail_width + 1);
-        let section_y = area.y + chart_area;
-        if section_y >= area.y + area.height {
+        let lower_y = area.y + 1 + chart_height + 1;
+        if lower_y + 3 >= area.y + area.height {
             return;
         }
-        let section_height = area.y + area.height - section_y;
-        buf.set_stringn(
-            area.x + 1,
-            section_y,
-            "requests · newest first",
-            23,
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::BOLD),
-        );
-        let table_rect = Rect {
-            x: area.x,
-            y: section_y + 1,
-            width: table_width,
-            height: section_height.saturating_sub(2),
-        };
-        let pager_rect = Rect {
-            x: area.x,
-            y: area.y + area.height.saturating_sub(1),
-            width: table_width,
-            height: 1,
-        };
-        let detail_rect = Rect {
-            x: area.x + table_width + 1,
-            y: section_y,
-            width: detail_width,
-            height: section_height,
-        };
-
-        if let Some(child) = self.children.get_mut(4) {
-            child.view.render(pager_rect, buf, cx, theme);
-        }
-        if self.page() != self.last_page {
-            self.last_page = self.page();
-            self.rebuild_table();
-        }
-        self.sync_detail();
-        if let Some(child) = self.children.get_mut(3) {
-            child.view.render(table_rect, buf, cx, theme);
-        }
-        if let Some(child) = self.children.get_mut(5) {
-            child.view.render(detail_rect, buf, cx, theme);
-        }
+        self.paint_lower(area, lower_y, buf, cx, theme);
     }
 
     fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
+        use crossterm::event::KeyCode;
         if let InputEvent::Key(key) = event
             && key.kind == crossterm::event::KeyEventKind::Press
         {
-            use crossterm::event::KeyCode;
             match key.code {
                 KeyCode::Char('[') => {
                     self.cycle_interval(true);
@@ -397,6 +630,20 @@ impl View for TelemetryPage {
                 }
                 KeyCode::Char(']') => {
                     self.cycle_interval(false);
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let start = self.session_page() * SESSION_PAGE;
+                    let next = (start + self.selected_session + 1)
+                        .min(self.sessions.len().saturating_sub(1));
+                    self.select_session(next.saturating_sub(start));
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    let start = self.session_page() * SESSION_PAGE;
+                    let current = start + self.selected_session;
+                    let next = current.saturating_sub(1);
+                    self.select_session(next.saturating_sub(start));
                     return Outcome::Consumed;
                 }
                 _ => {}

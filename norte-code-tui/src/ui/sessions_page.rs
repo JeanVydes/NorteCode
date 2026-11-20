@@ -6,6 +6,7 @@
 //! session is marked and cannot be deleted from here.
 
 use std::any::Any;
+use std::fmt::Write;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -67,6 +68,9 @@ pub(crate) struct SessionsPage {
     /// The attached session, when one is.
     #[serde(skip)]
     active: Option<String>,
+    /// Fleet telemetry rolled up by session, for the rows and detail panel.
+    #[serde(skip)]
+    usage: std::collections::BTreeMap<String, crate::session_stats::SessionUsage>,
     /// The selected row.
     selected: usize,
     /// The first visible row.
@@ -90,6 +94,7 @@ impl SessionsPage {
         Self {
             sessions: Vec::new(),
             active: None,
+            usage: std::collections::BTreeMap::new(),
             selected: 0,
             offset: 0,
             mode: Mode::Listing,
@@ -107,9 +112,11 @@ impl SessionsPage {
         &mut self,
         sessions: Vec<norte_code_wire::SessionSummary>,
         active: Option<String>,
+        records: &[norte_code_wire::TelemetryRecord],
     ) {
         self.sessions = sessions;
         self.active = active;
+        self.usage = crate::session_stats::by_session(records);
         self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
         self.clamp_view();
     }
@@ -188,7 +195,19 @@ impl SessionsPage {
                         )
                     },
                 );
-                vec![
+                let usage = self
+                    .usage
+                    .get(&session.session_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let turns = session.turn_count.unwrap_or(usage.turns.len() as u64);
+                let models = usage
+                    .top_models(2)
+                    .into_iter()
+                    .map(|(model, count)| format!("{model} ×{count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut fields = vec![
                     Field::new("title", title),
                     Field::new("id", clip(&session.session_id, 36)),
                     Field::new("model", clip(&model, 36)),
@@ -200,9 +219,45 @@ impl SessionsPage {
                             .as_ref()
                             .map_or_else(|| "unknown".to_owned(), |agent| agent.id.clone()),
                     ),
-                    Field::new("pinned", session.pinned.to_string()),
-                    Field::new("archived", session.archived.to_string()),
-                ]
+                    Field::new("turns", turns.to_string()),
+                    Field::new("requests", usage.requests.to_string()),
+                    Field::new(
+                        "tokens",
+                        format!(
+                            "{}:{}",
+                            crate::context::human_count(usage.input),
+                            crate::context::human_count(usage.output)
+                        ),
+                    ),
+                    Field::new("cache", format!("{:.0}%", usage.cache_rate())),
+                    Field::new("tools", usage.tools.to_string()),
+                    Field::new(
+                        "models",
+                        if models.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            models
+                        },
+                    ),
+                ];
+                if usage.errors > 0 || usage.cancelled > 0 {
+                    fields.push(Field::new(
+                        "failed",
+                        format!("{} err · {} cancelled", usage.errors, usage.cancelled),
+                    ));
+                }
+                if usage.duration_ms > 0 {
+                    fields.push(Field::new("time", duration(usage.duration_ms)));
+                }
+                if usage.has_cost {
+                    fields.push(Field::new("cost", format!("${:.4}", usage.cost)));
+                }
+                if let Some(parent) = &session.parent_session_id {
+                    fields.push(Field::new("parent", clip(parent, 34)));
+                }
+                fields.push(Field::new("pinned", session.pinned.to_string()));
+                fields.push(Field::new("archived", session.archived.to_string()));
+                fields
             },
         );
         let title = if self.sessions.is_empty() {
@@ -600,11 +655,28 @@ impl SessionsPage {
             let clipped = clip(title, 44);
             buf.set_stringn(area.x + 2, y, &clipped, 44, title_style);
             let provider = session.provider.as_deref().unwrap_or("unknown");
-            let model = session
-                .model
-                .as_ref()
-                .map_or_else(|| "unknown".to_string(), |model| clip(&model.id, 24));
-            let mut secondary = format!("{provider} · {model}");
+            let usage = self.usage.get(&session.session_id);
+            let tokens = usage.map_or_else(
+                || "–:–".to_owned(),
+                |usage| {
+                    format!(
+                        "{}:{}",
+                        crate::context::human_count(usage.input),
+                        crate::context::human_count(usage.output)
+                    )
+                },
+            );
+            let cache = usage.map_or_else(
+                || "–".to_owned(),
+                |usage| format!("{:.0}%", usage.cache_rate()),
+            );
+            let turns = session
+                .turn_count
+                .or_else(|| usage.map(|usage| usage.turns.len() as u64));
+            let mut secondary = format!("{provider} · {tokens} · {cache} cache");
+            if let Some(turns) = turns {
+                let _ = write!(&mut secondary, " · {turns}t");
+            }
             if is_active {
                 secondary.push_str(" · current");
             }
@@ -629,6 +701,17 @@ impl SessionsPage {
                 Style::default().fg(theme.muted),
             );
         }
+    }
+}
+
+fn duration(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
     }
 }
 

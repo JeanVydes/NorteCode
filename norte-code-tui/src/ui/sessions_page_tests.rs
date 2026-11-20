@@ -15,7 +15,7 @@ fn session(id: &str, title: Option<&str>) -> norte_code_wire::SessionSummary {
 
 fn page_with(sessions: Vec<norte_code_wire::SessionSummary>) -> SessionsPage {
     let mut page = SessionsPage::new();
-    page.set_data(sessions, Some("active-one".to_string()));
+    page.set_data(sessions, Some("active-one".to_string()), &[]);
     page
 }
 

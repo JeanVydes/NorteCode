@@ -34,7 +34,7 @@ fn the_table_lists_the_latest_requests_first() {
     page.set_report(Some(report()));
     let table = page
         .children
-        .get(3)
+        .get(4)
         .and_then(|node| node.view.as_any_ref().downcast_ref::<Table>())
         .expect("request table");
     assert_eq!(page.records.len(), 2);
@@ -46,9 +46,11 @@ fn the_table_lists_the_latest_requests_first() {
 fn the_detail_shows_the_selected_request() {
     let mut page = TelemetryPage::new();
     page.set_report(Some(report()));
+    page.detail_is_request = true;
+    page.sync_detail();
     let panel = page
         .children
-        .get(5)
+        .get(6)
         .and_then(|node| node.view.as_any_ref().downcast_ref::<DetailPanel>())
         .expect("request detail");
     assert!(panel.fields.iter().any(|field| field.value == "req-1"));
