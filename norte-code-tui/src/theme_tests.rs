@@ -14,7 +14,7 @@ fn config() -> UiConfig {
                     "base": "dark",
                     "palette": { "accent": "#00aaff", "background": "101820" }
                 },
-                { "name": "solarized light", "base": "cegador" }
+                { "name": "solarized light", "base": "bye_retina" }
             ]
         }"##,
     )
@@ -33,15 +33,31 @@ fn catalog(config: &UiConfig) -> ThemeCatalog {
 }
 
 #[test]
+fn built_in_names_are_english() {
+    assert_eq!(ThemeKind::Dark.name(), "Dark");
+    assert_eq!(ThemeKind::ByeRetina.name(), "Bye Retina");
+    assert_eq!(ThemeKind::Bone.name(), "Bone");
+    assert_eq!(ThemeKind::Amoled.name(), "Amoled");
+}
+
+#[test]
 fn built_in_themes_are_still_selectable() {
     let catalog = catalog(&config());
     assert_eq!(
-        catalog.choose(Some("pastel_hueso")),
-        ThemeChoice::BuiltIn(ThemeKind::PastelHueso)
+        catalog.choose(Some("Bone")),
+        ThemeChoice::BuiltIn(ThemeKind::Bone)
     );
     assert_eq!(
-        catalog.choose(Some("amoled")),
+        catalog.choose(Some("Amoled")),
         ThemeChoice::BuiltIn(ThemeKind::Amoled)
+    );
+    assert_eq!(
+        catalog.choose(Some("Bye Retina")),
+        ThemeChoice::BuiltIn(ThemeKind::ByeRetina)
+    );
+    assert_eq!(
+        catalog.choose(Some("bone")),
+        ThemeChoice::BuiltIn(ThemeKind::Bone)
     );
 }
 
@@ -104,7 +120,7 @@ fn an_invalid_base_falls_back_to_dark() {
 fn a_configured_theme_without_colors_keeps_its_base() {
     let config = CustomThemeConfig {
         name: "copy".to_string(),
-        base: Some(ThemeKind::Cegador),
+        base: Some(ThemeKind::ByeRetina),
         palette: crate::palette::PaletteConfig::default(),
     };
     let catalog = ThemeCatalog {

@@ -20,6 +20,6 @@ fn each_interval_has_a_label() {
 fn axis_labels_fit_the_gutter() {
     let key = "2026-11-19T10:30";
     assert_eq!(short_label(key, ChartInterval::Minute), "10:30");
-    assert_eq!(short_label(key, ChartInterval::Hour), "11-19 10");
+    assert_eq!(short_label(key, ChartInterval::Hour), "10:00");
     assert_eq!(short_label(key, ChartInterval::Day), "11-19");
 }

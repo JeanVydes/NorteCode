@@ -102,7 +102,7 @@ impl Palette {
     }
 
     /// The built-in blinding white palette.
-    pub(crate) fn cegador() -> Self {
+    pub(crate) fn bye_retina() -> Self {
         Self {
             background: Color::Rgb(255, 255, 255),
             foreground: Color::Rgb(14, 14, 14),
@@ -120,7 +120,7 @@ impl Palette {
     }
 
     /// The built-in warm bone palette.
-    pub(crate) fn pastel_hueso() -> Self {
+    pub(crate) fn bone() -> Self {
         Self {
             background: Color::Rgb(247, 241, 231),
             foreground: Color::Rgb(66, 57, 48),
