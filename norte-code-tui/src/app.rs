@@ -386,6 +386,7 @@ fn cycle_theme(tree: &mut terminalui::Tree, model: &mut UiModel) {
     let choice = model.preferences.theme.clone();
     model.preferences.theme = model.preferences.catalog.next(&choice);
     ui::refresh_views(tree, model);
+    ui::sync_theme(tree, model);
 }
 
 fn telemetry_rankings_focused(tree: &terminalui::Tree) -> bool {
@@ -897,6 +898,7 @@ fn drain_config_actions(tree: &mut terminalui::Tree, model: &mut UiModel) -> boo
         .find_mut::<ui::SettingsPage>("settings")
         .map_or_else(Vec::new, ui::SettingsPage::take_config_actions);
     let mut changed = false;
+    let mut theme_changed = false;
     for action in actions {
         changed = true;
         let ConfigAction::Cycle(setting) = action;
@@ -904,6 +906,7 @@ fn drain_config_actions(tree: &mut terminalui::Tree, model: &mut UiModel) -> boo
             Setting::Theme => {
                 let choice = model.preferences.theme.clone();
                 model.preferences.theme = model.preferences.catalog.next(&choice);
+                theme_changed = true;
             }
             Setting::Thinking => model.preferences.reasoning = model.preferences.reasoning.next(),
             Setting::SendMode => model.preferences.send_mode = model.preferences.send_mode.next(),
@@ -913,6 +916,9 @@ fn drain_config_actions(tree: &mut terminalui::Tree, model: &mut UiModel) -> boo
             }
             Setting::Debug => model.preferences.debug = model.preferences.debug.next(),
         }
+    }
+    if theme_changed {
+        ui::sync_theme(tree, model);
     }
     changed
 }

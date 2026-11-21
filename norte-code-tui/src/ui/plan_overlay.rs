@@ -20,6 +20,8 @@ pub(crate) struct PlanOverlay {
     #[serde(skip)]
     doc: Markdown,
     #[serde(skip)]
+    doc_theme: Option<Theme>,
+    #[serde(skip)]
     width: u16,
     #[serde(skip)]
     scroll: u16,
@@ -32,6 +34,7 @@ impl PlanOverlay {
     pub(crate) fn open(&mut self, plan: norte_code_wire::PlanSummary) {
         self.plan = Some(plan);
         self.doc = Markdown::default();
+        self.doc_theme = None;
         self.width = 0;
         self.scroll = 0;
         self.area = Rect::new(0, 0, 0, 0);
@@ -46,6 +49,7 @@ impl PlanOverlay {
     pub(crate) fn close(&mut self) {
         self.plan = None;
         self.doc = Markdown::default();
+        self.doc_theme = None;
         self.scroll = 0;
     }
 
@@ -108,8 +112,9 @@ impl View for PlanOverlay {
         );
 
         let width = Self::body_width(inner);
-        if self.width != width {
+        if self.width != width || self.doc_theme != Some(*theme) {
             self.width = width;
+            self.doc_theme = Some(*theme);
             self.doc = Markdown::render(&plan.content, width, theme);
         }
         let max_scroll = self

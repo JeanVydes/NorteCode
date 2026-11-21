@@ -66,6 +66,9 @@ use terminalui::{Text, TextStyle, Tree, node};
 
 use terminalui::components::statusbar::{StatusBar, StatusBarStyle};
 
+const STATUS_HINT: &str = "alt+0-9 tabs · ⏎ send · ⇧⏎ newline";
+const STATUS_READY: &str = "● ready";
+
 fn tab_index(tab: Tab) -> usize {
     match tab {
         Tab::Chat => 0,
@@ -107,12 +110,12 @@ fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
             .right(vec![
                 node(
                     "hint",
-                    Text::new("alt+0-9 tabs · ⏎ send · ⇧⏎ newline")
-                        .with_style(TextStyle::default().fg(theme.muted)),
+                    Text::new(STATUS_HINT).with_style(TextStyle::default().fg(theme.muted)),
                 ),
                 node(
                     "state",
-                    Text::new("● ready").with_style(TextStyle::default().fg(theme.success).bold()),
+                    Text::new(STATUS_READY)
+                        .with_style(TextStyle::default().fg(theme.success).bold()),
                 ),
             ])
             .with_style(StatusBarStyle {
@@ -293,6 +296,31 @@ fn update_config(tree: &mut Tree, model: &UiModel) {
     if let Some(chat) = tree.find_mut::<ChatLayout>("chat") {
         chat.set_position(model.preferences.rail_position);
     }
+}
+
+/// Repaint the status strip's captured colors after a theme change.
+pub(crate) fn sync_theme(tree: &mut Tree, model: &UiModel) {
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    tree.visit_mut(|node| match node.id.as_str() {
+        "status" => {
+            if let Some(bar) = node.view.as_any().downcast_mut::<StatusBar>() {
+                bar.style = StatusBarStyle {
+                    background: Some(theme.secondary),
+                    separator: Some(theme.border),
+                };
+            }
+        }
+        "hint" => {
+            node.view =
+                Box::new(Text::new(STATUS_HINT).with_style(TextStyle::default().fg(theme.muted)));
+        }
+        "state" => {
+            node.view = Box::new(
+                Text::new(STATUS_READY).with_style(TextStyle::default().fg(theme.success).bold()),
+            );
+        }
+        _ => {}
+    });
 }
 
 /// Refresh the views from the latest model snapshot; called after data arrives.
