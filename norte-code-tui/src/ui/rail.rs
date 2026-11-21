@@ -21,7 +21,7 @@ use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 use crate::context::{ContextUsage, compaction_threshold, human_count};
 use crate::ui::copy::{
     ATTACHED, COMPACT_AT, CONNECTING_DOT, CONNECTION, CONTEXT, DETACHED, FAILED, NO_SESSION, NONE,
-    PLANS, SESSION,
+    PLANS, SESSION, TODO_COMPLETED, TODO_IN_PROGRESS, TODO_PENDING, TODOS,
 };
 use crate::ui_model::SessionAttachmentState;
 
@@ -109,12 +109,16 @@ pub(crate) struct Rail {
     context: ContextUsage,
     /// Plans of the attached session.
     plans: Vec<norte_code_wire::PlanSummary>,
+    /// The task list of the attached session.
+    todos: Vec<norte_code_wire::TodoInfo>,
     /// Clickable plan rows, recorded during render.
     plan_rows: Vec<(Rect, String)>,
     /// A plan the user clicked, waiting for the host to open it.
     pending_plan: Option<String>,
     /// Whether the next render should bring the plans section into view.
     reveal_plans: bool,
+    /// Whether the next render should bring the todo section into view.
+    reveal_todos: bool,
     /// How many virtual rows are scrolled out of view.
     scroll: u16,
     /// The last rendered frame, for mouse hit-testing.
@@ -137,9 +141,11 @@ impl Rail {
             model: None,
             context: ContextUsage::default(),
             plans: Vec::new(),
+            todos: Vec::new(),
             plan_rows: Vec::new(),
             pending_plan: None,
             reveal_plans: false,
+            reveal_todos: false,
             scroll: 0,
             area: Rect::new(0, 0, 0, 0),
             inner: Rect::new(0, 0, 0, 0),
@@ -175,6 +181,17 @@ impl Rail {
         self.sync_plan_buttons(plans.len());
         self.plans = plans;
         self.reveal_plans |= revealed;
+    }
+
+    /// The task list currently shown by the rail.
+    pub(crate) fn todos(&self) -> &[norte_code_wire::TodoInfo] {
+        &self.todos
+    }
+
+    pub(crate) fn set_todos(&mut self, todos: Vec<norte_code_wire::TodoInfo>) {
+        let revealed = self.todos.is_empty() && !todos.is_empty();
+        self.todos = todos;
+        self.reveal_todos |= revealed;
     }
 
     fn sync_plan_buttons(&mut self, count: usize) {
@@ -251,6 +268,9 @@ impl Rail {
             };
         }
         height += 5;
+        if !self.todos.is_empty() {
+            height += section_rows(self.todos.len());
+        }
         height += section_rows(self.plans.len());
         height
     }
@@ -339,6 +359,43 @@ impl Rail {
         }
         start + 4
     }
+
+    fn paint_todos(&self, buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme) -> u16 {
+        if self.todos.is_empty() || y + 1 >= inner.y + inner.height {
+            return y;
+        }
+        let dim = Style::default().fg(theme.muted).bg(theme.background);
+        buf.set_stringn(inner.x + 1, y, TODOS, 6, dim.add_modifier(Modifier::BOLD));
+        let width = usize::from(inner.width.saturating_sub(3));
+        let mut row = y + 1;
+        for todo in &self.todos {
+            if row >= inner.y + inner.height {
+                break;
+            }
+            let marker = match todo.status {
+                norte_code_wire::TodoStatus::Pending => TODO_PENDING,
+                norte_code_wire::TodoStatus::InProgress => TODO_IN_PROGRESS,
+                norte_code_wire::TodoStatus::Completed => TODO_COMPLETED,
+            };
+            let style = match todo.status {
+                norte_code_wire::TodoStatus::Pending => dim,
+                norte_code_wire::TodoStatus::InProgress => {
+                    Style::default().fg(theme.accent).bg(theme.background)
+                }
+                norte_code_wire::TodoStatus::Completed => {
+                    Style::default().fg(theme.success).bg(theme.background)
+                }
+            };
+            let text = format!(
+                "{marker} {}",
+                clipped(&todo.content, width.saturating_sub(2))
+            );
+            buf.set_stringn(inner.x + 1, row, &text, width, style);
+            row += 1;
+        }
+        row
+    }
+
     fn paint_plans(
         &mut self,
         buf: &mut Buffer,
@@ -445,9 +502,10 @@ impl View for Rail {
 
         let content_height = self.content_height(inner.width);
         let visible_rows = inner.height.saturating_sub(2);
-        if self.reveal_plans {
+        if self.reveal_plans || self.reveal_todos {
             self.scroll = content_height.saturating_sub(visible_rows);
             self.reveal_plans = false;
+            self.reveal_todos = false;
         }
         self.scroll = self.scroll.min(content_height.saturating_sub(visible_rows));
 
@@ -478,6 +536,7 @@ impl View for Rail {
             scroll: self.scroll,
         };
         y = self.paint_context(content, y, &mut scratch, cx, theme, &viewport);
+        y = self.paint_todos(&mut scratch, content, y, theme);
         self.paint_plans(&mut scratch, content, y, theme, &viewport, cx);
 
         for row in 0..visible_rows {

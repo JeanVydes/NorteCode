@@ -42,11 +42,12 @@ fn apply_attached(
     model.active_provider.clone_from(&session.provider);
     model.active = Some(norte_code_wire::SessionKey::new(session.session_id.clone()));
     model.attached_title = Some(title.clone());
-    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream")
-        && changed_session
-    {
+    if changed_session {
         // Never show another session's content under this label.
-        stream.clear_all();
+        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+            stream.clear_all();
+        }
+        model.todos.clear();
     }
     true
 }
@@ -157,6 +158,29 @@ fn fold_secret_event(
     }
 }
 
+fn fold_send_failure(
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    reason: &crate::client_error::ClientError,
+) {
+    if matches!(reason, crate::client_error::ClientError::SendPrompt(_))
+        && model.active_turn.is_none()
+    {
+        // The host refused the message, so no turn will ever end
+        // the loading row the send opened.
+        model.turn = TurnState::Idle;
+        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+            stream.stop_thinking();
+        }
+    }
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.push(ui::Item::Notice {
+            text: reason.to_string(),
+            tone: ui::Tone::Error,
+        });
+    }
+}
+
 pub(in crate::app) fn drain_server_events(
     events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
@@ -213,12 +237,7 @@ pub(in crate::app) fn drain_server_events(
                 }
             }
             Ok(ClientEvent::SendFailed { reason }) => {
-                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                    stream.push(ui::Item::Notice {
-                        text: reason.to_string(),
-                        tone: ui::Tone::Error,
-                    });
-                }
+                fold_send_failure(tree, model, &reason);
                 changed = true;
             }
             Ok(event @ (ClientEvent::Uploaded { .. } | ClientEvent::UploadFailed { .. })) => {

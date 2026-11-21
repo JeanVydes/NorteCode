@@ -60,6 +60,9 @@ pub(in crate::app) fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) 
         if rail.plans() != model.plans.as_slice() {
             rail.set_plans(model.plans.clone());
         }
+        if rail.todos() != model.todos.as_slice() {
+            rail.set_todos(model.todos.clone());
+        }
         let compact = model.active.is_some();
         if rail.compact_enabled() != compact {
             rail.set_compact_enabled(compact);

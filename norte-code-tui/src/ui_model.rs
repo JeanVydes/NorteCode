@@ -223,6 +223,8 @@ pub(crate) struct UiModel {
     pub(crate) models: Vec<norte_code_wire::ModelInfo>,
     /// The attachment's plans.
     pub(crate) plans: Vec<norte_code_wire::PlanSummary>,
+    /// The attached session's task list.
+    pub(crate) todos: Vec<norte_code_wire::TodoInfo>,
     /// Background jobs of the attached session.
     pub(crate) jobs: Vec<norte_code_wire::JobSummary>,
     /// Fleet telemetry shared with the views.
@@ -438,6 +440,7 @@ impl UiModel {
             active: None,
             models: Vec::new(),
             plans: Vec::new(),
+            todos: Vec::new(),
             jobs: Vec::new(),
             telemetry: None,
             telemetry_usage: crate::session_stats::SharedUsage::default(),

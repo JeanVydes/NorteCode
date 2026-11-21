@@ -23,6 +23,10 @@ pub(crate) const THEME_KEY: &str = "⌃T";
 
 pub(crate) const CONTEXT: &str = "CONTEXT";
 pub(crate) const PLANS: &str = "PLANS";
+pub(crate) const TODOS: &str = "TODOS";
+pub(crate) const TODO_PENDING: &str = "○";
+pub(crate) const TODO_IN_PROGRESS: &str = "◐";
+pub(crate) const TODO_COMPLETED: &str = "●";
 pub(crate) const SESSION: &str = "SESSION";
 pub(crate) const CONNECTION: &str = "CONNECTION";
 pub(crate) const COMPACT_AT: &str = "compact at";

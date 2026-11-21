@@ -53,6 +53,16 @@ pub(in crate::app) fn drain_message_actions(
     }
 }
 
+pub(in crate::app) fn drain_toasts(tree: &mut terminalui::Tree) {
+    let requests = tree
+        .find_mut::<ui::Transcript>("stream")
+        .map(ui::Transcript::take_toasts)
+        .unwrap_or_default();
+    for request in requests {
+        super::event_fold::toast(tree, &request.text, request.tone);
+    }
+}
+
 pub(in crate::app) fn drain_composer_actions(
     tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,

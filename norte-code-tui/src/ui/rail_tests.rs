@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use super::{Rail, build_tree};
 use crate::context::ContextUsage;
 use crate::ui::RailPosition;
+use crate::ui::copy::{TODO_COMPLETED, TODO_IN_PROGRESS, TODO_PENDING};
 use crate::ui_model::UiModel;
 
 fn rail_text(usage: ContextUsage) -> String {
@@ -86,6 +87,44 @@ fn arriving_plans_are_visible_and_keep_their_click_rows() {
     ));
     let rail = tree.find_mut::<Rail>("rail").expect("rail in tree");
     assert_eq!(rail.take_plan_request().as_deref(), Some("plan-1"));
+}
+
+#[test]
+fn the_rail_shows_todos_with_their_statuses() {
+    use norte_code_wire::{TodoInfo, TodoStatus};
+
+    let mut model = UiModel::detached();
+    model.todos = vec![
+        TodoInfo {
+            content: "first step".to_owned(),
+            status: TodoStatus::Completed,
+        },
+        TodoInfo {
+            content: "current step".to_owned(),
+            status: TodoStatus::InProgress,
+        },
+        TodoInfo {
+            content: "next step".to_owned(),
+            status: TodoStatus::Pending,
+        },
+    ];
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    tree.find_mut::<Rail>("rail")
+        .expect("rail in tree")
+        .set_todos(model.todos.clone());
+    let area = Rect::new(0, 0, 100, 24);
+
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let text = painted_text(&buf, area);
+    assert!(text.contains("TODOS"), "{text}");
+    assert!(text.contains("first step"), "{text}");
+    assert!(text.contains("current step"), "{text}");
+    assert!(text.contains("next step"), "{text}");
+    assert!(text.contains(TODO_COMPLETED), "{text}");
+    assert!(text.contains(TODO_IN_PROGRESS), "{text}");
+    assert!(text.contains(TODO_PENDING), "{text}");
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> terminalui::InputEvent {

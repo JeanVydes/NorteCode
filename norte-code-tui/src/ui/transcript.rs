@@ -239,6 +239,9 @@ pub(crate) struct Transcript {
     /// Message actions waiting for the host.
     #[serde(skip)]
     message_actions: Vec<MessageAction>,
+    /// Toast requests waiting for the host.
+    #[serde(skip)]
+    toasts: Vec<ToastRequest>,
     /// How edit diffs are drawn.
     #[serde(skip)]
     diff_mode: crate::diff::DiffMode,
@@ -262,6 +265,13 @@ pub(crate) enum MessageAction {
     Copy { text: String },
     /// Rewind the session to this message's turn.
     Rewind { turn: Option<u64> },
+}
+
+/// A transient message the view asks the host to display.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ToastRequest {
+    pub(crate) text: String,
+    pub(crate) tone: Tone,
 }
 
 /// An open message menu.
@@ -323,6 +333,7 @@ impl Transcript {
             menu: None,
             focused_item: None,
             message_actions: Vec::new(),
+            toasts: Vec::new(),
             diff_mode: crate::diff::DiffMode::Unified,
             docs: Vec::new(),
             doc_theme: None,
@@ -1109,6 +1120,11 @@ impl Transcript {
         std::mem::take(&mut self.message_actions)
     }
 
+    /// Take the toast requests queued by copy actions.
+    pub(crate) fn take_toasts(&mut self) -> Vec<ToastRequest> {
+        std::mem::take(&mut self.toasts)
+    }
+
     /// The item occupying a visible row, if it is a message.
     fn message_at(&self, local_row: usize) -> Option<usize> {
         self.row_map
@@ -1177,13 +1193,13 @@ impl Transcript {
             Some(text) => {
                 let chars = text.chars().count();
                 let _ = self.clipboard.write(&text);
-                self.push(Item::Notice {
+                self.toasts.push(ToastRequest {
                     text: format!("copied {chars} chars to clipboard"),
                     tone: Tone::Neutral,
                 });
             }
             None => {
-                self.push(Item::Notice {
+                self.toasts.push(ToastRequest {
                     text: "selection produced no text".to_string(),
                     tone: Tone::Warn,
                 });

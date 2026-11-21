@@ -64,6 +64,9 @@ pub(in crate::app) fn fold(
         | ServerEventKind::CompactionFinished { .. }) => {
             fold_runtime_event(kind, tree, model);
         }
+        ServerEventKind::SessionTodos { todos } => {
+            model.todos.clone_from(todos);
+        }
         ServerEventKind::Error { .. }
         | ServerEventKind::BudgetExceeded { .. }
         | ServerEventKind::BudgetWarning { .. }
@@ -83,7 +86,6 @@ pub(in crate::app) fn fold(
         | ServerEventKind::MediaPartCompleted { .. }
         | ServerEventKind::Committed { .. }
         | ServerEventKind::MessageReplayed { .. }
-        | ServerEventKind::SessionTodos { .. }
         | ServerEventKind::ImportResult { .. }
         | ServerEventKind::SessionExportReady { .. }
         | ServerEventKind::ModelList { .. }

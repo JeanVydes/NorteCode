@@ -131,6 +131,7 @@ fn job_info(finished: &norte_code_wire::JobFinished) -> norte_code_wire::JobInfo
 pub(crate) fn standard_event_from_frame(
     frame: &Envelope<Value>,
 ) -> Result<Option<ServerEvent>, ClientError> {
+    let envelope_turn_id = frame.turn_id.as_ref().map(ToString::to_string);
     let frame = FrameView::from_envelope(frame);
     let frame_type = frame.frame_type;
     let turn = frame.turn;
@@ -285,10 +286,22 @@ pub(crate) fn standard_event_from_frame(
                 }
                 FrameKind::UserInputAccepted => {
                     let decoded: norte_code_wire::UserInputAccepted = from_payload(payload)?;
-                    event(norte_code_wire::ServerEventKind::InputAccepted {
-                        turn_id: decoded.turn_id,
-                        queued: decoded.position.is_some(),
-                    })
+                    // The host reports applied steering on this same frame:
+                    // the payload names the steered message, and the envelope
+                    // carries no turn id. Reading that as an accepted turn
+                    // would replace the running turn with one that never ends.
+                    let accepted = envelope_turn_id.as_deref() == Some(decoded.turn_id.as_str());
+                    if accepted {
+                        event(norte_code_wire::ServerEventKind::InputAccepted {
+                            turn_id: decoded.turn_id,
+                            queued: decoded.position.is_some(),
+                        })
+                    } else {
+                        event(norte_code_wire::ServerEventKind::SteerApplied {
+                            ids: vec![decoded.turn_id],
+                            messages: decoded.content.into_iter().map(|part| part.text).collect(),
+                        })
+                    }
                 }
                 FrameKind::HistoryPage => {
                     let decoded: HistoryPagePayload = from_payload(payload)?;

@@ -97,6 +97,44 @@ fn rejects_an_unsupported_wire_version() {
 }
 
 #[test]
+fn keeps_an_accepted_turn_and_a_steer_report_apart() {
+    let payload = serde_json::to_value(norte_code_wire::UserInputAccepted {
+        turn_id: "turn_1".to_owned(),
+        content: vec![norte_code_wire::AcceptedPart {
+            kind: norte_code_wire::AcceptedContentKind::Text,
+            text: "hello".to_owned(),
+        }],
+        ..Default::default()
+    })
+    .expect("accepted payload");
+    let kind = FrameType::Standard(StandardFrameType::UserInputAccepted);
+
+    let mut accepted = frame(kind.clone(), "session-1", payload.clone());
+    accepted.turn_id = raep_types::TurnId::new("turn_1").ok();
+    let event = server_event_from_frame(&accepted)
+        .expect("accepted frame")
+        .expect("accepted event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::InputAccepted { ref turn_id, queued: false }
+            if turn_id == "turn_1"
+    ));
+
+    // The host reports applied steering on the same frame type, with the
+    // steered message id in the payload and no turn id on the envelope.
+    let mut steered = frame(kind, "session-1", payload);
+    steered.turn_id = None;
+    let event = server_event_from_frame(&steered)
+        .expect("steer frame")
+        .expect("steer event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::SteerApplied { ref ids, ref messages }
+            if ids == &["turn_1".to_owned()] && messages == &["hello".to_owned()]
+    ));
+}
+
+#[test]
 fn decodes_a_standard_tool_start() {
     let mut frame = frame(
         FrameType::Standard(StandardFrameType::ToolCallStarted),

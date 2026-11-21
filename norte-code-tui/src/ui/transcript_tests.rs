@@ -426,6 +426,14 @@ fn copying_a_transcript_selection_uses_the_shared_clipboard() {
     });
     transcript.finish_selection();
     assert_eq!(clipboard.written(), vec!["hello"]);
+    assert_eq!(
+        transcript.take_toasts(),
+        vec![super::ToastRequest {
+            text: "copied 5 chars to clipboard".to_owned(),
+            tone: Tone::Neutral,
+        }]
+    );
+    assert!(transcript.items.is_empty());
 }
 
 #[test]

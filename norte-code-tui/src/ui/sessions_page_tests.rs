@@ -1,7 +1,9 @@
 //! The sessions page: attach, rename and delete from the keyboard.
 
 use crossterm::event::Event;
-use terminalui::{InputEvent, Tree, node};
+use ratatui::layout::Rect;
+use terminalui::components::input::Input;
+use terminalui::{InputEvent, Theme, Tree, node};
 
 use super::{Mode, SessionsAction, SessionsPage};
 use crate::ui::detail_panel::DetailPanel;
@@ -111,8 +113,52 @@ fn rename_collects_the_typed_title() {
         .take_pending();
     assert!(matches!(
         &actions[..],
-        [SessionsAction::Rename { title, .. }] if title == "old titlefresh"
+        [SessionsAction::Rename { title, .. }] if title == "fresh"
     ));
+}
+
+#[test]
+fn rename_shows_the_original_title_in_the_dialog() {
+    let mut tree = Tree::new(node(
+        "sessions",
+        page_with(vec![session("a", Some("original name"))]),
+    ));
+    tree.focus("sessions");
+    tree.handle_event(&key_input('r'));
+
+    let area = Rect::new(0, 0, 60, 20);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    tree.render(area, &mut buf, &Theme::default());
+    let sheet = &buf;
+    let painted: String = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| sheet[(x, y)].symbol().to_string()))
+        .collect();
+    assert!(painted.contains("original name"), "{painted}");
+}
+
+#[test]
+fn reopening_rename_does_not_type_the_opening_key() {
+    let mut tree = Tree::new(node(
+        "sessions",
+        page_with(vec![session("a", Some("first"))]),
+    ));
+    tree.focus("sessions");
+    tree.handle_event(&key_input('r'));
+    tree.focus("title:input");
+    tree.handle_event(&enter_input());
+    tree.find_mut::<SessionsPage>("sessions")
+        .expect("page")
+        .take_pending();
+
+    tree.focus("sessions");
+    tree.handle_event(&key_input('r'));
+    let actions = tree
+        .find_mut::<SessionsPage>("sessions")
+        .expect("page")
+        .take_pending();
+    assert!(actions.is_empty());
+    let input = tree.find::<Input>("title:input").expect("input");
+    assert_eq!(input.value(), "first");
 }
 
 #[test]

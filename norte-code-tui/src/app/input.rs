@@ -21,7 +21,7 @@ use crate::ui_model::{Tab, UiModel};
 
 use super::drain::{
     drain_compact, drain_composer_actions, drain_config_actions, drain_message_actions,
-    drain_models_actions, drain_plugins_actions, drain_sessions_actions,
+    drain_models_actions, drain_plugins_actions, drain_sessions_actions, drain_toasts,
 };
 use super::{InputKind, PollOutcome};
 
@@ -64,6 +64,7 @@ pub(in crate::app) fn poll_event(
             drain_plugins_actions(tree, commands);
             drain_message_actions(tree, commands, model);
             drain_composer_actions(tree, commands, model);
+            drain_toasts(tree);
             drain_plan_requests(tree, model);
             if drain_config_actions(tree, model) {
                 ui::refresh_views(tree, model);
@@ -147,13 +148,15 @@ pub(in crate::app) fn settle_input(
     let modal_focus = tree
         .find::<ui::SessionsPage>("sessions")
         .and_then(ui::SessionsPage::focus_id)
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or_else(|| (model.tab == Tab::Sessions).then(|| "sessions".to_owned()));
     if let Some(id) = modal_focus {
         tree.focus(&id);
     }
     drain_plugins_actions(tree, commands);
     drain_message_actions(tree, commands, model);
     drain_composer_actions(tree, commands, model);
+    drain_toasts(tree);
     drain_plan_requests(tree, model);
     if drain_config_actions(tree, model) {
         ui::refresh_views(tree, model);

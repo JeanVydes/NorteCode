@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use super::{
     chrome::sync_chrome,
     drain::drain_sessions_actions,
-    event_fold::{fold, fold_upload_event},
+    event_fold::{drain_server_events, fold, fold_upload_event},
     input::{drain_plan_requests, handle_key},
 };
 use crate::attachment::{AttachmentKind, AttachmentSource, PreparedAttachment};
@@ -18,7 +18,7 @@ use crate::client::{ClientEvent, UiCommand};
 use crate::clipboard::{Clipboard, FakeClipboard};
 use crate::ui;
 use crate::ui::Composer;
-use crate::ui_model::{ActiveTurn, TurnState, UiModel};
+use crate::ui_model::{ActiveTurn, Tab, TurnState, UiModel};
 
 fn composer_tree(clipboard: Arc<dyn Clipboard>) -> Tree {
     let mut tree = Tree::new(node(
@@ -249,6 +249,31 @@ fn a_started_job_appears_in_the_rail_model() {
 }
 
 #[test]
+fn a_session_todos_event_updates_the_rail_model() {
+    use norte_code_wire::{TodoInfo, TodoStatus};
+
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = UiModel::detached();
+    let mut commands = None;
+    let event = norte_code_wire::ServerEvent {
+        request_id: 1,
+        session: Some(SessionKey::new("session_1")),
+        kind: norte_code_wire::ServerEventKind::SessionTodos {
+            todos: vec![TodoInfo {
+                content: "write tests".to_owned(),
+                status: TodoStatus::InProgress,
+            }],
+        },
+    };
+
+    fold(&event, &mut tree, &mut model, &mut commands);
+
+    assert_eq!(model.todos.len(), 1);
+    assert_eq!(model.todos[0].content, "write tests");
+    assert_eq!(model.todos[0].status, TodoStatus::InProgress);
+}
+
+#[test]
 fn the_new_session_button_sends_the_command() {
     let mut model = UiModel::detached();
     model.tab = crate::ui_model::Tab::Sessions;
@@ -326,6 +351,84 @@ fn rendered_tree(model: &UiModel, height: u16) -> Tree {
     let mut buf = ratatui::buffer::Buffer::empty(area);
     tree.render(area, &mut buf, &theme);
     tree
+}
+
+#[test]
+fn a_refused_prompt_clears_the_loading_row() {
+    let mut model = UiModel::detached();
+    let mut tree = ui::build_tree(&model);
+    tree.find_mut::<ui::Transcript>("stream")
+        .expect("stream")
+        .start_thinking();
+    assert!(painted_text(&mut tree, &model).contains("thinking"));
+
+    let (send, receive) = mpsc::channel(4);
+    send.try_send(ClientEvent::SendFailed {
+        reason: crate::client_error::ClientError::send_prompt("session busy"),
+    })
+    .expect("queued failure");
+    let mut events = Some(receive);
+    let mut commands = None;
+
+    let outcome = drain_server_events(&mut events, &mut commands, &mut tree, &mut model);
+
+    assert_eq!(outcome.events, 1);
+    assert!(!painted_text(&mut tree, &model).contains("thinking"));
+}
+
+fn painted_text(tree: &mut Tree, model: &UiModel) -> String {
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let area = ratatui::layout::Rect::new(0, 0, 100, 24);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let sheet = &buf;
+    (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| sheet[(x, y)].symbol().to_string()))
+        .collect()
+}
+
+#[test]
+fn closing_rename_returns_focus_to_the_sessions_page() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Sessions;
+    let mut tree = ui::build_tree(&model);
+    tree.find_mut::<ui::SessionsPage>("sessions")
+        .expect("sessions page")
+        .set_data(
+            vec![norte_code_wire::SessionSummary {
+                session_id: "session_1".to_owned(),
+                title: Some("original name".to_owned()),
+                ..Default::default()
+            }],
+            None,
+            crate::session_stats::SharedUsage::default(),
+        );
+    ui::sync_views(&mut tree, &model);
+    assert!(tree.focus("sessions"));
+    let mut commands = None;
+    let mut events = None;
+
+    let rename = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+    handle_key(
+        &mut tree,
+        rename,
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+    assert_eq!(tree.focused_id(), Some("title:input"));
+
+    let confirm = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    handle_key(
+        &mut tree,
+        confirm,
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+    assert_eq!(tree.focused_id(), Some("sessions"));
 }
 
 #[test]

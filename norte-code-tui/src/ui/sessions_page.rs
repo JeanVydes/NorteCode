@@ -15,7 +15,7 @@ use ratatui::style::{Modifier, Style};
 use serde::Serialize;
 use terminalui::components::button::{Button, ButtonVariant};
 use terminalui::components::dialog::Dialog;
-use terminalui::components::form::{Form, FormField};
+use terminalui::components::form::FormField;
 use terminalui::components::input::Input;
 use terminalui::components::pagination::Pagination;
 use terminalui::{Context, InputEvent, Node, Outcome, Stack, Theme, View, node};
@@ -101,6 +101,9 @@ pub(crate) struct SessionsPage {
     /// Requests waiting for the host.
     #[serde(skip)]
     pending: Vec<SessionsAction>,
+    /// Whether Enter was pressed in the rename field.
+    #[serde(skip)]
+    submit_requested: bool,
     /// The list pager and the selected session's detail panel.
     children: Vec<Node>,
 }
@@ -117,6 +120,7 @@ impl SessionsPage {
             mode: Mode::Listing,
             area: Rect::new(0, 0, 0, 0),
             pending: Vec::new(),
+            submit_requested: false,
             children: vec![
                 node("sessions_pager", Pagination::new(1)),
                 node("session_detail", DetailPanel::new()),
@@ -143,17 +147,15 @@ impl SessionsPage {
     }
 
     fn rename_dialog(title: &str) -> Dialog {
-        let mut field = FormField::text("title", "title")
-            .required_with_message(TITLE_REQUIRED)
-            .placeholder(title);
+        let mut field = FormField::text("title", "title").required_with_message(TITLE_REQUIRED);
         for child in field.children_mut() {
             if let Some(input) = child.view.as_any().downcast_mut::<Input>() {
                 input.set_value(title);
+                input.state.anchor = Some(0);
             }
         }
-        let form = Form::new(vec![node("title_field", field)]);
         Dialog::new(vec![
-            node("rename_form", form),
+            node("title_field", field),
             Self::dialog_actions("rename_cancel", "rename_confirm", false),
         ])
         .with_title(super::copy::RENAME_TITLE)
@@ -300,6 +302,7 @@ impl SessionsPage {
         self.mode = Mode::Rename {
             session: norte_code_wire::SessionKey::new(session.session_id.clone()),
         };
+        self.submit_requested = false;
     }
 
     fn open_delete(&mut self, session: &norte_code_wire::SessionSummary) {
@@ -359,11 +362,14 @@ impl SessionsPage {
         let (submitted, renamed, deleted) = match &mode {
             Mode::Listing => return,
             Mode::Rename { session } => {
-                let submitted = self
-                    .dialog_child::<Form, _>(RENAME_DIALOG_INDEX, "rename_form", |form| {
-                        form.take_submitted().is_some()
-                    })
-                    .unwrap_or(false);
+                let submitted = self.submit_requested
+                    || self
+                        .dialog_child::<Button, _>(
+                            RENAME_DIALOG_INDEX,
+                            "rename_confirm",
+                            Button::take_pressed,
+                        )
+                        .unwrap_or(false);
                 let cancelled = self
                     .dialog_child::<Button, _>(RENAME_DIALOG_INDEX, "rename_cancel", |button| {
                         button.take_pressed()
@@ -371,11 +377,8 @@ impl SessionsPage {
                     .unwrap_or(false);
                 if submitted || cancelled || !self.dialog_open(RENAME_DIALOG_INDEX) {
                     let title = self
-                        .dialog_child::<Form, _>(RENAME_DIALOG_INDEX, "rename_form", |form| {
-                            form.values()
-                                .first()
-                                .map(|(_, value)| value.trim().to_owned())
-                                .unwrap_or_default()
+                        .dialog_child::<FormField, _>(RENAME_DIALOG_INDEX, "title_field", |field| {
+                            field.value().trim().to_owned()
                         })
                         .unwrap_or_default();
                     (submitted, Some((session.clone(), title)), None)
@@ -409,6 +412,7 @@ impl SessionsPage {
             dialog.close();
         }
         self.mode = Mode::Listing;
+        self.submit_requested = false;
         if submitted
             && let Some((session, title)) = renamed
             && !title.is_empty()
@@ -595,7 +599,17 @@ impl View for SessionsPage {
         match event {
             InputEvent::Mouse(mouse) => self.handle_mouse(*mouse),
             InputEvent::Key(key) => {
-                if key.kind != KeyEventKind::Press || self.mode != Mode::Listing {
+                if key.kind != KeyEventKind::Press {
+                    return Outcome::Ignored;
+                }
+                if matches!(self.mode, Mode::Rename { .. }) {
+                    if key.code == crossterm::event::KeyCode::Enter {
+                        self.submit_requested = true;
+                        return Outcome::Consumed;
+                    }
+                    return Outcome::Ignored;
+                }
+                if self.mode != Mode::Listing {
                     return Outcome::Ignored;
                 }
                 self.handle_listing_key(key);
