@@ -235,6 +235,9 @@ pub(crate) struct Transcript {
     /// The open message menu, if any.
     #[serde(skip)]
     menu: Option<MessageMenu>,
+    /// The message the user last clicked, highlighted in the stream.
+    #[serde(skip)]
+    focused_item: Option<usize>,
     /// Message actions waiting for the host.
     #[serde(skip)]
     message_actions: Vec<MessageAction>,
@@ -310,6 +313,7 @@ impl Transcript {
             scrollbar: None,
             dragging_thumb: false,
             menu: None,
+            focused_item: None,
             message_actions: Vec::new(),
             diff_mode: crate::diff::DiffMode::Unified,
             follow_tail: true,
@@ -930,7 +934,8 @@ impl Transcript {
                 }
                 Outcome::Consumed
             }
-            MouseEventKind::Down(MouseButton::Left) => {
+            // Right click opens the per-message menu at the pointer.
+            MouseEventKind::Down(MouseButton::Right) => {
                 if self.click_menu(mouse.column, mouse.row) {
                     return Outcome::Consumed;
                 }
@@ -938,19 +943,29 @@ impl Transcript {
                     return Outcome::Ignored;
                 }
                 let local_row = mouse.row.saturating_sub(self.area.y);
-                let row = mouse
-                    .row
-                    .saturating_sub(self.origin_y)
-                    .saturating_add(self.first_visible);
-                if self.message_at(self.content_row(local_row)).is_some() {
+                if let Some(index) = self.message_at(self.content_row(local_row)) {
+                    self.focused_item = Some(index);
                     self.open_menu(mouse.column, local_row);
                     return Outcome::Consumed;
                 }
                 self.menu = None;
-                let _ = self.toggle_reasoning_at(row);
                 Outcome::Consumed
             }
-            MouseEventKind::Down(MouseButton::Right) => self.start_selection(inside, pos),
+            // Left click selects text (and toggles thoughts on a non-message row).
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.click_menu(mouse.column, mouse.row) {
+                    return Outcome::Consumed;
+                }
+                if !inside {
+                    return Outcome::Ignored;
+                }
+                let row = mouse
+                    .row
+                    .saturating_sub(self.origin_y)
+                    .saturating_add(self.first_visible);
+                let _ = self.toggle_reasoning_at(row);
+                self.start_selection(true, pos)
+            }
             MouseEventKind::Up(MouseButton::Left | MouseButton::Right) if self.dragging_thumb => {
                 self.dragging_thumb = false;
                 Outcome::Consumed
@@ -1210,8 +1225,18 @@ impl View for Transcript {
             };
             let clip = bottom;
             match item {
-                Item::User { text, .. } => paint_user(buf, rect, text, clip, theme),
-                Item::Assistant { text, .. } => paint_assistant(buf, rect, text, clip, theme),
+                Item::User { text, .. } => {
+                    if self.focused_item == Some(index) {
+                        buf.set_style(rect, Style::default().bg(theme.secondary));
+                    }
+                    paint_user(buf, rect, text, clip, theme);
+                }
+                Item::Assistant { text, .. } => {
+                    if self.focused_item == Some(index) {
+                        buf.set_style(rect, Style::default().bg(theme.secondary));
+                    }
+                    paint_assistant(buf, rect, text, clip, theme);
+                }
                 Item::Tool { .. } => {
                     Self::paint_tool_item(item, rect, buf, cx, clip, self.diff_mode, theme);
                 }
