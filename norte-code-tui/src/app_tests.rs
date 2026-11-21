@@ -326,6 +326,30 @@ fn rendered_tree(model: &UiModel, height: u16) -> Tree {
 }
 
 #[test]
+fn background_jobs_are_not_shown_in_the_rail() {
+    let mut model = UiModel::detached();
+    model.jobs = vec![norte_code_wire::JobSummary {
+        job_id: "job_1".to_owned(),
+        command: "echo hello".to_owned(),
+        ..Default::default()
+    }];
+    let mut tree = ui::build_tree(&model);
+    sync_chrome(&mut tree, &model);
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+
+    tree.render(area, &mut buf, &theme);
+
+    let sheet = &buf;
+    let painted: String = (0..area.height)
+        .flat_map(|y| (0..28).map(move |x| sheet[(x, y)].symbol().to_string()))
+        .collect();
+    assert!(!painted.contains("JOBS"), "{painted}");
+    assert!(!painted.contains("echo hello"), "{painted}");
+}
+
+#[test]
 fn each_preview_button_opens_its_own_plan() {
     let mut model = UiModel::detached();
     for index in 0..4 {
