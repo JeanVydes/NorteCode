@@ -108,6 +108,38 @@ fn click(column: u16, row: u16) -> InputEvent {
     })
 }
 
+fn wheel(column: u16, row: u16, modifiers: KeyModifiers) -> InputEvent {
+    InputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column,
+        row,
+        modifiers,
+    })
+}
+
+fn chart_tree() -> (Tree, UiModel, Theme) {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Telemetry;
+    model.telemetry = Some(Arc::new(report()));
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    sync_views(&mut tree, &model);
+    refresh_views(&mut tree, &model);
+    (tree, model, theme)
+}
+
+fn render_charts(tree: &mut Tree, theme: &Theme, height: u16) -> Rect {
+    let area = Rect::new(0, 0, 100, height);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, theme);
+    area
+}
+
+fn page(tree: &Tree) -> &TelemetryPage {
+    tree.find::<TelemetryPage>("telemetry")
+        .expect("telemetry page")
+}
+
 fn group(tree: &Tree) -> LeaderboardGroup {
     tree.find::<TelemetryPage>("telemetry")
         .expect("telemetry page")
@@ -168,4 +200,69 @@ fn clicking_a_row_keeps_the_selected_ranking() {
         .expect("telemetry page")
         .leaderboard_selected();
     assert_eq!(selected, 1);
+}
+
+#[test]
+fn wheel_inside_the_cost_chart_scrolls_its_history_only() {
+    let (mut tree, _, theme) = chart_tree();
+    render_charts(&mut tree, &theme, 50);
+    let area = page(&tree).chart_area(0);
+    assert!(area.width > 0 && area.height > 0);
+
+    tree.handle_event(&wheel(area.x + 20, area.y + 5, KeyModifiers::NONE));
+
+    assert!(page(&tree).chart_scroll_back() > 0);
+    assert_eq!(page(&tree).chart_scroll(), 0);
+}
+
+#[test]
+fn wheel_inside_a_line_chart_scrolls_the_shared_history_only() {
+    let (mut tree, _, theme) = chart_tree();
+    render_charts(&mut tree, &theme, 50);
+    let area = page(&tree).chart_area(1);
+    assert!(area.width > 0 && area.height > 0);
+
+    tree.handle_event(&wheel(area.x + 20, area.y + 5, KeyModifiers::NONE));
+
+    assert!(page(&tree).chart_scroll_back() > 0);
+    assert_eq!(page(&tree).chart_scroll(), 0);
+}
+
+#[test]
+fn shift_wheel_over_a_chart_scrolls_the_stack_only() {
+    let (mut tree, _, theme) = chart_tree();
+    render_charts(&mut tree, &theme, 50);
+    let area = page(&tree).chart_area(0);
+
+    tree.handle_event(&wheel(area.x + 20, area.y + 5, KeyModifiers::SHIFT));
+
+    assert_eq!(page(&tree).chart_scroll_back(), 0);
+    assert_eq!(page(&tree).chart_scroll(), 3);
+}
+
+#[test]
+fn wheel_outside_the_charts_scrolls_the_stack_only() {
+    let (mut tree, _, theme) = chart_tree();
+    render_charts(&mut tree, &theme, 50);
+
+    tree.handle_event(&wheel(20, 1, KeyModifiers::NONE));
+
+    assert_eq!(page(&tree).chart_scroll_back(), 0);
+    assert_eq!(page(&tree).chart_scroll(), 3);
+}
+
+#[test]
+fn both_line_charts_draw_the_time_axis() {
+    let (mut tree, _, theme) = chart_tree();
+    let area = render_charts(&mut tree, &theme, 70);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let mut painted = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            painted.push_str(buf[(x, y)].symbol());
+        }
+    }
+
+    assert!(painted.match_indices("09:00").count() >= 3);
 }

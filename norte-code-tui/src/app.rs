@@ -399,6 +399,16 @@ fn digit_switches_tab(tree: &terminalui::Tree, model: &UiModel) -> bool {
         && !(model.tab == Tab::Telemetry && telemetry_rankings_focused(tree))
 }
 
+fn scroll_page(tree: &mut terminalui::Tree, tab: Tab, delta: isize) {
+    if tab == Tab::Telemetry {
+        if let Some(page) = tree.find_mut::<ui::TelemetryPage>("telemetry") {
+            page.scroll_chart_view(delta);
+        }
+    } else if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.scroll(delta);
+    }
+}
+
 fn toggle_list_focus(tree: &mut terminalui::Tree, tab: Tab) {
     // The tree would spend Tab moving focus between the charts and pagers;
     // here it switches the page between its two lists.
@@ -446,15 +456,11 @@ fn handle_key(
             pass_to_tree = false;
         }
         (KeyModifiers::NONE, KeyCode::PageUp) => {
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.scroll(-6);
-            }
+            scroll_page(tree, model.tab, -6);
             pass_to_tree = false;
         }
         (KeyModifiers::NONE, KeyCode::PageDown) => {
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.scroll(6);
-            }
+            scroll_page(tree, model.tab, 6);
             pass_to_tree = false;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
