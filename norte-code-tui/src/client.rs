@@ -17,6 +17,7 @@ use norte_code_wire::{SessionKey, SessionSummary};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::config::ClientConfig;
+use crate::shared_telemetry::SharedTelemetry;
 
 /// Events the connection reports to the interface.
 #[derive(Clone, Debug)]
@@ -42,9 +43,7 @@ pub(crate) enum ClientEvent {
     /// The job list of the attached session.
     Jobs(Vec<norte_code_wire::JobSummary>),
     /// Telemetry for the whole fleet.
-    Telemetry(norte_code_wire::TelemetryReport),
-    /// Telemetry for the attached session.
-    TelemetrySession(norte_code_wire::TelemetryReport),
+    Telemetry(SharedTelemetry),
     /// The cost of the attached session.
     CostSession(norte_code_client::CostReport),
     /// The fleet-wide cost total.
@@ -351,7 +350,6 @@ async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<Clien
         models,
         plans,
         jobs,
-        telemetry_session,
         telemetry_global,
         plugins,
         catalog,
@@ -366,7 +364,6 @@ async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<Clien
         api.models(),
         api.plans(session),
         api.list_jobs(session),
-        api.telemetry(Some(session)),
         api.telemetry(None),
         api.plugins(),
         api.catalog_detail(),
@@ -387,11 +384,8 @@ async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<Clien
     if let Ok(jobs) = jobs {
         let _ = events.send(ClientEvent::Jobs(jobs)).await;
     }
-    if let Ok(report) = telemetry_session {
-        let _ = events.send(ClientEvent::TelemetrySession(report)).await;
-    }
     if let Ok(report) = telemetry_global {
-        let _ = events.send(ClientEvent::Telemetry(report)).await;
+        let _ = events.send(ClientEvent::Telemetry(Arc::new(report))).await;
     }
     if let Ok(plugins) = plugins {
         let _ = events.send(ClientEvent::Plugins(plugins)).await;

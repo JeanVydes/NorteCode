@@ -10,6 +10,9 @@ use terminalui::components::candlechart::Candle;
 
 use crate::telemetry::ChartInterval;
 
+/// The charts draw at most this many buckets, matching the chart component.
+pub(crate) const MAX_CHART_BUCKETS: usize = 240;
+
 /// One time bucket of request measures.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Bucket {
@@ -75,7 +78,11 @@ pub(crate) fn series(
         }
     }
 
-    let buckets: Vec<(String, Bucket)> = buckets.into_iter().collect();
+    let mut buckets: Vec<(String, Bucket)> = buckets.into_iter().collect();
+    if buckets.len() > MAX_CHART_BUCKETS {
+        let excess = buckets.len() - MAX_CHART_BUCKETS;
+        buckets.drain(..excess);
+    }
     let mut cost = Vec::with_capacity(buckets.len());
     let mut tokens = Vec::with_capacity(buckets.len());
     let mut cache = Vec::with_capacity(buckets.len());

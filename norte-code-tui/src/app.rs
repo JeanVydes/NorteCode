@@ -5,6 +5,7 @@
 //! Views never call back into the client; the app mediates between them.
 
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -1014,8 +1015,10 @@ fn fold_catalog_event(event: &ClientEvent, model: &mut UiModel) -> bool {
         ClientEvent::Models(models) => model.models.clone_from(models),
         ClientEvent::Plans(plans) => model.plans.clone_from(plans),
         ClientEvent::Jobs(jobs) => model.jobs.clone_from(jobs),
-        ClientEvent::Telemetry(report) => model.telemetry = Some(report.clone()),
-        ClientEvent::TelemetrySession(report) => model.telemetry_session = Some(report.clone()),
+        ClientEvent::Telemetry(report) => {
+            model.telemetry_usage = crate::session_stats::shared_by_session(&report.records);
+            model.telemetry = Some(Arc::clone(report));
+        }
         ClientEvent::CostSession(cost) | ClientEvent::CostGlobal(cost) => {
             model.cost = Some(cost.clone());
         }
@@ -1070,7 +1073,6 @@ fn drain_server_events(
                 | ClientEvent::Plans(_)
                 | ClientEvent::Jobs(_)
                 | ClientEvent::Telemetry(_)
-                | ClientEvent::TelemetrySession(_)
                 | ClientEvent::CostSession(_)
                 | ClientEvent::CostGlobal(_)
                 | ClientEvent::Plugins(_)

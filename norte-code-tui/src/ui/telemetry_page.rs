@@ -1,6 +1,7 @@
 //! The telemetry tab: charts, a session pager, and that session's requests.
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::fmt::Write;
 
 use ratatui::buffer::Buffer;
@@ -15,6 +16,8 @@ use terminalui::components::table::{Table, TableCell, TableRow};
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
 use super::detail_panel::{DetailPanel, Field};
+use crate::session_stats::{SessionUsage, SharedUsage};
+use crate::shared_telemetry::SharedTelemetry;
 use crate::telemetry::{ChartInterval, short_label};
 use crate::telemetry_series::series;
 
@@ -38,15 +41,18 @@ enum TelemetryView {
 #[derive(Serialize)]
 pub(crate) struct TelemetryPage {
     interval: ChartInterval,
-    report: Option<norte_code_wire::TelemetryReport>,
-    /// All records, newest first.
-    pub(crate) records: Vec<norte_code_wire::TelemetryRecord>,
+    #[serde(skip)]
+    report: Option<SharedTelemetry>,
+    /// Indices into `report.records`, newest first.
+    #[serde(skip)]
+    pub(crate) record_indices: Vec<usize>,
     /// Rollup computed once per report, not on every frame.
-    usage: std::collections::BTreeMap<String, crate::session_stats::SessionUsage>,
-    /// The selected session's records, rebuilt only when the session changes.
-    selected_records: Vec<norte_code_wire::TelemetryRecord>,
-    /// Distinct session ids, newest activity first.
-    sessions: Vec<String>,
+    #[serde(skip)]
+    usage: SharedUsage,
+    /// Indices of the selected session's records, newest first.
+    selected_records: Vec<usize>,
+    /// One representative record index per distinct session, sorted by id.
+    sessions: Vec<usize>,
     /// Session summaries from the host, for the shared detail panel.
     session_data: Vec<norte_code_wire::SessionSummary>,
     /// The session whose requests are shown.
@@ -71,8 +77,8 @@ impl TelemetryPage {
         Self {
             interval: ChartInterval::Hour,
             report: None,
-            records: Vec::new(),
-            usage: std::collections::BTreeMap::new(),
+            record_indices: Vec::new(),
+            usage: SharedUsage::default(),
             selected_records: Vec::new(),
             sessions: Vec::new(),
             session_data: Vec::new(),
@@ -122,22 +128,30 @@ impl TelemetryPage {
     }
 
     /// Replace the report the charts, session list and request table use.
-    pub(crate) fn set_report(&mut self, report: Option<norte_code_wire::TelemetryReport>) {
+    pub(crate) fn set_report(&mut self, report: Option<SharedTelemetry>, usage: SharedUsage) {
         self.report = report;
-        self.records = self
+        self.usage = usage;
+        self.record_indices = self
             .report
             .as_ref()
-            .map(|report| report.records.iter().rev().cloned().collect())
-            .unwrap_or_default();
-        let mut sessions: Vec<String> = self
-            .records
-            .iter()
-            .map(|record| record.session.clone())
-            .collect();
-        sessions.sort();
-        sessions.dedup();
-        self.sessions = sessions;
-        self.usage = crate::session_stats::by_session(&self.records);
+            .map_or_else(Vec::new, |report| (0..report.records.len()).rev().collect());
+        self.sessions = self.report.as_ref().map_or_else(Vec::new, |report| {
+            let mut seen = HashSet::new();
+            let mut sessions: Vec<usize> = report
+                .records
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, record)| seen.insert(record.session.as_str()))
+                .map(|(index, _)| index)
+                .collect();
+            sessions.sort_by(|left, right| {
+                report.records[*left]
+                    .session
+                    .cmp(&report.records[*right].session)
+            });
+            sessions
+        });
         self.selected_session = 0;
         self.detail_is_request = false;
         self.rebuild_selected();
@@ -147,8 +161,27 @@ impl TelemetryPage {
         self.sync_detail();
     }
 
+    fn record(&self, index: usize) -> Option<&norte_code_wire::TelemetryRecord> {
+        self.report.as_ref()?.records.get(index)
+    }
+
+    fn selected_record(&self, position: usize) -> Option<&norte_code_wire::TelemetryRecord> {
+        self.selected_records
+            .get(position)
+            .copied()
+            .and_then(|index| self.record(index))
+    }
+
+    fn session_id(&self, position: usize) -> Option<&str> {
+        self.sessions
+            .get(position)
+            .copied()
+            .and_then(|index| self.record(index))
+            .map(|record| record.session.as_str())
+    }
+
     fn rebuild_charts(&mut self) {
-        let data = series(self.report.as_ref(), self.interval);
+        let data = series(self.report.as_deref(), self.interval);
         if let Some(chart) = self
             .children
             .first_mut()
@@ -197,16 +230,25 @@ impl TelemetryPage {
     /// The session the request table is filtered to.
     fn selected_id(&self) -> Option<&str> {
         let index = self.session_page() * SESSION_PAGE + self.selected_session;
-        self.sessions.get(index).map(String::as_str)
+        self.session_id(index)
     }
 
     fn rebuild_selected(&mut self) {
+        let Some(report) = self.report.as_ref() else {
+            self.selected_records.clear();
+            return;
+        };
         let id = self.selected_id().map(str::to_owned);
         self.selected_records = self
-            .records
+            .record_indices
             .iter()
-            .filter(|record| Some(record.session.as_str()) == id.as_deref())
-            .cloned()
+            .copied()
+            .filter(|index| {
+                report
+                    .records
+                    .get(*index)
+                    .is_some_and(|record| Some(record.session.as_str()) == id.as_deref())
+            })
             .collect();
     }
 
@@ -238,31 +280,39 @@ impl TelemetryPage {
         }
         let start = self.request_page() * REQUEST_PAGE;
         let rows: Vec<Node> = self
-            .selected_records
-            .iter()
-            .skip(start)
-            .take(REQUEST_PAGE)
-            .enumerate()
-            .map(|(index, record)| {
-                let time = record.started_at.get(11..16).unwrap_or(&record.started_at);
-                let tokens = record.input_tokens.unwrap_or(0) + record.output_tokens.unwrap_or(0);
-                node(
-                    format!("row-{index}"),
-                    TableRow::body(vec![
-                        node("time", TableCell::text(time.to_owned()).with_weight(3)),
-                        node(
-                            "model",
-                            TableCell::text(clip(&record.model, 20)).with_weight(5),
-                        ),
-                        node(
-                            "status",
-                            TableCell::text(status_label(record.status)).with_weight(2),
-                        ),
-                        node("tokens", TableCell::text(tokens.to_string()).with_weight(2)),
-                    ]),
-                )
+            .report
+            .as_ref()
+            .map(|report| {
+                self.selected_records
+                    .iter()
+                    .copied()
+                    .skip(start)
+                    .take(REQUEST_PAGE)
+                    .enumerate()
+                    .filter_map(|(index, record_index)| {
+                        let record = report.records.get(record_index)?;
+                        let time = record.started_at.get(11..16).unwrap_or(&record.started_at);
+                        let tokens =
+                            record.input_tokens.unwrap_or(0) + record.output_tokens.unwrap_or(0);
+                        Some(node(
+                            format!("row-{index}"),
+                            TableRow::body(vec![
+                                node("time", TableCell::text(time.to_owned()).with_weight(3)),
+                                node(
+                                    "model",
+                                    TableCell::text(clip(&record.model, 20)).with_weight(5),
+                                ),
+                                node(
+                                    "status",
+                                    TableCell::text(status_label(record.status)).with_weight(2),
+                                ),
+                                node("tokens", TableCell::text(tokens.to_string()).with_weight(2)),
+                            ]),
+                        ))
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
         if let Some(table) = self
             .children
             .get_mut(4)
@@ -282,7 +332,7 @@ impl TelemetryPage {
                 .and_then(|node| node.view.as_any_ref().downcast_ref::<Table>())
                 .map_or(0, Table::selected);
             let index = self.request_page() * REQUEST_PAGE + selected;
-            self.selected_records.get(index).map_or_else(
+            self.selected_record(index).map_or_else(
                 || vec![Field::new("no request", "select a row")],
                 |record| {
                     vec![
@@ -317,7 +367,7 @@ impl TelemetryPage {
             )
         } else {
             let id = self.selected_id().unwrap_or("");
-            let empty = crate::session_stats::SessionUsage::default();
+            let empty = SessionUsage::default();
             self.session_data
                 .iter()
                 .find(|session| session.session_id == id)
@@ -477,7 +527,7 @@ impl TelemetryPage {
             .take(area.height as usize)
             .enumerate()
         {
-            if let Some(id) = self.sessions.get(index) {
+            if let Some(id) = self.session_id(index) {
                 let y = area
                     .y
                     .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));

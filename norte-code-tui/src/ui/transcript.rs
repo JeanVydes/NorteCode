@@ -24,6 +24,8 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BLOCK_GAP: u16 = 1;
+const MAX_ITEMS: usize = 1000;
+const KEEP_ITEMS: usize = 800;
 
 /// Where the scrollbar sits in the last rendered frame.
 #[derive(Clone, Copy, Debug)]
@@ -337,11 +339,36 @@ impl Transcript {
         }
     }
 
+    fn reset_render_cache(&mut self) {
+        self.heights.clear();
+        self.docs.clear();
+        self.painted.clear();
+        self.painted_copyable.clear();
+        self.painted_user.clear();
+        self.content_height = 0;
+        self.heights_width = 0;
+        self.doc_theme = None;
+        self.dirty = true;
+    }
+
+    fn trim_items(&mut self) {
+        if self.items.len() < MAX_ITEMS {
+            return;
+        }
+        let skip = self.items.len() - KEEP_ITEMS;
+        self.items.drain(..skip);
+        self.focused_item = self.focused_item.and_then(|item| item.checked_sub(skip));
+        if let Some(menu) = self.menu.as_mut() {
+            menu.item = menu.item.saturating_sub(skip);
+        }
+        self.reset_render_cache();
+    }
+
     /// Forget everything and pin the view to the bottom.
     pub(crate) fn clear_all(&mut self) {
         self.items.clear();
         self.thinking = None;
-        self.dirty = true;
+        self.reset_render_cache();
         self.first_visible = u16::MAX;
         self.follow_tail = true;
     }
@@ -350,6 +377,7 @@ impl Transcript {
     pub(crate) fn replace_history(&mut self, items: Vec<norte_code_wire::HistoryItem>) {
         self.items.clear();
         self.thinking = None;
+        self.reset_render_cache();
         let mut last_shell: Option<usize> = None;
         for item in items {
             match item.kind.as_str() {
@@ -377,7 +405,7 @@ impl Transcript {
                         }) = self.items.get_mut(index)
                     {
                         for line in item.content.lines() {
-                            console.push_line(line.to_owned());
+                            crate::console_log::push_line(console, line.to_owned());
                         }
                     }
                 }
@@ -434,6 +462,7 @@ impl Transcript {
                 _ => {}
             }
         }
+        self.trim_items();
         self.dirty = true;
         self.first_visible = u16::MAX;
         self.follow_tail = true;
@@ -442,6 +471,7 @@ impl Transcript {
     /// Append an item; the view stays pinned to the bottom while following the tail.
     pub(crate) fn push(&mut self, item: Item) {
         self.items.push(item);
+        self.trim_items();
         self.dirty = true;
         if self.follow_tail {
             self.first_visible = u16::MAX;
@@ -499,7 +529,7 @@ impl Transcript {
             } = item
                 && *id == call_id
             {
-                console.push_line(line);
+                crate::console_log::push_line(console, line);
                 self.dirty = true;
                 return true;
             }
@@ -840,6 +870,7 @@ impl Transcript {
         let row_items = self.row_items();
         self.painted.clear();
         self.painted_copyable.clear();
+        self.painted_user.clear();
         for y in area.y..area.y + area.height {
             let row = usize::from(y - area.y);
             let mut line = String::with_capacity(area.width as usize);

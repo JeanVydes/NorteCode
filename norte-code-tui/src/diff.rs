@@ -80,6 +80,7 @@ pub(crate) struct Diff {
 }
 
 const CONTEXT: usize = 3;
+const MAX_LINES: usize = 400;
 
 impl Diff {
     /// Build the diff from the decoded call and the file snapshot.
@@ -102,7 +103,7 @@ impl Diff {
                 after = after.replacen(old, new, 1);
             }
             if after != source {
-                return Some(Self::between(source, &after));
+                return Self::bounded(Self::between(source, &after).lines);
             }
         }
         let mut lines = Vec::new();
@@ -134,7 +135,21 @@ impl Diff {
                 }));
             }
         }
-        (!lines.is_empty()).then_some(Self { lines })
+        Self::bounded(lines)
+    }
+
+    fn bounded(mut lines: Vec<Line>) -> Option<Self> {
+        if lines.is_empty() {
+            return None;
+        }
+        if lines.len() > MAX_LINES {
+            lines.truncate(MAX_LINES - 1);
+            lines.push(Line {
+                kind: LineKind::Context,
+                text: "... diff truncated".to_owned(),
+            });
+        }
+        Some(Self { lines })
     }
 
     /// The changed lines and their surroundings.

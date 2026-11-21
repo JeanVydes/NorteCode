@@ -4,8 +4,12 @@
 //! page can show each session's usage without a request per row.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use norte_code_wire::{RequestStatus, TelemetryRecord};
+
+/// Telemetry rollups shared by the sessions and telemetry views.
+pub(crate) type SharedUsage = Arc<BTreeMap<String, SessionUsage>>;
 
 /// What one session spent across its reported requests.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
@@ -88,6 +92,11 @@ pub(crate) fn by_session(records: &[TelemetryRecord]) -> BTreeMap<String, Sessio
         add(grouped.entry(record.session.clone()).or_default(), record);
     }
     grouped
+}
+
+/// Build the rollups once and hand cheap handles to every view that needs them.
+pub(crate) fn shared_by_session(records: &[TelemetryRecord]) -> SharedUsage {
+    Arc::new(by_session(records))
 }
 
 #[cfg(test)]

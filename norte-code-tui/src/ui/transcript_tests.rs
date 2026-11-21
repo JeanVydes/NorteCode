@@ -4,7 +4,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use terminalui::Outcome;
 
-use super::{Item, ScrollbarGeometry, Tone, Transcript};
+use super::{Item, KEEP_ITEMS, MAX_ITEMS, ScrollbarGeometry, Tone, Transcript};
 
 fn scrollable_transcript() -> Transcript {
     let mut transcript = Transcript::new();
@@ -473,4 +473,69 @@ fn a_retry_after_other_items_starts_a_new_line() {
         .filter(|item| matches!(item, Item::Retry { .. }))
         .count();
     assert_eq!(retries, 2);
+}
+
+#[test]
+fn the_painted_flags_do_not_accumulate_across_frames() {
+    use ratatui::buffer::Buffer;
+
+    let mut transcript = Transcript::new();
+    let area = Rect::new(0, 0, 10, 2);
+    let buffer = Buffer::empty(area);
+    transcript.capture_painted(area, &buffer);
+    transcript.capture_painted(area, &buffer);
+
+    assert_eq!(transcript.painted.len(), 2);
+    assert_eq!(transcript.painted_copyable.len(), 2);
+    assert_eq!(transcript.painted_user.len(), 2);
+}
+
+#[test]
+fn clearing_the_stream_drops_the_render_cache() {
+    let mut transcript = Transcript::new();
+    transcript.push(Item::User {
+        turn: None,
+        text: "**hello**".to_owned(),
+    });
+    transcript.docs.push(None);
+    transcript.heights.push(2);
+    transcript.painted.push("hello".to_owned());
+    transcript.painted_copyable.push(true);
+    transcript.painted_user.push(true);
+
+    transcript.clear_all();
+
+    assert_eq!(transcript.docs.len(), 0);
+    assert_eq!(transcript.heights.len(), 0);
+    assert_eq!(transcript.painted.len(), 0);
+    assert_eq!(transcript.painted_copyable.len(), 0);
+    assert_eq!(transcript.painted_user.len(), 0);
+}
+
+#[test]
+fn a_long_session_keeps_only_recent_items() {
+    let mut transcript = Transcript::new();
+    for index in 0..MAX_ITEMS + 25 {
+        transcript.push(Item::Notice {
+            text: format!("line {index}"),
+            tone: Tone::Neutral,
+        });
+    }
+
+    let count = transcript.items.len();
+    assert!((KEEP_ITEMS..=MAX_ITEMS).contains(&count), "count {count}");
+    let last = transcript.items.last().expect("last item");
+    assert!(matches!(last, Item::Notice { text, .. } if text == "line 1024"));
+}
+
+#[test]
+fn replaying_a_long_history_is_bounded() {
+    let mut transcript = Transcript::new();
+    let items = (0..MAX_ITEMS + 25)
+        .map(|index| history_item(&index.to_string(), "user", "hello"))
+        .collect();
+    transcript.replace_history(items);
+
+    let count = transcript.items.len();
+    assert!((KEEP_ITEMS..=MAX_ITEMS).contains(&count), "count {count}");
 }
