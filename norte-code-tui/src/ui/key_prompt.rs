@@ -6,6 +6,9 @@
 //! process beyond the file it writes.
 
 use std::any::Any;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::Path;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -17,17 +20,44 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
 use norte_code_protocol::keys::{environment_value, read_secret, save_secret, secrets_path};
 
+thread_local! {
+    /// Disk lookups are rare but happen on every catalog refresh, so keep
+    /// the result until a key is saved or the secrets file moves.
+    static KEY_STATUS: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+}
+
+pub(crate) fn cache_key(path: &Path, provider_id: &str) -> String {
+    format!("{}:{}", path.display(), provider_id)
+}
+
 /// Whether a provider has a usable key, on disk or in the environment.
 pub(crate) fn provider_has_key(provider_id: &str, environment_keys: &[String]) -> bool {
-    if environment_keys.is_empty() {
+    if environment_keys.is_empty() || environment_value(environment_keys).is_some() {
         return true;
     }
-    if environment_value(environment_keys).is_some() {
-        return true;
+    let Some(path) = secrets_path() else {
+        return false;
+    };
+    let key = cache_key(&path, provider_id);
+    if let Some(cached) = KEY_STATUS.with(|cache| cache.borrow().get(&key).copied()) {
+        return cached;
     }
-    secrets_path()
-        .and_then(|path| read_secret(&path, provider_id))
-        .is_some()
+    let present = read_secret(&path, provider_id).is_some();
+    KEY_STATUS.with(|cache| {
+        cache.borrow_mut().insert(key, present);
+    });
+    present
+}
+
+/// Forget the cached status after writing a key to disk.
+pub(crate) fn invalidate_key(provider_id: &str) {
+    let Some(path) = secrets_path() else {
+        return;
+    };
+    let key = cache_key(&path, provider_id);
+    KEY_STATUS.with(|cache| {
+        cache.borrow_mut().remove(&key);
+    });
 }
 
 /// The masked prompt state.
@@ -147,6 +177,7 @@ impl KeyPrompt {
         };
         save_secret(&path, &provider, &self.buffer)
             .map(|()| {
+                invalidate_key(&provider);
                 self.saved = self.intent.take();
                 self.close();
             })

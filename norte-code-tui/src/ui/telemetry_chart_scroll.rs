@@ -6,23 +6,15 @@ use ratatui::layout::Rect;
 use terminalui::Theme;
 use terminalui::components::scroll::{Scroll, ScrollbarStyle, render_scrollbar};
 
+use crate::ui::scroll_drag::Scrollbar;
+
 /// The stacked chart viewport, its offset, and the last painted rail.
 #[derive(Debug, Default)]
 pub(super) struct ChartScroll {
     offset: u16,
     viewport: u16,
-    rail: Option<Rail>,
+    rail: Option<Scrollbar>,
     dragging: bool,
-}
-
-/// Where the scrollbar rail and thumb landed in the last painted frame.
-#[derive(Clone, Copy, Debug)]
-pub(in crate::ui) struct Rail {
-    pub(in crate::ui) x: u16,
-    pub(in crate::ui) y: u16,
-    pub(in crate::ui) height: u16,
-    pub(in crate::ui) top: u16,
-    pub(in crate::ui) size: u16,
 }
 
 impl ChartScroll {
@@ -58,13 +50,13 @@ impl ChartScroll {
         };
         render_scrollbar(buf, area, &style, theme, &scroll);
         let (top, size) = scroll.thumb();
-        self.rail = Some(Rail {
-            x: area.x + area.width.saturating_sub(1),
-            y: area.y,
-            height: area.height,
+        self.rail = Some(Scrollbar::new(
+            area.x + area.width.saturating_sub(1),
+            area.y,
+            area.height,
             top,
             size,
-        });
+        ));
     }
 
     /// Move by `delta` rows, clamped to the content.
@@ -80,17 +72,15 @@ impl ChartScroll {
         let Some(rail) = self.rail else {
             return false;
         };
-        let on_rail = mouse.column == rail.x
-            && mouse.row >= rail.y
-            && mouse.row < rail.y.saturating_add(rail.height);
+        let on_rail = rail.on_rail(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if on_rail => {
                 let local = mouse.row.saturating_sub(rail.y);
-                if (rail.top..rail.top.saturating_add(rail.size)).contains(&local) {
+                if rail.thumb_contains(local) {
                     self.dragging = true;
                 } else {
                     let page = isize::try_from(self.viewport).unwrap_or(isize::MAX);
-                    self.scroll(if local < rail.top { -page } else { page }, total);
+                    self.scroll(rail.page(local) * page, total);
                 }
                 true
             }
@@ -106,20 +96,13 @@ impl ChartScroll {
         }
     }
 
-    fn drag_to(&mut self, rail: Rail, local: u16, total: u16) {
-        let track = rail.height.saturating_sub(rail.size);
+    fn drag_to(&mut self, rail: Scrollbar, local: u16, total: u16) {
         let max = total.saturating_sub(self.viewport);
-        if track == 0 {
-            self.offset = 0;
-            return;
-        }
-        let top = u32::from(local.saturating_sub(rail.size / 2)).min(u32::from(track));
-        let offset = top * u32::from(max) / u32::from(track);
-        self.offset = u16::try_from(offset).unwrap_or(u16::MAX).min(max);
+        self.offset = rail.offset_for_drag(local, max);
     }
 
     #[cfg(test)]
-    pub(in crate::ui) fn rail(&self) -> Option<Rail> {
+    pub(in crate::ui) fn rail(&self) -> Option<Scrollbar> {
         self.rail
     }
 }

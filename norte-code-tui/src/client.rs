@@ -847,7 +847,7 @@ async fn stream_loop(
                 if attempt >= GIVE_UP_ATTEMPTS && !announced {
                     let _ = events
                         .send(ClientEvent::Detached {
-                            reason: "the stream keeps closing; retrying in the background — check the raep server".into(),
+                            reason: "the stream keeps closing; retrying in the background, check the raep server".into(),
                         })
                         .await;
                     announced = true;
@@ -859,7 +859,7 @@ async fn stream_loop(
                     let _ = events
                         .send(ClientEvent::Detached {
                             reason: format!(
-                                "lost the stream ({error}); retrying in the background — check the raep server"
+                                "lost the stream ({error}); retrying in the background, check the raep server"
                             ),
                         })
                         .await;

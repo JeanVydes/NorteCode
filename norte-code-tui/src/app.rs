@@ -1879,6 +1879,13 @@ fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
         header.turn = model.turn;
         header.theme_name = crate::theme::theme_name(&model.preferences.theme).to_string();
         header.tab = model.tab;
+        header.set_jobs(
+            model
+                .jobs
+                .iter()
+                .filter(|job| job.status.is_running())
+                .count(),
+        );
     }
     if let Some(rail) = tree.find_mut::<ui::Rail>("rail") {
         rail.attachment = model.attachment.clone();

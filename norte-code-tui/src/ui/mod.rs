@@ -10,8 +10,14 @@ mod detail_panel;
 #[path = "focus_tests.rs"]
 mod focus_tests;
 mod header;
+#[cfg(test)]
+#[path = "header_tests.rs"]
+mod header_tests;
 mod host_info;
 mod key_prompt;
+#[cfg(test)]
+#[path = "key_prompt_tests.rs"]
+mod key_prompt_tests;
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod layout_tests;
@@ -26,6 +32,7 @@ mod rail;
 #[cfg(test)]
 #[path = "rail_tests.rs"]
 mod rail_tests;
+mod scroll_drag;
 mod selector;
 mod session_detail;
 mod sessions_page;

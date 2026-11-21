@@ -271,6 +271,15 @@ pub(crate) enum Tab {
 }
 
 impl Tab {
+    /// Every tab, in display order.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Chat,
+        Self::Sessions,
+        Self::Models,
+        Self::Telemetry,
+        Self::Settings,
+    ];
+
     /// Whether this tab has two lists that Tab switches between.
     pub(crate) const fn is_list_tab(self) -> bool {
         matches!(self, Self::Telemetry | Self::Settings)

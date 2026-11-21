@@ -177,7 +177,7 @@ impl TelemetryPage {
     }
 
     #[cfg(test)]
-    pub(super) fn chart_rail(&self) -> Option<chart_scroll::Rail> {
+    pub(super) fn chart_rail(&self) -> Option<crate::ui::scroll_drag::Scrollbar> {
         self.chart_scroll.rail()
     }
 

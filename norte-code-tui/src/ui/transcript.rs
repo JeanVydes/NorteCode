@@ -16,6 +16,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
+use super::scroll_drag::Scrollbar;
 use crate::diff::LineKind;
 use serde::Serialize;
 
@@ -28,17 +29,6 @@ const BLOCK_GAP: u16 = 1;
 const NOTICE_PREFIX_CHARS: usize = 11;
 const MAX_ITEMS: usize = 1000;
 const KEEP_ITEMS: usize = 800;
-
-/// Where the scrollbar sits in the last rendered frame.
-#[derive(Clone, Copy, Debug)]
-struct ScrollbarGeometry {
-    /// Absolute column of the one-cell rail.
-    x: u16,
-    /// Thumb top, relative to the transcript's first row.
-    top: u16,
-    /// Thumb height in cells.
-    size: u16,
-}
 
 /// Execution state of a tool block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -233,7 +223,7 @@ pub(crate) struct Transcript {
     painted_user: Vec<bool>,
     /// The scrollbar drawn in the last frame, when the content overflows.
     #[serde(skip)]
-    scrollbar: Option<ScrollbarGeometry>,
+    scrollbar: Option<Scrollbar>,
     /// Whether the user is dragging the scrollbar thumb.
     #[serde(skip)]
     dragging_thumb: bool,
@@ -1009,11 +999,11 @@ impl Transcript {
             {
                 let bar = bar.expect("bar");
                 let local = mouse.row.saturating_sub(self.area.y);
-                if (bar.top..bar.top.saturating_add(bar.size)).contains(&local) {
+                if bar.thumb_contains(local) {
                     self.dragging_thumb = true;
                 } else {
                     let page = isize::try_from(self.view_height.max(1)).unwrap_or(isize::MAX);
-                    self.scroll(if local < bar.top { -page } else { page });
+                    self.scroll(bar.page(local) * page);
                 }
                 Outcome::Consumed
             }
@@ -1248,16 +1238,8 @@ impl Transcript {
         });
     }
 
-    fn drag_thumb(&mut self, bar: ScrollbarGeometry, local: u16) {
-        let track = self.area.height.saturating_sub(bar.size);
-        let top = local.saturating_sub(bar.size / 2).min(track);
-        let max = u32::from(self.max_offset());
-        let offset = if track == 0 {
-            0
-        } else {
-            u16::try_from(u32::from(top) * max / u32::from(track)).unwrap_or(u16::MAX)
-        };
-        self.first_visible = offset.min(self.max_offset());
+    fn drag_thumb(&mut self, bar: Scrollbar, local: u16) {
+        self.first_visible = bar.offset_for_drag(local, self.max_offset());
         self.follow_tail = self.first_visible >= self.max_offset();
     }
 
@@ -1384,11 +1366,13 @@ impl View for Transcript {
                 total: usize::from(self.content_height),
             };
             let (top, size) = scroll.thumb();
-            self.scrollbar = Some(ScrollbarGeometry {
-                x: area.x + area.width.saturating_sub(1),
+            self.scrollbar = Some(Scrollbar::new(
+                area.x + area.width.saturating_sub(1),
+                area.y,
+                area.height,
                 top,
                 size,
-            });
+            ));
             render_scrollbar(buf, area, &scroll_style, theme, &scroll);
         } else {
             self.scrollbar = None;

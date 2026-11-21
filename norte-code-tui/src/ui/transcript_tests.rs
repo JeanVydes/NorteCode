@@ -7,9 +7,8 @@ use norte_code_wire::{HistoryItem, HistorySpeaker};
 use ratatui::layout::Rect;
 use terminalui::Outcome;
 
-use super::{
-    Item, KEEP_ITEMS, MAX_ITEMS, NOTICE_PREFIX_CHARS, ScrollbarGeometry, Tone, Transcript,
-};
+use super::{Item, KEEP_ITEMS, MAX_ITEMS, NOTICE_PREFIX_CHARS, Tone, Transcript};
+use crate::ui::scroll_drag::Scrollbar;
 
 fn scrollable_transcript() -> Transcript {
     let mut transcript = Transcript::new();
@@ -23,11 +22,7 @@ fn scrollable_transcript() -> Transcript {
     transcript.view_height = 10;
     transcript.content_height = 100;
     transcript.first_visible = 0;
-    transcript.scrollbar = Some(ScrollbarGeometry {
-        x: 39,
-        top: 0,
-        size: 1,
-    });
+    transcript.scrollbar = Some(Scrollbar::new(39, 0, 10, 0, 1));
     transcript
 }
 
@@ -88,11 +83,7 @@ fn clicking_the_scrollbar_track_pages_the_stream() {
 #[test]
 fn dragging_the_scrollbar_thumb_moves_the_offset() {
     let mut transcript = scrollable_transcript();
-    transcript.scrollbar = Some(ScrollbarGeometry {
-        x: 39,
-        top: 0,
-        size: 2,
-    });
+    transcript.scrollbar = Some(Scrollbar::new(39, 0, 10, 0, 2));
     let _ = transcript.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 39, 0));
     assert!(transcript.dragging_thumb);
     let _ = transcript.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 39, 6));
