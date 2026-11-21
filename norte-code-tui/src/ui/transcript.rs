@@ -6,6 +6,7 @@
 //! is appended after the newest content.
 
 use std::any::Any;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEventKind};
@@ -24,6 +25,7 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BLOCK_GAP: u16 = 1;
+const NOTICE_PREFIX_CHARS: usize = 11;
 const MAX_ITEMS: usize = 1000;
 const KEEP_ITEMS: usize = 800;
 
@@ -253,6 +255,9 @@ pub(crate) struct Transcript {
     /// The palette the cached documents were rendered with.
     #[serde(skip)]
     doc_theme: Option<Theme>,
+    /// The one clipboard all copy paths write to.
+    #[serde(skip)]
+    clipboard: Arc<dyn crate::clipboard::Clipboard>,
 }
 
 /// What the message menu was asked to do.
@@ -328,7 +333,14 @@ impl Transcript {
             docs: Vec::new(),
             doc_theme: None,
             follow_tail: true,
+            clipboard: crate::clipboard::system(),
         }
+    }
+
+    /// Use a test clipboard instead of the platform one.
+    #[cfg(test)]
+    pub(crate) fn set_clipboard(&mut self, clipboard: Arc<dyn crate::clipboard::Clipboard>) {
+        self.clipboard = clipboard;
     }
 
     /// Set the diff layout; a change rebuilds the cached row heights.
@@ -617,7 +629,8 @@ impl Transcript {
                 u16::try_from(doc_lines.unwrap_or(1)).unwrap_or(u16::MAX) + BLOCK_GAP
             }
             Item::Notice { text, .. } | Item::Retry { text, .. } => {
-                u16::try_from(wrap(text, width).len()).unwrap_or(u16::MAX) + BLOCK_GAP
+                let text_width = width.saturating_sub(2 + NOTICE_PREFIX_CHARS).max(1);
+                u16::try_from(wrap(text, text_width).len()).unwrap_or(u16::MAX) + BLOCK_GAP
             }
             Item::Reasoning { text, expanded } => {
                 if *expanded {
@@ -1178,7 +1191,7 @@ impl Transcript {
         match self.selection_text(selection) {
             Some(text) => {
                 let chars = text.chars().count();
-                let _ = terminalui::osc52_write(&text);
+                let _ = self.clipboard.write(&text);
                 self.push(Item::Notice {
                     text: format!("copied {chars} chars to clipboard"),
                     tone: Tone::Neutral,
@@ -1780,7 +1793,7 @@ fn paint_notice(buf: &mut Buffer, area: Rect, text: &str, tone: Tone, clip: u16,
         Tone::Error => ("✗", theme.destructive),
     };
     let budget = usize::from(area.width.saturating_sub(2));
-    let prefix_len = format!("{glyph} notice · ").chars().count();
+    let prefix_len = NOTICE_PREFIX_CHARS;
     let text_budget = budget.saturating_sub(prefix_len).max(1);
     let lines = wrap(text, text_budget);
     for (row, line) in lines.iter().enumerate() {

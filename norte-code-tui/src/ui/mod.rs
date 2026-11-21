@@ -153,7 +153,10 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
                     ),
                 ),
                 middle,
-                node("composer", composer::Composer::new(&theme)),
+                node(
+                    "composer",
+                    composer::Composer::new(&theme, crate::clipboard::system()),
+                ),
                 node(
                     "status_pane",
                     Pane::new(vec![

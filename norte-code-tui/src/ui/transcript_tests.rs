@@ -1,10 +1,15 @@
 //! Retry notices: a failure streak renders as a single updating line.
 
+use std::sync::Arc;
+
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use norte_code_wire::{HistoryItem, HistorySpeaker};
 use ratatui::layout::Rect;
 use terminalui::Outcome;
 
-use super::{Item, KEEP_ITEMS, MAX_ITEMS, ScrollbarGeometry, Tone, Transcript};
+use super::{
+    Item, KEEP_ITEMS, MAX_ITEMS, NOTICE_PREFIX_CHARS, ScrollbarGeometry, Tone, Transcript,
+};
 
 fn scrollable_transcript() -> Transcript {
     let mut transcript = Transcript::new();
@@ -24,6 +29,42 @@ fn scrollable_transcript() -> Transcript {
         size: 1,
     });
     transcript
+}
+
+#[test]
+fn replayed_history_keeps_upload_markers_in_the_user_text() {
+    let mut transcript = Transcript::new();
+    transcript.replace_history(vec![HistoryItem {
+        id: "h1".to_owned(),
+        kind: "user".to_owned(),
+        content: "see [Image #1] and [File #1]".to_owned(),
+        created_at: 0,
+        turn_id: None,
+        role: HistorySpeaker::User,
+        provenance: None,
+    }]);
+    assert!(matches!(
+        transcript.items.as_slice(),
+        [Item::User { text, .. }] if text == "see [Image #1] and [File #1]"
+    ));
+}
+
+#[test]
+fn a_long_notice_height_matches_the_width_it_is_painted_at() {
+    let text = "unsupported media type `application/x-rare-format`, no chip created";
+    let width = 48usize;
+    let height = Transcript::item_height(
+        &Item::Notice {
+            text: text.to_string(),
+            tone: Tone::Warn,
+        },
+        width,
+        crate::diff::DiffMode::Unified,
+        None,
+    );
+    let text_width = width.saturating_sub(2 + NOTICE_PREFIX_CHARS).max(1);
+    let lines = super::wrap(text, text_width).len();
+    assert_eq!(usize::from(height), lines + 1);
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -382,6 +423,20 @@ fn selection_extracts_the_painted_cells() {
 }
 
 #[test]
+fn copying_a_transcript_selection_uses_the_shared_clipboard() {
+    let clipboard = Arc::new(crate::clipboard::FakeClipboard::default());
+    let mut transcript = Transcript::new();
+    transcript.set_clipboard(clipboard.clone());
+    transcript.painted = vec!["hello world".to_string()];
+    transcript.selection = Some(super::Selection {
+        anchor: super::Pos { row: 0, col: 0 },
+        cur: super::Pos { row: 0, col: 5 },
+    });
+    transcript.finish_selection();
+    assert_eq!(clipboard.written(), vec!["hello"]);
+}
+
+#[test]
 fn reversed_selection_extracts_from_the_visual_start() {
     let mut transcript = Transcript::new();
     transcript.painted = vec!["hello world".to_string()];
@@ -451,7 +506,7 @@ fn painted_flags_mark_notice_rows_as_not_copyable() {
     transcript.view_height = 6;
     let buffer = Buffer::empty(Rect::new(0, 0, 20, 6));
     transcript.capture_painted(Rect::new(0, 0, 20, 6), &buffer);
-    assert_eq!(transcript.heights, vec![2, 2]);
+    assert_eq!(transcript.heights, vec![2, 3]);
     assert_eq!(
         transcript.painted_copyable,
         vec![true, true, false, false, false, false]

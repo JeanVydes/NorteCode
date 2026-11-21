@@ -13,9 +13,10 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use norte_code_client::{AgentClient, EventStream, RemoteClient, RestClient};
 use norte_code_wire::UserInputPart;
-use norte_code_wire::{SessionKey, SessionSummary};
+use norte_code_wire::{SessionKey, SessionSummary, UploadReceipt};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
+use crate::attachment::{AttachmentSource, PreparedAttachment};
 use crate::config::ClientConfig;
 use crate::shared_telemetry::SharedTelemetry;
 
@@ -84,6 +85,18 @@ pub(crate) enum ClientEvent {
         /// The transport or server error.
         reason: String,
     },
+    /// The host stored the bytes; the composer can add its chip.
+    Uploaded {
+        /// The attachment the chip belongs to.
+        attachment: PreparedAttachment,
+        /// The host's receipt.
+        receipt: UploadReceipt,
+    },
+    /// The bytes never reached the host.
+    UploadFailed {
+        /// What went wrong, in words a person can act on.
+        reason: String,
+    },
 }
 
 /// Commands the interface sends to the connection task.
@@ -95,8 +108,17 @@ pub(crate) enum UiCommand {
         session: SessionKey,
         /// The text of the message.
         text: String,
+        /// Uploaded parts that travel with the message.
+        parts: Vec<UserInputPart>,
         /// `steer` or `queue`; forwarded to the host.
         queue_mode: String,
+    },
+    /// Store an attachment's bytes before it can be sent.
+    Upload {
+        /// The session that will own the bytes.
+        session: SessionKey,
+        /// The attachment to upload.
+        attachment: PreparedAttachment,
     },
     /// Refetch the session list.
     Refresh,
@@ -504,17 +526,83 @@ async fn connection(
     }
 }
 
+/// Largest attachment the client will read before asking the host to store it.
+const MAX_ATTACHMENT_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Send a user message on the session's stream.
-async fn send_prompt(api: &Arc<RestClient>, target: &SessionKey, text: String, queue_mode: String) {
-    let _ = api
-        .send_prompt(
-            target.as_str(),
-            Some(&text),
-            None::<Vec<UserInputPart>>,
-            None,
-            &queue_mode,
-        )
-        .await;
+async fn send_prompt(
+    api: &Arc<RestClient>,
+    events: &Sender<ClientEvent>,
+    target: &SessionKey,
+    text: String,
+    parts: Vec<UserInputPart>,
+    queue_mode: String,
+) {
+    let content = (!parts.is_empty()).then_some(parts);
+    if let Err(error) = api
+        .send_prompt(target.as_str(), Some(&text), content, None, &queue_mode)
+        .await
+    {
+        let _ = events
+            .send(ClientEvent::SendFailed {
+                reason: format!("message refused: {error}"),
+            })
+            .await;
+    }
+}
+
+/// Store one attachment and report the receipt the chip will carry.
+async fn upload_attachment(
+    api: &Arc<RestClient>,
+    events: &Sender<ClientEvent>,
+    target: &SessionKey,
+    attachment: PreparedAttachment,
+) {
+    let bytes = match &attachment.source {
+        AttachmentSource::Image(bytes) => bytes.clone(),
+        AttachmentSource::File(path) => match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = events
+                    .send(ClientEvent::UploadFailed {
+                        reason: format!("could not read {}: {error}", path.display()),
+                    })
+                    .await;
+                return;
+            }
+        },
+    };
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ATTACHMENT_BYTES {
+        let _ = events
+            .send(ClientEvent::UploadFailed {
+                reason: format!(
+                    "attachment has {} bytes, limit is {MAX_ATTACHMENT_BYTES}",
+                    bytes.len()
+                ),
+            })
+            .await;
+        return;
+    }
+    match api
+        .upload(target.as_str(), attachment.mime.as_str(), bytes)
+        .await
+    {
+        Ok(receipt) => {
+            let _ = events
+                .send(ClientEvent::Uploaded {
+                    attachment,
+                    receipt,
+                })
+                .await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::UploadFailed {
+                    reason: error.to_string(),
+                })
+                .await;
+        }
+    }
 }
 
 /// Answer the question the turn is parked on.
@@ -749,6 +837,105 @@ async fn stream_loop(
 }
 
 /// Pump events from the stream while dispatching commands.
+async fn apply_command(
+    command: UiCommand,
+    active: &SessionKey,
+    client: &Arc<RemoteClient>,
+    api: &Arc<RestClient>,
+    events: &Sender<ClientEvent>,
+) -> Option<StreamOutcome> {
+    match command {
+        UiCommand::OpenSession { session } => return Some(StreamOutcome::Switch(session)),
+        UiCommand::Plugin(op) => {
+            spawn_host_op(BackgroundOp::Plugin(op), Arc::clone(api), events.clone());
+        }
+        UiCommand::RenameSession { session, title } => {
+            spawn_host_op(
+                BackgroundOp::Rename { session, title },
+                Arc::clone(api),
+                events.clone(),
+            );
+        }
+        UiCommand::DeleteSession { session } => {
+            spawn_host_op(
+                BackgroundOp::Delete { session },
+                Arc::clone(api),
+                events.clone(),
+            );
+        }
+        UiCommand::CancelTurn { session, turn_id } => {
+            cancel_turn(api, events, &session, turn_id).await;
+        }
+        UiCommand::Compact { session } => {
+            compact_session(api, &session, events).await;
+        }
+        UiCommand::Fork { session, turn } => {
+            fork_session(client, api, &session, turn, events).await;
+        }
+        UiCommand::Rewind { session, turn } => {
+            rewind_session(api, &session, turn, events).await;
+        }
+        UiCommand::Send {
+            session,
+            text,
+            parts,
+            queue_mode,
+        } => {
+            send_prompt(api, events, &session, text, parts, queue_mode).await;
+        }
+        UiCommand::Upload {
+            session,
+            attachment,
+        } => {
+            upload_attachment(api, events, &session, attachment).await;
+        }
+        UiCommand::Refresh => {
+            if let Ok(sessions) = client.list_sessions().await {
+                let _ = events.send(ClientEvent::Sessions(sessions)).await;
+            }
+        }
+        UiCommand::AnswerQuestion {
+            session,
+            question,
+            answer,
+        } => {
+            answer_question(api, events, &session, question, answer).await;
+        }
+        UiCommand::RefreshViews => {
+            Box::pin(fetch_views(api, active.as_str(), events)).await;
+        }
+        UiCommand::SetModel {
+            session,
+            provider,
+            model,
+        } => {
+            let _ = api
+                .set_session_model(session.as_str(), &provider, &model)
+                .await;
+            if let Ok(models) = api.models().await {
+                let _ = events.send(ClientEvent::Models(models)).await;
+            }
+            if let Ok(sessions) = client.list_sessions().await {
+                let _ = events.send(ClientEvent::Sessions(sessions)).await;
+            }
+        }
+        UiCommand::SetReasoning { session, effort } => {
+            let reasoning = match effort.as_str() {
+                "low" | "medium" | "high" => norte_code_wire::Reasoning::Effort { effort },
+                _ => norte_code_wire::Reasoning::Automatic,
+            };
+            let _ = api
+                .set_reasoning(
+                    session.as_str(),
+                    norte_code_wire::ReasoningScope::Session,
+                    reasoning,
+                )
+                .await;
+        }
+    }
+    None
+}
+
 async fn drive_stream(
     stream: &mut EventStream,
     commands: &mut Receiver<UiCommand>,
@@ -760,88 +947,8 @@ async fn drive_stream(
     loop {
         tokio::select! {
             Some(command) = commands.recv() => {
-                match command {
-                    UiCommand::OpenSession { session: summary } => {
-                        return StreamOutcome::Switch(summary);
-                    }
-                    UiCommand::Plugin(op) => {
-                        spawn_host_op(BackgroundOp::Plugin(op), Arc::clone(api), events.clone());
-                    }
-                    UiCommand::RenameSession { session, title } => {
-                        spawn_host_op(
-                            BackgroundOp::Rename { session, title },
-                            Arc::clone(api),
-                            events.clone(),
-                        );
-                    }
-                    UiCommand::DeleteSession { session } => {
-                        spawn_host_op(
-                            BackgroundOp::Delete { session },
-                            Arc::clone(api),
-                            events.clone(),
-                        );
-                    }
-                    UiCommand::CancelTurn { session, turn_id } => {
-                        cancel_turn(api, events, &session, turn_id).await;
-                    }
-                    UiCommand::Compact { session: target } => {
-                        compact_session(api, &target, events).await;
-                    }
-                    UiCommand::Fork { session: target, turn } => {
-                        fork_session(client, api, &target, turn, events).await;
-                    }
-                    UiCommand::Rewind { session: target, turn } => {
-                        rewind_session(api, &target, turn, events).await;
-                    }
-                    UiCommand::Send { session: target, text, queue_mode } => {
-                        send_prompt(api, &target, text, queue_mode).await;
-                    }
-                    UiCommand::Refresh => {
-                        if let Ok(sessions) = client.list_sessions().await {
-                            let _ = events.send(ClientEvent::Sessions(sessions)).await;
-                        }
-                    }
-                    UiCommand::AnswerQuestion {
-                        session: target,
-                        question,
-                        answer,
-                    } => {
-                        answer_question(api, events, &target, question, answer).await;
-                    }
-                    UiCommand::RefreshViews => {
-                        Box::pin(fetch_views(api, session.as_str(), events)).await;
-                    }
-                    UiCommand::SetModel {
-                        session: target,
-                        provider,
-                        model,
-                    } => {
-                        let _ = api.set_session_model(target.as_str(), &provider, &model).await;
-                        if let Ok(models) = api.models().await {
-                            let _ = events.send(ClientEvent::Models(models)).await;
-                        }
-                        if let Ok(sessions) = client.list_sessions().await {
-                            let _ = events.send(ClientEvent::Sessions(sessions)).await;
-                        }
-                    }
-                    UiCommand::SetReasoning {
-                        session: target,
-                        effort,
-                    } => {
-                        let reasoning = match effort.as_str() {
-                            "low" | "medium" | "high" => norte_code_wire::Reasoning::Effort {
-                                effort: effort.clone(),
-                            },
-                            _ => norte_code_wire::Reasoning::Automatic,
-                        };
-                        let _ = api
-                            .set_reasoning(
-                                target.as_str(),
-                                norte_code_wire::ReasoningScope::Session,
-                                reasoning,
-                            )
-                            .await;
-                    }
+                if let Some(outcome) = apply_command(command, session, client, api, events).await {
+                    return outcome;
                 }
             }
             frame = stream.next() => {
@@ -855,3 +962,7 @@ async fn drive_stream(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod tests;
