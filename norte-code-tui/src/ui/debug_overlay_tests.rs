@@ -66,6 +66,7 @@ fn the_overlay_shows_frame_timings_and_memory_when_enabled() {
     assert!(text.contains("performance"), "{text}");
     assert!(!text.contains('X'), "{text}");
     assert!(text.contains("draw 12.5"), "{text}");
+    assert!(text.contains("cap 60"), "{text}");
     assert!(text.contains("90 drawn"), "{text}");
     assert!(text.contains("rss"), "{text}");
     assert!(text.contains("64.0 MiB (+4.0)"), "{text}");

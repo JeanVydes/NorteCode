@@ -11,6 +11,7 @@ mod compact_notice;
 mod config;
 mod context;
 mod diff;
+mod frame_limiter;
 mod job_notice;
 mod metrics;
 mod palette;
