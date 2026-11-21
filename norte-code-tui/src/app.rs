@@ -528,8 +528,11 @@ fn handle_key(
             let prompt_open = tree
                 .find::<ui::KeyPrompt>("key_prompt")
                 .is_some_and(ui::KeyPrompt::is_open);
-            if question_open {
-                // Enter goes to the ask-user overlay.
+            let plan_open = tree
+                .find::<ui::PlanOverlay>("plan_overlay")
+                .is_some_and(ui::PlanOverlay::is_open);
+            if question_open || plan_open {
+                // Enter goes to the open overlay.
             } else if prompt_open {
                 // Enter belongs to the prompt (save).
             } else if model.tab == Tab::Chat {
@@ -573,6 +576,7 @@ fn settle_input(
     model: &mut UiModel,
 ) {
     drain_compact(tree, commands, model);
+    drain_plan_review(tree, commands, model);
     drain_question_answer(tree, commands, model);
     drain_models_actions(tree, commands, model);
     drain_sessions_actions(tree, commands, model);
@@ -585,6 +589,88 @@ fn settle_input(
     }
     sync_selectors(tree, commands, model);
     drain_tab_request(tree, model);
+    ui::sync_views(tree, model);
+}
+
+/// Finish a tool row and refetch the rail as soon as a plan changes.
+fn fold_tool_finished(
+    call_id: &str,
+    tool: &str,
+    is_error: bool,
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+) {
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.finish_tool(call_id);
+    }
+    if tool == "plan"
+        && !is_error
+        && let Some(commands) = commands.as_ref()
+    {
+        let _ = commands.try_send(UiCommand::RefreshRail);
+    }
+}
+
+/// Park the turn on a question, opening the richer review for plans.
+fn fold_question_event(
+    question: &str,
+    prompt: &str,
+    options: &[String],
+    multiple: bool,
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+) {
+    model.turn = TurnState::AwaitingAnswer;
+    model.question = Some(crate::ui_model::PendingQuestion {
+        question: question.to_owned(),
+        prompt: prompt.to_owned(),
+        options: options.to_vec(),
+        multiple,
+    });
+    if let Some(content) = prompt.strip_prefix(ui::PLAN_REVIEW_PREFIX)
+        && let Some(overlay) = tree.find_mut::<ui::PlanOverlay>("plan_overlay")
+    {
+        overlay.begin_review(question.to_owned(), content.to_owned());
+    }
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.stop_thinking();
+        let text = if prompt.starts_with(ui::PLAN_REVIEW_PREFIX) {
+            "the model asks · plan review".to_owned()
+        } else {
+            format!("the model asks · {prompt}")
+        };
+        stream.push(ui::Item::Notice {
+            text,
+            tone: ui::Tone::Warn,
+        });
+    }
+}
+
+/// Ship the plan decision the review overlay just committed, if any.
+fn drain_plan_review(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) {
+    let Some((question, action)) = tree
+        .find_mut::<ui::PlanOverlay>("plan_overlay")
+        .and_then(ui::PlanOverlay::take_action)
+    else {
+        return;
+    };
+    if let (Some(commands), Some(session)) = (commands.as_ref(), model.active.clone()) {
+        let answer = match &action {
+            ui::PlanReviewAction::Accept => "Approve".to_owned(),
+            ui::PlanReviewAction::Decline => "Reject".to_owned(),
+            ui::PlanReviewAction::Feedback(text) => text.clone(),
+        };
+        let _ = commands.try_send(UiCommand::AnswerQuestion {
+            session,
+            question,
+            answer,
+        });
+    }
+    model.question = None;
     ui::sync_views(tree, model);
 }
 
@@ -1426,11 +1512,12 @@ fn fold(
                 stream.append_console_line(call_id, text.clone());
             }
         }
-        ServerEventKind::ToolFinished { call_id, .. } => {
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.finish_tool(call_id);
-            }
-        }
+        ServerEventKind::ToolFinished {
+            call_id,
+            tool,
+            is_error,
+            ..
+        } => fold_tool_finished(call_id, tool, *is_error, tree, commands),
         ServerEventKind::Delta { delta, .. } => fold_delta(delta, tree, model),
         ServerEventKind::PluginProgress {
             operation,
@@ -1624,20 +1711,7 @@ fn fold_error_event(
             multiple,
             ..
         } => {
-            model.turn = TurnState::AwaitingAnswer;
-            model.question = Some(crate::ui_model::PendingQuestion {
-                question: question.clone(),
-                prompt: prompt.clone(),
-                options: options.clone(),
-                multiple: *multiple,
-            });
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.stop_thinking();
-                stream.push(ui::Item::Notice {
-                    text: format!("the model asks · {prompt}"),
-                    tone: ui::Tone::Warn,
-                });
-            }
+            fold_question_event(question, prompt, options, *multiple, tree, model);
             true
         }
         ServerEventKind::ModelQueued {

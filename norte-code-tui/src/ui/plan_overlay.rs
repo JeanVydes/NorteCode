@@ -1,16 +1,30 @@
-//! A closable overlay for reading a plan with numbered Markdown lines.
+//! The plan review overlay: a document viewer with review controls.
 
 use std::any::Any;
 
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Position, Rect};
 use serde::Serialize;
-use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius, draw_box};
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
-use unicode_width::UnicodeWidthStr;
 
 use super::markdown::{Markdown, open_link};
+
+#[path = "plan_overlay_action.rs"]
+mod action;
+#[path = "plan_overlay_document.rs"]
+mod document;
+#[path = "plan_overlay_render.rs"]
+mod render;
+
+pub(crate) use action::{PLAN_REVIEW_PREFIX, PlanReviewAction};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Mode {
+    #[default]
+    Respond,
+    Feedback,
+}
 
 /// The plan currently shown, if any.
 #[derive(Serialize, Default)]
@@ -27,17 +41,51 @@ pub(crate) struct PlanOverlay {
     scroll: u16,
     #[serde(skip)]
     area: Rect,
+    #[serde(skip)]
+    body: Rect,
+    #[serde(skip)]
+    question: Option<String>,
+    #[serde(skip)]
+    mode: Mode,
+    #[serde(skip)]
+    response: String,
+    #[serde(skip)]
+    pending_action: Option<PlanReviewAction>,
+    #[serde(skip)]
+    buttons: Vec<(Rect, usize)>,
 }
 
 impl PlanOverlay {
-    /// Show a plan from the beginning.
+    /// Show a plan from the beginning, as a read-only preview.
     pub(crate) fn open(&mut self, plan: norte_code_wire::PlanSummary) {
         self.plan = Some(plan);
+        self.reset_interaction();
+    }
+
+    /// Open the review asked for while the plan was created.
+    pub(crate) fn begin_review(&mut self, question: String, content: String) {
+        self.plan = Some(norte_code_wire::PlanSummary {
+            id: question.clone(),
+            title: Some("plan review".to_owned()),
+            content,
+            ..Default::default()
+        });
+        self.reset_interaction();
+        self.question = Some(question);
+    }
+
+    fn reset_interaction(&mut self) {
         self.doc = Markdown::default();
         self.doc_theme = None;
         self.width = 0;
         self.scroll = 0;
         self.area = Rect::new(0, 0, 0, 0);
+        self.body = Rect::new(0, 0, 0, 0);
+        self.question = None;
+        self.mode = Mode::Respond;
+        self.response.clear();
+        self.pending_action = None;
+        self.buttons.clear();
     }
 
     /// Whether a plan is showing.
@@ -51,16 +99,156 @@ impl PlanOverlay {
         self.plan.as_ref()
     }
 
+    /// Take the review answer and close the overlay.
+    pub(crate) fn take_action(&mut self) -> Option<(String, PlanReviewAction)> {
+        let action = self.pending_action.take()?;
+        let question = self.question.clone()?;
+        self.close();
+        Some((question, action))
+    }
+
     /// Close the overlay.
     pub(crate) fn close(&mut self) {
         self.plan = None;
         self.doc = Markdown::default();
         self.doc_theme = None;
         self.scroll = 0;
+        self.body = Rect::new(0, 0, 0, 0);
+        self.question = None;
+        self.mode = Mode::Respond;
+        self.response.clear();
+        self.pending_action = None;
+        self.buttons.clear();
     }
 
-    fn body_width(inner: Rect) -> u16 {
-        inner.width.saturating_sub(7)
+    fn answer(&mut self, action: PlanReviewAction) {
+        self.pending_action = Some(action);
+        self.mode = Mode::Respond;
+        self.response.clear();
+    }
+
+    fn submit_feedback(&mut self) {
+        if self.response.trim().is_empty() {
+            return;
+        }
+        let feedback = self.response.trim().to_owned();
+        self.answer(PlanReviewAction::Feedback(feedback));
+    }
+
+    fn button_at(&self, column: u16, row: u16) -> Option<usize> {
+        self.buttons
+            .iter()
+            .find(|(rect, _)| rect.y == row && column >= rect.x && column < rect.x + rect.width)
+            .map(|(_, index)| *index)
+    }
+
+    fn scroll_document(&mut self, rows: i16) {
+        let next = i32::from(self.scroll) + i32::from(rows);
+        self.scroll = u16::try_from(next.max(0)).unwrap_or(u16::MAX);
+    }
+
+    fn scroll_to(&mut self, top: bool, lines: usize) {
+        let max = lines.saturating_sub(usize::from(self.body.height));
+        let target = if top { 0 } else { max };
+        self.scroll = u16::try_from(target).unwrap_or(u16::MAX);
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> Outcome {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_document(-3);
+                Outcome::Consumed
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_document(3);
+                Outcome::Consumed
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.mode == Mode::Respond => {
+                self.handle_click(mouse)
+            }
+            _ => Outcome::Ignored,
+        }
+    }
+
+    fn handle_click(&mut self, mouse: MouseEvent) -> Outcome {
+        if let Some(index) = self.button_at(mouse.column, mouse.row)
+            && self.question.is_some()
+        {
+            match index {
+                0 => self.answer(PlanReviewAction::Accept),
+                1 => self.answer(PlanReviewAction::Decline),
+                _ => self.mode = Mode::Feedback,
+            }
+            return Outcome::Consumed;
+        }
+        let row = usize::from(mouse.row.saturating_sub(self.body.y));
+        let column = usize::from(mouse.column.saturating_sub(self.body.x + 6));
+        let doc_row = row.saturating_add(usize::from(self.scroll));
+        if let Some(url) = self.doc.link_at(doc_row, column) {
+            open_link(url);
+            Outcome::Consumed
+        } else {
+            Outcome::Ignored
+        }
+    }
+
+    fn handle_key(&mut self, key: &KeyEvent) -> Outcome {
+        if self.mode == Mode::Feedback {
+            self.handle_feedback_key(key)
+        } else {
+            self.handle_review_key(key)
+        }
+    }
+
+    fn handle_feedback_key(&mut self, key: &KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Respond,
+            KeyCode::Backspace => {
+                self.response.pop();
+            }
+            KeyCode::Enter => self.submit_feedback(),
+            KeyCode::Char(character) => self.response.push(character),
+            _ => return Outcome::Ignored,
+        }
+        Outcome::Consumed
+    }
+
+    fn handle_review_key(&mut self, key: &KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Esc => {
+                self.close();
+                Outcome::Consumed
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll_document(-1);
+                Outcome::Consumed
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll_document(1);
+                Outcome::Consumed
+            }
+            KeyCode::PageUp | KeyCode::Char('g') => {
+                self.scroll_to(true, self.doc.lines.len());
+                Outcome::Consumed
+            }
+            KeyCode::PageDown | KeyCode::Char('G') => {
+                self.scroll_to(false, self.doc.lines.len());
+                Outcome::Consumed
+            }
+            KeyCode::Char('a') | KeyCode::Enter if self.question.is_some() => {
+                self.answer(PlanReviewAction::Accept);
+                Outcome::Consumed
+            }
+            KeyCode::Char('d') if self.question.is_some() => {
+                self.answer(PlanReviewAction::Decline);
+                Outcome::Consumed
+            }
+            KeyCode::Char('f') if self.question.is_some() => {
+                self.mode = Mode::Feedback;
+                Outcome::Consumed
+            }
+            _ => Outcome::Ignored,
+        }
     }
 }
 
@@ -79,123 +267,24 @@ impl View for PlanOverlay {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _cx: &mut Context, theme: &Theme) {
-        let Some(plan) = &self.plan else {
-            return;
-        };
-        self.area = area;
-        buf.set_style(area, Style::default().bg(theme.background));
-        let box_rect = Rect {
-            x: area.x + 2,
-            y: area.y + 1,
-            width: area.width.saturating_sub(4),
-            height: area.height.saturating_sub(2),
-        };
-        let chrome = Chrome {
-            border: Some(Border {
-                set: BorderSet::Rounded,
-                color: Some(theme.border),
-                radius: Radius::Small,
-            }),
-            background: None,
-            radius: Radius::Small,
-            padding: Padding {
-                horizontal: 0,
-                vertical: 0,
-            },
-            border_gradient: None,
-            fill_gradient: None,
-        };
-        let inner = draw_box(buf, box_rect, &chrome, theme);
-        let title = plan.title.clone().unwrap_or_else(|| plan.id.clone());
-        buf.set_stringn(
-            inner.x + 1,
-            inner.y,
-            format!("{title} · Esc closes"),
-            usize::from(inner.width.saturating_sub(2)),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-
-        let width = Self::body_width(inner);
-        if self.width != width || self.doc_theme != Some(*theme) {
-            self.width = width;
-            self.doc_theme = Some(*theme);
-            self.doc = Markdown::render(&plan.content, width, theme);
-        }
-        let max_scroll = self
-            .doc
-            .lines
-            .len()
-            .saturating_sub(usize::from(inner.height.saturating_sub(2)));
-        self.scroll = self
-            .scroll
-            .min(u16::try_from(max_scroll).unwrap_or(u16::MAX));
-
-        for row in 0..inner.height.saturating_sub(2) {
-            let index = usize::from(row.saturating_add(self.scroll));
-            let Some(line) = self.doc.lines.get(index) else {
-                break;
-            };
-            let y = inner.y + 2 + row;
-            let number = format!("{:>4}", index + 1);
-            buf.set_stringn(
-                inner.x + 1,
-                y,
-                number,
-                5,
-                Style::default().fg(theme.muted).bg(theme.background),
-            );
-            let mut column = 6u16;
-            for span in &line.spans {
-                buf.set_stringn(
-                    inner.x + 1 + column,
-                    y,
-                    span.content.as_ref(),
-                    usize::from(inner.width.saturating_sub(column + 1)),
-                    span.style,
-                );
-                column =
-                    column.saturating_add(u16::try_from(span.content.width()).unwrap_or(u16::MAX));
-            }
-        }
+        self.paint(area, buf, theme);
     }
 
-    fn handle_event(&mut self, event: &InputEvent, cx: &mut Context) -> Outcome {
-        let focused = cx.is_focused();
+    fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
+        if !self.is_open() {
+            return Outcome::Ignored;
+        }
         match event {
-            InputEvent::Key(key) if focused => match key.code {
-                crossterm::event::KeyCode::Esc => {
-                    self.close();
-                    Outcome::Consumed
-                }
-                crossterm::event::KeyCode::Up => {
-                    self.scroll = self.scroll.saturating_sub(1);
-                    Outcome::Consumed
-                }
-                crossterm::event::KeyCode::Down => {
-                    self.scroll = self.scroll.saturating_add(1);
-                    Outcome::Consumed
-                }
-                _ => Outcome::Ignored,
-            },
-            InputEvent::Mouse(mouse)
-                if mouse.kind
-                    == crossterm::event::MouseEventKind::Down(
-                        crossterm::event::MouseButton::Left,
-                    ) =>
-            {
-                let row = usize::from(mouse.row.saturating_sub(self.area.y).saturating_sub(4));
-                let column =
-                    usize::from(mouse.column.saturating_sub(self.area.x).saturating_sub(10));
-                let doc_row = row.saturating_add(usize::from(self.scroll));
-                if let Some(url) = self.doc.link_at(doc_row, column) {
-                    open_link(url);
-                    Outcome::Consumed
-                } else {
-                    Outcome::Ignored
-                }
+            InputEvent::Paste(text) if self.mode == Mode::Feedback => {
+                self.response.push_str(text);
+                Outcome::Consumed
             }
+            InputEvent::Mouse(mouse)
+                if self.area.contains(Position::new(mouse.column, mouse.row)) =>
+            {
+                self.handle_mouse(*mouse)
+            }
+            InputEvent::Key(key) => self.handle_key(key),
             _ => Outcome::Ignored,
         }
     }

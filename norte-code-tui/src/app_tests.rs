@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use norte_code_wire::{SessionKey, UploadReceipt};
+use norte_code_wire::{ServerEventKind, SessionKey, UploadReceipt};
 use terminalui::{InputEvent, Theme, Tree, node};
 use tokio::sync::mpsc;
 
@@ -340,4 +340,198 @@ fn each_preview_button_opens_its_own_plan() {
         .find::<ui::PlanOverlay>("plan_overlay")
         .expect("plan overlay");
     assert_eq!(overlay.plan().map(|plan| plan.id.as_str()), Some("plan_3"));
+}
+
+fn tool_finished(tool: &str, is_error: bool) -> norte_code_wire::ServerEvent {
+    norte_code_wire::ServerEvent {
+        request_id: 1,
+        session: Some(SessionKey::new("session_1")),
+        kind: ServerEventKind::ToolFinished {
+            turn: 1,
+            call_id: "call_1".to_owned(),
+            tool: tool.to_owned(),
+            is_error,
+            error: None,
+            output: None,
+            truncated: false,
+            detached: false,
+            duration_ms: 1,
+        },
+    }
+}
+
+fn plan_review_asked() -> norte_code_wire::ServerEvent {
+    norte_code_wire::ServerEvent {
+        request_id: 1,
+        session: Some(SessionKey::new("session_1")),
+        kind: ServerEventKind::QuestionAsked {
+            turn: 1,
+            question: "q_1".to_owned(),
+            prompt: format!("{}# Plan\n\nDo the work", ui::PLAN_REVIEW_PREFIX),
+            options: vec!["Approve".to_owned(), "Reject".to_owned()],
+            multiple: false,
+        },
+    }
+}
+
+#[test]
+fn escape_closing_the_plan_preview_does_not_cancel_the_turn() {
+    let mut model = model_with_active_turn();
+    for index in 0..4 {
+        model.plans.push(plan(&format!("plan_{index}")));
+    }
+    let mut tree = rendered_tree(&model, 24);
+    press_button(&mut tree, "preview_3");
+    drain_plan_requests(&mut tree, &model);
+    ui::sync_views(&mut tree, &model);
+    assert!(
+        tree.find::<ui::PlanOverlay>("plan_overlay")
+            .expect("plan overlay")
+            .is_open()
+    );
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+
+    assert!(!handle_key(
+        &mut tree,
+        escape(),
+        &mut commands,
+        &mut None,
+        &mut model,
+        None
+    ));
+    let queued = commands_rx.try_recv();
+    assert!(queued.is_err(), "queued command: {queued:?}");
+    assert_eq!(model.turn, TurnState::Thinking);
+    assert!(model.active_turn.is_some());
+    assert!(
+        !tree
+            .find::<ui::PlanOverlay>("plan_overlay")
+            .expect("plan overlay")
+            .is_open()
+    );
+}
+
+#[test]
+fn a_finished_plan_tool_refreshes_the_rail_immediately() {
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = UiModel::detached();
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+
+    fold(
+        &tool_finished("plan", false),
+        &mut tree,
+        &mut model,
+        &mut commands,
+    );
+
+    assert!(matches!(commands_rx.try_recv(), Ok(UiCommand::RefreshRail)));
+}
+
+#[test]
+fn a_failed_plan_tool_does_not_refresh_the_rail() {
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = UiModel::detached();
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+
+    fold(
+        &tool_finished("plan", true),
+        &mut tree,
+        &mut model,
+        &mut commands,
+    );
+
+    assert!(commands_rx.try_recv().is_err());
+}
+
+#[test]
+fn an_unrelated_finished_tool_does_not_refresh_the_rail() {
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = UiModel::detached();
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+
+    fold(
+        &tool_finished("shell", false),
+        &mut tree,
+        &mut model,
+        &mut commands,
+    );
+
+    assert!(commands_rx.try_recv().is_err());
+}
+
+#[test]
+fn accepting_a_plan_review_answers_the_pending_question() {
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = model_with_active_turn();
+    fold(&plan_review_asked(), &mut tree, &mut model, &mut None);
+    ui::sync_views(&mut tree, &model);
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        &mut commands,
+        &mut None,
+        &mut model,
+        None,
+    );
+
+    match commands_rx.try_recv() {
+        Ok(UiCommand::AnswerQuestion {
+            question, answer, ..
+        }) => {
+            assert_eq!(question, "q_1");
+            assert_eq!(answer, "Approve");
+        }
+        other => panic!("queued command: {other:?}"),
+    }
+    assert!(model.question.is_none());
+    assert!(
+        !tree
+            .find::<ui::PlanOverlay>("plan_overlay")
+            .expect("plan overlay")
+            .is_open()
+    );
+}
+
+#[test]
+fn feedback_on_a_plan_review_sends_the_written_text() {
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = model_with_active_turn();
+    fold(&plan_review_asked(), &mut tree, &mut model, &mut None);
+    ui::sync_views(&mut tree, &model);
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+
+    for key in [
+        KeyCode::Char('f'),
+        KeyCode::Char('n'),
+        KeyCode::Char('o'),
+        KeyCode::Enter,
+    ] {
+        handle_key(
+            &mut tree,
+            KeyEvent::new(key, KeyModifiers::NONE),
+            &mut commands,
+            &mut None,
+            &mut model,
+            None,
+        );
+    }
+
+    match commands_rx.try_recv() {
+        Ok(UiCommand::AnswerQuestion {
+            question, answer, ..
+        }) => {
+            assert_eq!(question, "q_1");
+            assert_eq!(answer, "no");
+        }
+        other => panic!("queued command: {other:?}"),
+    }
+    assert!(model.question.is_none());
 }
