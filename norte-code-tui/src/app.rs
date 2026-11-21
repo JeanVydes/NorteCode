@@ -413,19 +413,6 @@ fn drain_composer_actions(
     }
 }
 
-fn ctrl_c(
-    tree: &mut terminalui::Tree,
-    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
-    model: &mut UiModel,
-) -> bool {
-    // Cancel the server turn on the way out, but always leave the TUI: raw
-    // mode turns Ctrl+C into a key event, so waiting for SIGINT strands it.
-    if model.turn != TurnState::Idle {
-        let _ = cancel_active_turn(tree, commands, model);
-    }
-    true
-}
-
 fn cycle_theme(tree: &mut terminalui::Tree, model: &mut UiModel) {
     let choice = model.preferences.theme.clone();
     model.preferences.theme = model.preferences.catalog.next(&choice);
@@ -488,7 +475,7 @@ fn handle_key(
                 .find_mut::<ui::Composer>("composer")
                 .is_some_and(ui::Composer::copy_selection);
             if !copied {
-                return ctrl_c(tree, commands, model);
+                return true;
             }
             pass_to_tree = false;
         }
@@ -568,9 +555,13 @@ fn handle_key(
         }
         _ => {}
     }
+    let cancel_on_escape = key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE;
     if pass_to_tree {
         let input = terminalui::InputEvent::from(Event::Key(key));
-        let _ = tree.handle_event(&input);
+        let outcome = tree.handle_event(&input);
+        if cancel_on_escape && outcome.is_ignored() && model.turn != TurnState::Idle {
+            let _ = cancel_active_turn(tree, commands, model);
+        }
     }
     drain_compact(tree, commands, model);
     drain_question_answer(tree, commands, model);

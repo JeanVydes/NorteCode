@@ -3,15 +3,17 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use norte_code_wire::UploadReceipt;
+use norte_code_wire::{SessionKey, UploadReceipt};
 use terminalui::{InputEvent, Theme, Tree, node};
+use tokio::sync::mpsc;
 
 use super::{fold_upload_event, handle_key};
 use crate::attachment::{AttachmentKind, AttachmentSource, PreparedAttachment};
-use crate::client::ClientEvent;
+use crate::client::{ClientEvent, UiCommand};
 use crate::clipboard::{Clipboard, FakeClipboard};
+use crate::ui;
 use crate::ui::Composer;
-use crate::ui_model::UiModel;
+use crate::ui_model::{ActiveTurn, TurnState, UiModel};
 
 fn composer_tree(clipboard: Arc<dyn Clipboard>) -> Tree {
     let mut tree = Tree::new(node(
@@ -24,6 +26,20 @@ fn composer_tree(clipboard: Arc<dyn Clipboard>) -> Tree {
 
 fn ctrl_c() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+}
+
+fn escape() -> KeyEvent {
+    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+}
+
+fn model_with_active_turn() -> UiModel {
+    let mut model = UiModel::detached();
+    model.turn = TurnState::Thinking;
+    model.active_turn = Some(ActiveTurn {
+        id: "turn_1".to_owned(),
+    });
+    model.active = Some(SessionKey::new("session_1"));
+    model
 }
 
 fn receipt() -> UploadReceipt {
@@ -83,6 +99,78 @@ fn ctrl_c_without_a_selection_quits() {
         &mut model,
         None
     ));
+}
+
+#[test]
+fn escape_cancels_the_active_turn_and_keeps_the_tui_open() {
+    let mut tree = composer_tree(Arc::new(FakeClipboard::default()));
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+    let mut model = model_with_active_turn();
+
+    assert!(!handle_key(
+        &mut tree,
+        escape(),
+        &mut commands,
+        &mut None,
+        &mut model,
+        None
+    ));
+    assert_eq!(model.turn, TurnState::Idle);
+    assert!(model.active_turn.is_none());
+    assert!(
+        matches!(commands_rx.try_recv(), Ok(UiCommand::CancelTurn { turn_id, .. }) if turn_id == "turn_1")
+    );
+}
+
+#[test]
+fn escape_closing_an_overlay_does_not_cancel_the_turn() {
+    let mut model = model_with_active_turn();
+    let mut tree = ui::build_tree(&model);
+    tree.find_mut::<ui::KeyPrompt>("key_prompt")
+        .expect("key prompt")
+        .open("provider", Vec::new());
+    ui::sync_views(&mut tree, &model);
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+
+    assert!(!handle_key(
+        &mut tree,
+        escape(),
+        &mut commands,
+        &mut None,
+        &mut model,
+        None
+    ));
+    assert!(commands_rx.try_recv().is_err());
+    assert_eq!(model.turn, TurnState::Thinking);
+    assert!(model.active_turn.is_some());
+    assert!(
+        !tree
+            .find::<ui::KeyPrompt>("key_prompt")
+            .expect("key prompt")
+            .is_open()
+    );
+}
+
+#[test]
+fn ctrl_c_quits_without_cancelling_the_turn() {
+    let mut tree = composer_tree(Arc::new(FakeClipboard::default()));
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+    let mut model = model_with_active_turn();
+
+    assert!(handle_key(
+        &mut tree,
+        ctrl_c(),
+        &mut commands,
+        &mut None,
+        &mut model,
+        None
+    ));
+    assert!(commands_rx.try_recv().is_err());
+    assert_eq!(model.turn, TurnState::Thinking);
+    assert!(model.active_turn.is_some());
 }
 
 #[test]
