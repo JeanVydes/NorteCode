@@ -19,6 +19,16 @@ fn sections_follow_the_display_order_without_overlapping() {
 }
 
 #[test]
+fn preferences_stay_after_plugins_and_before_agents() {
+    let layout = layout();
+    let plugins = layout.section(SettingsSection::Plugins).y;
+    let preferences = layout.section(SettingsSection::Preferences).y;
+    let agents = layout.section(SettingsSection::Agents).y;
+    assert!(plugins < preferences);
+    assert!(preferences < agents);
+}
+
+#[test]
 fn body_rows_start_after_their_heading_and_header() {
     let layout = layout();
     let prefs = layout.section(SettingsSection::Preferences);
