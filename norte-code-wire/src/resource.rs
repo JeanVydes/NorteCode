@@ -532,7 +532,7 @@ pub struct QuotaReport {
 }
 
 /// Totals over a set of request records.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TelemetrySummary {
     /// How many requests there were.
     #[serde(default)]
@@ -558,6 +558,9 @@ pub struct TelemetrySummary {
     /// Prompt tokens written to a provider cache.
     #[serde(default)]
     pub cache_write_tokens: u64,
+    /// Cost the providers reported, in USD.
+    #[serde(default)]
+    pub cost_usd: f64,
 }
 
 /// A telemetry report, as `/telemetry` serves it.

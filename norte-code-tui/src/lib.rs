@@ -14,6 +14,7 @@ mod context;
 mod diff;
 mod frame_limiter;
 mod job_notice;
+mod leaderboard;
 mod metrics;
 mod palette;
 mod process_stats;
