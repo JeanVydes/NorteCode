@@ -23,6 +23,17 @@ fn clamps_output_to_remaining_context() {
 }
 
 #[test]
+fn never_sends_a_zero_output_limit() {
+    let messages = vec![Message::user("x".repeat(400_000))];
+    let tools = Vec::new();
+
+    assert_eq!(
+        context_safe_output(Some(8_192), Some(20_000), &messages, &tools),
+        Some(1)
+    );
+}
+
+#[test]
 fn leaves_unbounded_output_unset() {
     let messages = vec![Message::user("hello")];
     let tools = Vec::new();
