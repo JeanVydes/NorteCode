@@ -14,7 +14,7 @@ use super::config_page::{ConfigAction, ConfigData, Setting};
 use super::detail_panel::Field;
 use super::host_info;
 use super::plugins_page::PluginsAction;
-use crate::ui_model::{PluginJob, UiModel};
+use crate::ui_model::{DebugOverlayMode, PluginJob, UiModel};
 
 /// Which list the arrow keys drive.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -89,6 +89,7 @@ impl SettingsPage {
                 send_mode: String::new(),
                 diff_mode: String::new(),
                 rail_position: String::new(),
+                debug: DebugOverlayMode::Off,
             },
             plugin_selected: 0,
             pref_selected: 0,
@@ -576,6 +577,7 @@ impl SettingsPage {
             self.prefs.send_mode.as_str(),
             self.prefs.diff_mode.as_str(),
             self.prefs.rail_position.as_str(),
+            self.prefs.debug.label(),
         ];
         for (index, setting) in Setting::ALL.iter().enumerate() {
             let selected = self.focus == Focus::Preferences && index == self.pref_selected;

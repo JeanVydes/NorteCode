@@ -61,6 +61,9 @@ pub(crate) struct UiConfig {
     /// Where the session rail sits; `left` when absent.
     #[serde(default)]
     pub(crate) rail_position: Option<RailPosition>,
+    /// Show the floating frame and memory metrics box.
+    #[serde(default)]
+    pub(crate) debug: bool,
 }
 
 /// The client configuration.
@@ -118,3 +121,7 @@ fn config_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     Some(home.join(".config").join("norte-code").join(CONFIG_FILE))
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod tests;
