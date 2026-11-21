@@ -72,7 +72,7 @@ pub(super) fn run() -> io::Result<()> {
         if crate::terminal::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
-        if drain_server_events(&mut events, &mut tree, &mut model) {
+        if drain_server_events(&mut events, &mut commands, &mut tree, &mut model) {
             views_dirty = true;
         }
         if views_dirty {
@@ -856,6 +856,7 @@ fn fold_host_event(event: &ClientEvent, model: &mut UiModel) {
 
 fn drain_server_events(
     events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     tree: &mut terminalui::Tree,
     model: &mut UiModel,
 ) -> bool {
@@ -899,6 +900,11 @@ fn drain_server_events(
             ) => {
                 fold_host_event(&event, model);
                 changed = true;
+            }
+            Ok(ClientEvent::Forked { session }) => {
+                if let Some(commands) = commands.as_ref() {
+                    let _ = commands.try_send(UiCommand::OpenSession { session });
+                }
             }
             Ok(ClientEvent::SendFailed { reason }) => {
                 if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
