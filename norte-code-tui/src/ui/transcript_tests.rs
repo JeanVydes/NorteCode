@@ -119,6 +119,7 @@ fn clicking_a_message_opens_the_menu_and_queues_actions() {
         text: "hello".to_string(),
     });
     transcript.heights = vec![2];
+    transcript.row_map = vec![Some(0), Some(0)];
     transcript.first_visible = 0;
 
     transcript.open_menu(30, 0);
@@ -496,7 +497,8 @@ fn painted_flags_mark_notice_rows_as_not_copyable() {
     transcript.first_visible = 0;
     transcript.view_height = 6;
     let buffer = Buffer::empty(Rect::new(0, 0, 20, 6));
-    transcript.capture_painted(Rect::new(0, 0, 20, 6), &buffer);
+    let row_map = transcript.build_row_map();
+    transcript.capture_painted(Rect::new(0, 0, 20, 6), &buffer, &row_map);
     assert_eq!(transcript.heights, vec![2, 3]);
     assert_eq!(
         transcript.painted_copyable,
@@ -528,8 +530,8 @@ fn the_painted_flags_do_not_accumulate_across_frames() {
     let mut transcript = Transcript::new();
     let area = Rect::new(0, 0, 10, 2);
     let buffer = Buffer::empty(area);
-    transcript.capture_painted(area, &buffer);
-    transcript.capture_painted(area, &buffer);
+    transcript.capture_painted(area, &buffer, &[]);
+    transcript.capture_painted(area, &buffer, &[]);
 
     assert_eq!(transcript.painted.len(), 2);
     assert_eq!(transcript.painted_copyable.len(), 2);
@@ -548,6 +550,7 @@ fn clearing_the_stream_drops_the_render_cache() {
     transcript.painted.push("hello".to_owned());
     transcript.painted_copyable.push(true);
     transcript.painted_user.push(true);
+    transcript.row_map.push(Some(0));
 
     transcript.clear_all();
 
@@ -556,6 +559,7 @@ fn clearing_the_stream_drops_the_render_cache() {
     assert_eq!(transcript.painted.len(), 0);
     assert_eq!(transcript.painted_copyable.len(), 0);
     assert_eq!(transcript.painted_user.len(), 0);
+    assert_eq!(transcript.row_map.len(), 0);
 }
 
 #[test]
@@ -572,6 +576,43 @@ fn a_long_session_keeps_only_recent_items() {
     assert!((KEEP_ITEMS..=MAX_ITEMS).contains(&count), "count {count}");
     let last = transcript.items.last().expect("last item");
     assert!(matches!(last, Item::Notice { text, .. } if text == "line 1024"));
+}
+
+#[test]
+fn hit_testing_follows_the_rendered_scroll_offset() {
+    use ratatui::buffer::Buffer;
+    use terminalui::{Tree, node};
+
+    let mut transcript = Transcript::new();
+    for index in 0..20 {
+        transcript.push(Item::Assistant {
+            turn: Some(index),
+            text: format!("filler {index}"),
+        });
+    }
+    transcript.push(Item::Assistant {
+        turn: Some(99),
+        text: "[docs](https://example.com/path)".to_owned(),
+    });
+
+    let area = Rect::new(0, 0, 60, 6);
+    let theme = terminalui::Theme::default();
+    let mut tree = Tree::new(node("stream", transcript));
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+
+    let stream = tree.find::<Transcript>("stream").expect("stream");
+    assert!(stream.first_visible > 0);
+    let local_row = stream
+        .row_map
+        .iter()
+        .position(|item| *item == Some(20))
+        .expect("the linked message is visible");
+    assert_eq!(stream.message_at(local_row), Some(20));
+    assert_eq!(
+        stream.link_at_screen(area.y + u16::try_from(local_row).unwrap_or(0), area.x + 1),
+        Some("https://example.com/path")
+    );
 }
 
 #[test]

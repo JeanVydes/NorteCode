@@ -155,7 +155,16 @@ impl SettingsPage {
 
     /// Refresh every section from the model.
     pub(crate) fn set_data(&mut self, model: &UiModel, prefs: ConfigData) {
-        self.host = host_info::fields(model);
+        let host = host_info::fields(model);
+        if self.host == host
+            && self.plugins == model.plugins
+            && self.agents == model.agents
+            && self.job == model.plugin_job
+            && self.prefs == prefs
+        {
+            return;
+        }
+        self.host = host;
         self.plugins.clone_from(&model.plugins);
         self.agents.clone_from(&model.agents);
         self.job.clone_from(&model.plugin_job);

@@ -6,7 +6,6 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Position as RatatuiPosition;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
@@ -30,10 +29,27 @@ mod chart_scroll;
 /// Sessions and requests shown per page.
 const SESSION_PAGE: usize = 4;
 const REQUEST_PAGE: usize = 6;
+/// Newest records exposed to the paginated lists and rankings.
+pub(crate) const MAX_RECORD_WINDOW: usize = 1_000;
 const CHART_SLOT: u16 = 18;
 const CHART_GAP: u16 = 2;
 const CHART_ROWS: u16 = CHART_SLOT * 3 + CHART_GAP * 2;
 const LINE_AXIS_WIDTH: u16 = 9;
+const CHART_TITLES: [&str; 3] = [
+    "cost · cumulative usd",
+    "tokens · in + out",
+    "cache · hit rate %",
+];
+
+#[derive(Clone, Copy, Debug)]
+struct ChartSlotLayout {
+    index: usize,
+    title: &'static str,
+    y: u16,
+    window: (usize, usize),
+    area: Rect,
+    offset: u16,
+}
 
 /// Which view Tab currently shows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
@@ -88,6 +104,9 @@ pub(crate) struct TelemetryPage {
     /// Window last pushed into the two line charts.
     #[serde(skip)]
     line_window: Option<(usize, usize)>,
+    /// Reused composition surface for the stacked charts.
+    #[serde(skip)]
+    chart_page: Buffer,
     /// Pages the request table was last rebuilt for.
     last_session_page: usize,
     last_request_page: usize,
@@ -118,6 +137,7 @@ impl TelemetryPage {
             chart_data: Series::default(),
             bucket_labels: Arc::new(Vec::new()),
             line_window: None,
+            chart_page: Buffer::empty(Rect::new(0, 0, 0, CHART_ROWS)),
             last_session_page: 0,
             last_request_page: 0,
             last_request_row: 0,
@@ -190,6 +210,22 @@ impl TelemetryPage {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_chart_scroll_back(&mut self, value: usize) {
+        if let Some(chart) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<CandleChart>())
+        {
+            chart.state.scroll_back = value;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chart_page_capacity(&self) -> usize {
+        self.chart_page.content.capacity()
+    }
+
+    #[cfg(test)]
     pub(crate) fn chart_area(&self, index: usize) -> Rect {
         self.chart_areas.get(index).copied().unwrap_or_default()
     }
@@ -206,24 +242,38 @@ impl TelemetryPage {
 
     /// Replace the session summaries used by the shared detail panel.
     pub(crate) fn set_sessions(&mut self, sessions: Vec<norte_code_wire::SessionSummary>) {
+        if self.session_data == sessions {
+            return;
+        }
         self.session_data = sessions;
         self.sync_detail();
     }
 
     /// Replace the report the charts, session list and request table use.
     pub(crate) fn set_report(&mut self, report: Option<SharedTelemetry>, usage: SharedUsage) {
+        let unchanged = match (&self.report, &report) {
+            (Some(current), Some(next)) => Arc::ptr_eq(current, next),
+            (None, None) => true,
+            _ => false,
+        } && Arc::ptr_eq(&self.usage, &usage);
+        if unchanged {
+            return;
+        }
         self.report = report;
         self.usage = usage;
-        self.record_indices = self
-            .report
-            .as_ref()
-            .map_or_else(Vec::new, |report| (0..report.records.len()).rev().collect());
-        self.sessions = self.report.as_ref().map_or_else(Vec::new, |report| {
+        let start = self.report.as_ref().map_or(0, |report| {
+            report.records.len().saturating_sub(MAX_RECORD_WINDOW)
+        });
+        self.record_indices = self.report.as_ref().map_or_else(Vec::new, |report| {
+            (start..report.records.len()).rev().collect()
+        });
+        self.sessions = if let Some(report) = self.report.as_ref() {
             let mut seen = HashSet::new();
             let mut sessions: Vec<usize> = report
                 .records
                 .iter()
                 .enumerate()
+                .skip(start)
                 .rev()
                 .filter(|(_, record)| seen.insert(record.session.as_str()))
                 .map(|(index, _)| index)
@@ -234,7 +284,9 @@ impl TelemetryPage {
                     .cmp(&report.records[*right].session)
             });
             sessions
-        });
+        } else {
+            Vec::new()
+        };
         self.selected_session = 0;
         self.detail_is_request = false;
         self.rebuild_selected();
@@ -288,7 +340,7 @@ impl TelemetryPage {
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn chart_window(&self) -> (usize, usize) {
+    fn chart_window(&self, width: u16) -> (usize, usize) {
         let Some(chart) = self
             .children
             .first()
@@ -301,7 +353,7 @@ impl TelemetryPage {
             return (0, 0);
         }
         let cell_width = (2.0 * chart.state.x_zoom).round().clamp(1.0, 16.0) as u16;
-        let plot_width = chart.state.area.width.saturating_sub(11).max(1);
+        let plot_width = width.saturating_sub(11).max(1);
         let visible = usize::from(plot_width / cell_width).max(1);
         let end = total.saturating_sub(chart.state.scroll_back).max(1);
         (end.saturating_sub(visible), end)
@@ -342,7 +394,7 @@ impl TelemetryPage {
     }
 
     fn paint_time_labels(
-        &mut self,
+        labels: &[String],
         page: &mut Buffer,
         y: u16,
         width: u16,
@@ -357,7 +409,7 @@ impl TelemetryPage {
         let last = end.saturating_sub(start).saturating_sub(1);
         let style = Style::default().fg(theme.muted);
         for index in (start..end).step_by(10) {
-            let Some(label) = self.bucket_labels.get(index) else {
+            let Some(label) = labels.get(index) else {
                 continue;
             };
             let relative = index.saturating_sub(start);
@@ -509,10 +561,11 @@ impl TelemetryPage {
     }
 
     fn rebuild_leaderboard(&mut self) {
-        let records: &[norte_code_wire::TelemetryRecord] = self
-            .report
-            .as_ref()
-            .map_or(&[], |report| report.records.as_slice());
+        let records: &[norte_code_wire::TelemetryRecord] =
+            self.report.as_ref().map_or(&[], |report| {
+                let start = report.records.len().saturating_sub(MAX_RECORD_WINDOW);
+                &report.records[start..]
+            });
         self.leaderboard.rebuild(records);
     }
 
@@ -663,88 +716,104 @@ impl TelemetryPage {
         caption
     }
 
-    fn paint_charts(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
-        let titles = [
-            "cost · cumulative usd",
-            "tokens · in + out",
-            "cache · hit rate %",
-        ];
-        self.chart_scroll.set_viewport(area.height, CHART_ROWS);
-        let offset = self.chart_scroll.offset();
-        self.chart_areas.clear();
-        let mut page = Buffer::empty(Rect::new(0, 0, area.width, CHART_ROWS));
+    fn paint_chart_slot(&mut self, layout: ChartSlotLayout, cx: &mut Context, theme: &Theme) {
+        let page = &mut self.chart_page;
         let bold = Style::default()
             .fg(theme.foreground)
             .bg(theme.background)
             .add_modifier(Modifier::BOLD);
-        let body_y = 1u16;
-        page.set_stringn(0, 0, titles[0], titles[0].len(), bold);
+        page.set_stringn(0, layout.y, layout.title, layout.title.len(), bold);
+        let body_y = layout.y + 1;
         let body = Rect {
             x: 0,
             y: body_y,
-            width: area.width,
+            width: layout.area.width,
             height: CHART_SLOT - 1,
         };
-        if let Some(child) = self.children.first_mut() {
-            child.view.render(body, &mut page, cx, theme);
-            if let Some(chart) = child.view.as_any().downcast_mut::<CandleChart>() {
-                chart.state.area = Rect {
-                    x: area.x,
-                    y: area.y + body_y.saturating_sub(offset),
-                    width: area.width,
-                    height: CHART_SLOT - 1,
-                };
-            }
+        if let Some(child) = self.children.get_mut(layout.index) {
+            child.view.render(body, page, cx, theme);
         }
-        self.chart_areas.push(Rect {
-            x: area.x,
-            y: area.y + body_y.saturating_sub(offset),
-            width: area.width,
-            height: CHART_SLOT - 1,
-        });
-        let window = self.chart_window();
-        self.sync_line_window(window);
-        for (index, title) in titles.iter().enumerate().skip(1) {
-            let y = u16::try_from(index).unwrap_or(u16::MAX) * (CHART_SLOT + CHART_GAP);
-            page.set_stringn(0, y, title, title.len(), bold);
-            let body_y = y + 1;
-            let body = Rect {
-                x: 0,
-                y: body_y,
-                width: area.width,
+        if layout.index == 0
+            && let Some(chart) = self
+                .children
+                .first_mut()
+                .and_then(|node| node.view.as_any().downcast_mut::<CandleChart>())
+        {
+            chart.state.area = Rect {
+                x: layout.area.x,
+                y: layout.area.y + body_y.saturating_sub(layout.offset),
+                width: layout.area.width,
                 height: CHART_SLOT - 1,
             };
-            if let Some(child) = self.children.get_mut(index) {
-                child.view.render(body, &mut page, cx, theme);
-            }
-            self.paint_time_labels(
-                &mut page,
+        }
+        if layout.index > 0 {
+            Self::paint_time_labels(
+                &self.bucket_labels,
+                page,
                 body_y + CHART_SLOT - 2,
-                area.width,
-                window,
+                layout.area.width,
+                layout.window,
                 theme,
             );
-            self.chart_areas.push(Rect {
-                x: area.x,
-                y: area.y + body_y.saturating_sub(offset),
-                width: area.width,
-                height: CHART_SLOT - 1,
-            });
         }
+        self.chart_areas.push(Rect {
+            x: layout.area.x,
+            y: layout.area.y + body_y.saturating_sub(layout.offset),
+            width: layout.area.width,
+            height: CHART_SLOT - 1,
+        });
+    }
+
+    fn blit_chart_rows(page: &Buffer, buf: &mut Buffer, area: Rect, offset: u16) {
+        let inside = u32::from(area.x) >= u32::from(buf.area.x)
+            && u32::from(area.y) >= u32::from(buf.area.y)
+            && u32::from(area.x) + u32::from(area.width)
+                <= u32::from(buf.area.x) + u32::from(buf.area.width)
+            && u32::from(area.y) + u32::from(area.height)
+                <= u32::from(buf.area.y) + u32::from(buf.area.height);
+        if !inside {
+            return;
+        }
+        let stride = usize::from(buf.area.width);
+        let left = usize::from(area.x - buf.area.x);
+        let top = usize::from(area.y - buf.area.y);
+        let width = usize::from(area.width);
         for row in 0..area.height {
-            let source = row.saturating_add(offset);
-            if source >= CHART_ROWS {
+            let source = usize::from(row.saturating_add(offset));
+            if source >= usize::from(CHART_ROWS) {
                 break;
             }
-            for column in 0..area.width {
-                if let (Some(cell), Some(source_cell)) = (
-                    buf.cell_mut(RatatuiPosition::new(area.x + column, area.y + row)),
-                    page.cell(RatatuiPosition::new(column, source)),
-                ) {
-                    *cell = source_cell.clone();
-                }
-            }
+            let target = (top + usize::from(row)) * stride + left;
+            let origin = source * width;
+            buf.content[target..target + width]
+                .clone_from_slice(&page.content[origin..origin + width]);
         }
+    }
+
+    fn paint_charts(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
+        self.chart_scroll.set_viewport(area.height, CHART_ROWS);
+        let offset = self.chart_scroll.offset();
+        self.chart_areas.clear();
+        let page_area = Rect::new(0, 0, area.width, CHART_ROWS);
+        if self.chart_page.area == page_area {
+            self.chart_page.reset();
+        } else {
+            self.chart_page.resize(page_area);
+        }
+        let window = self.chart_window(area.width);
+        self.sync_line_window(window);
+        for (index, title) in CHART_TITLES.iter().enumerate() {
+            let layout = ChartSlotLayout {
+                index,
+                title,
+                y: u16::try_from(index).unwrap_or(u16::MAX) * (CHART_SLOT + CHART_GAP),
+                window,
+                area,
+                offset,
+            };
+            self.paint_chart_slot(layout, cx, theme);
+        }
+        Self::blit_chart_rows(&self.chart_page, buf, area, offset);
         self.chart_scroll.paint(area, buf, theme, CHART_ROWS);
     }
 

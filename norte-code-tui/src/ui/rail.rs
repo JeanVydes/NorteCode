@@ -155,9 +155,19 @@ impl Rail {
         self.session = session;
     }
 
+    /// The context the gauge currently reports.
+    pub(crate) fn context(&self) -> ContextUsage {
+        self.context
+    }
+
     /// Replace the context the gauge reports.
     pub(crate) fn set_context(&mut self, context: ContextUsage) {
         self.context = context;
+    }
+
+    /// The plans currently shown by the rail.
+    pub(crate) fn plans(&self) -> &[norte_code_wire::PlanSummary] {
+        &self.plans
     }
 
     pub(crate) fn set_plans(&mut self, plans: Vec<norte_code_wire::PlanSummary>) {
@@ -202,6 +212,14 @@ impl Rail {
                     .flatten()
             });
         previewed.or(clicked)
+    }
+
+    /// Whether the compact button is currently enabled.
+    pub(crate) fn compact_enabled(&self) -> bool {
+        self.children
+            .get(1)
+            .and_then(|node| node.view.as_any_ref().downcast_ref::<Button>())
+            .is_some_and(|button| !button.state.disabled)
     }
 
     /// Enable or disable the compact button from the host's state.

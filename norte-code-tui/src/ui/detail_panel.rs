@@ -13,7 +13,7 @@ use terminalui::components::separator::Separator;
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
 /// How a field paints its value.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) enum FieldPresentation {
     /// A plain bright value.
     Text,
@@ -24,7 +24,7 @@ pub(crate) enum FieldPresentation {
 }
 
 /// One labelled value in the panel.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct Field {
     /// The label, painted muted.
     pub(crate) label: String,

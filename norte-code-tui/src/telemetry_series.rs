@@ -28,6 +28,40 @@ pub(crate) struct Bucket {
     pub(crate) prompt: f64,
 }
 
+impl Bucket {
+    fn merge(&mut self, other: &Self) {
+        self.requests += other.requests;
+        self.cost += other.cost;
+        self.tokens += other.tokens;
+        self.cache_read += other.cache_read;
+        self.prompt += other.prompt;
+    }
+}
+
+/// Merge adjacent buckets until at most `limit` remain.
+fn downsample(buckets: Vec<(String, Bucket)>, limit: usize) -> Vec<(String, Bucket)> {
+    if limit == 0 || buckets.len() <= limit {
+        return buckets;
+    }
+    let base = buckets.len() / limit;
+    let extra = buckets.len() % limit;
+    let mut merged = Vec::with_capacity(limit);
+    let mut source = buckets.into_iter();
+    for group in 0..limit {
+        let size = base + usize::from(group < extra);
+        let Some(mut current) = source.next() else {
+            break;
+        };
+        for _ in 1..size {
+            if let Some((_, bucket)) = source.next() {
+                current.1.merge(&bucket);
+            }
+        }
+        merged.push(current);
+    }
+    merged
+}
+
 /// Series ready for the three charts.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Series {
@@ -78,11 +112,8 @@ pub(crate) fn series(
         }
     }
 
-    let mut buckets: Vec<(String, Bucket)> = buckets.into_iter().collect();
-    if buckets.len() > MAX_CHART_BUCKETS {
-        let excess = buckets.len() - MAX_CHART_BUCKETS;
-        buckets.drain(..excess);
-    }
+    let buckets: Vec<(String, Bucket)> =
+        downsample(buckets.into_iter().collect(), MAX_CHART_BUCKETS);
     let mut cost = Vec::with_capacity(buckets.len());
     let mut tokens = Vec::with_capacity(buckets.len());
     let mut cache = Vec::with_capacity(buckets.len());

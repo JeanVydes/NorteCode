@@ -221,6 +221,9 @@ pub(crate) struct Transcript {
     /// Whether a row carries the user message's leading bar.
     #[serde(skip)]
     painted_user: Vec<bool>,
+    /// Which item owns each visible row, cached by the last render.
+    #[serde(skip)]
+    row_map: Vec<Option<usize>>,
     /// The scrollbar drawn in the last frame, when the content overflows.
     #[serde(skip)]
     scrollbar: Option<Scrollbar>,
@@ -314,6 +317,7 @@ impl Transcript {
             painted: Vec::new(),
             painted_copyable: Vec::new(),
             painted_user: Vec::new(),
+            row_map: Vec::new(),
             scrollbar: None,
             dragging_thumb: false,
             menu: None,
@@ -347,6 +351,7 @@ impl Transcript {
         self.painted.clear();
         self.painted_copyable.clear();
         self.painted_user.clear();
+        self.row_map.clear();
         self.content_height = 0;
         self.heights_width = 0;
         self.doc_theme = None;
@@ -848,7 +853,7 @@ impl Transcript {
     }
 
     /// Which item produced each visible row, if any.
-    fn row_items(&self) -> Vec<Option<usize>> {
+    fn build_row_map(&self) -> Vec<Option<usize>> {
         let mut map = vec![None; usize::from(self.area.height)];
         if self.heights.len() != self.items.len() {
             return map;
@@ -869,8 +874,7 @@ impl Transcript {
     }
 
     /// Remember the painted lines for clipboard extraction.
-    fn capture_painted(&mut self, area: Rect, buf: &Buffer) {
-        let row_items = self.row_items();
+    fn capture_painted(&mut self, area: Rect, buf: &Buffer, row_map: &[Option<usize>]) {
         self.painted.clear();
         self.painted_copyable.clear();
         self.painted_user.clear();
@@ -882,7 +886,7 @@ impl Transcript {
                     line.push_str(cell.symbol());
                 }
             }
-            let copyable = row_items.get(row).copied().flatten().is_some_and(|index| {
+            let copyable = row_map.get(row).copied().flatten().is_some_and(|index| {
                 matches!(
                     self.items.get(index),
                     Some(
@@ -893,7 +897,7 @@ impl Transcript {
                     )
                 )
             });
-            let user = row_items
+            let user = row_map
                 .get(row)
                 .copied()
                 .flatten()
@@ -1016,7 +1020,7 @@ impl Transcript {
                     return Outcome::Ignored;
                 }
                 let local_row = mouse.row.saturating_sub(self.area.y);
-                if let Some(index) = self.message_at(self.content_row(local_row)) {
+                if let Some(index) = self.message_at(usize::from(local_row)) {
                     self.focused_item = Some(index);
                     self.open_menu(mouse.column, local_row);
                     return Outcome::Consumed;
@@ -1105,15 +1109,10 @@ impl Transcript {
         std::mem::take(&mut self.message_actions)
     }
 
-    /// Which content row is under a screen row.
-    fn content_row(&self, screen_row: u16) -> usize {
-        usize::from(self.first_visible.saturating_add(screen_row))
-    }
-
-    /// The item occupying a content row, if it is a message.
-    fn message_at(&self, row: usize) -> Option<usize> {
-        self.row_items()
-            .get(row)
+    /// The item occupying a visible row, if it is a message.
+    fn message_at(&self, local_row: usize) -> Option<usize> {
+        self.row_map
+            .get(local_row)
             .copied()
             .flatten()
             .filter(|index| {
@@ -1126,22 +1125,17 @@ impl Transcript {
 
     /// The link under a screen cell, when a message has one there.
     fn link_at_screen(&self, screen_row: u16, column: u16) -> Option<&str> {
-        let content_row = self
-            .first_visible
-            .checked_add(screen_row.checked_sub(self.area.y)?)?;
-        let item = self
-            .row_items()
-            .get(usize::from(content_row))
-            .copied()
-            .flatten()?;
+        let local_row = screen_row.checked_sub(self.area.y)?;
+        let item = self.row_map.get(usize::from(local_row))?.as_ref()?;
+        let content_row = self.first_visible.saturating_add(local_row);
         let top = self
             .heights
             .iter()
-            .take(item)
+            .take(*item)
             .fold(0u16, |total, height| total.saturating_add(*height));
         let line = usize::from(content_row.saturating_sub(top));
-        let doc = self.docs.get(item)?.as_ref()?;
-        let text_x = match self.items.get(item) {
+        let doc = self.docs.get(*item)?.as_ref()?;
+        let text_x = match self.items.get(*item) {
             Some(Item::User { .. }) => self.area.x + 2,
             _ => self.area.x + 1,
         };
@@ -1150,13 +1144,14 @@ impl Transcript {
     }
 
     /// Open the menu for a clicked message.
-    fn open_menu(&mut self, column: u16, screen_row: u16) {
-        let row = self.content_row(screen_row);
-        self.menu = self.message_at(row).map(|item| MessageMenu {
-            item,
-            column,
-            row: screen_row + self.area.y,
-        });
+    fn open_menu(&mut self, column: u16, local_row: u16) {
+        self.menu = self
+            .message_at(usize::from(local_row))
+            .map(|item| MessageMenu {
+                item,
+                column,
+                row: local_row + self.area.y,
+            });
     }
 
     fn start_selection(&mut self, inside: bool, pos: Pos) -> Outcome {
@@ -1299,6 +1294,7 @@ impl View for Transcript {
             ..area
         };
         self.compute_heights(content.width, *theme);
+        let row_map = self.build_row_map();
 
         let bottom = area.y + area.height;
         let docs = std::mem::take(&mut self.docs);
@@ -1379,7 +1375,8 @@ impl View for Transcript {
             self.dragging_thumb = false;
         }
 
-        self.capture_painted(area, buf);
+        self.capture_painted(area, buf, &row_map);
+        self.row_map = row_map;
         self.paint_selection(area, buf, theme);
         self.paint_menu(buf, theme);
     }

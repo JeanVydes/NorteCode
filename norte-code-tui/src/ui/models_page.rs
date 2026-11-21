@@ -138,6 +138,12 @@ impl ModelsPage {
 
     /// Replace the catalogue data; selection is preserved when possible.
     pub(crate) fn set_data(&mut self, data: ModelsData) {
+        if self.models == data.models
+            && self.key_status == data.key_status
+            && self.active == data.active
+        {
+            return;
+        }
         self.models = data.models;
         self.key_status = data.key_status;
         self.active = data.active;

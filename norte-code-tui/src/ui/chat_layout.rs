@@ -35,7 +35,9 @@ impl ChatLayout {
 
     /// Move the rail to another side.
     pub(crate) fn set_position(&mut self, position: RailPosition) {
-        self.position = position;
+        if self.position != position {
+            self.position = position;
+        }
     }
 
     /// Split the area into the rail rect and the stream rect.

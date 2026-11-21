@@ -70,7 +70,7 @@ fn an_unparseable_stamp_is_skipped() {
 }
 
 #[test]
-fn the_series_keeps_only_the_buckets_the_chart_can_draw() {
+fn the_series_downsamples_the_full_history_to_the_chart_limit() {
     let records = (0..MAX_CHART_BUCKETS + 10)
         .map(|minute| {
             record(
@@ -83,10 +83,20 @@ fn the_series_keeps_only_the_buckets_the_chart_can_draw() {
         })
         .collect();
     let result = series(Some(&report(records)), ChartInterval::Minute);
+    let requests: u64 = result
+        .buckets
+        .iter()
+        .map(|(_, bucket)| bucket.requests)
+        .sum();
 
     assert_eq!(result.buckets.len(), MAX_CHART_BUCKETS);
     assert_eq!(result.cost.len(), MAX_CHART_BUCKETS);
-    assert_eq!(result.buckets[0].0, "2026-11-19T00:10");
+    assert_eq!(result.buckets[0].0, "2026-11-19T00:00");
+    assert_eq!(result.buckets.last().unwrap().0, "2026-11-19T04:09");
+    assert_eq!(
+        usize::try_from(requests).expect("request count fits"),
+        MAX_CHART_BUCKETS + 10
+    );
 }
 
 #[test]

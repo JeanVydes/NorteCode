@@ -51,6 +51,7 @@ pub(crate) enum ConfigAction {
 }
 
 /// The values to show, supplied by the host.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConfigData {
     /// The selected theme's name.
     pub(crate) theme: String,

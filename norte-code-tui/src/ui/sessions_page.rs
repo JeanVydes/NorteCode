@@ -7,6 +7,7 @@
 
 use std::any::Any;
 use std::fmt::Write;
+use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -175,6 +176,11 @@ impl SessionsPage {
         active: Option<String>,
         usage: crate::session_stats::SharedUsage,
     ) {
+        let unchanged =
+            self.sessions == sessions && self.active == active && Arc::ptr_eq(&self.usage, &usage);
+        if unchanged {
+            return;
+        }
         self.sessions = sessions;
         self.active = active;
         self.usage = usage;

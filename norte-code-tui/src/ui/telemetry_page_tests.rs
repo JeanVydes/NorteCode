@@ -10,6 +10,7 @@ use terminalui::components::table::Table;
 use terminalui::{InputEvent, Theme, Tree};
 
 use super::TelemetryPage;
+use super::telemetry_page::MAX_RECORD_WINDOW;
 use crate::leaderboard::{LeaderboardGroup, LeaderboardSubject};
 use crate::session_stats::SharedUsage;
 use crate::ui::detail_panel::DetailPanel;
@@ -63,6 +64,43 @@ fn the_report_is_shared_instead_of_copied() {
     page.set_report(Some(Arc::clone(&report)), SharedUsage::default());
 
     assert_eq!(Arc::strong_count(&report), 2);
+}
+
+#[test]
+fn setting_the_same_report_does_not_rebuild_the_charts() {
+    let shared = Arc::new(report());
+    let usage = SharedUsage::default();
+    let mut page = TelemetryPage::new();
+    page.set_report(Some(Arc::clone(&shared)), Arc::clone(&usage));
+    page.set_chart_scroll_back(1);
+
+    page.set_report(Some(Arc::clone(&shared)), Arc::clone(&usage));
+
+    assert_eq!(page.chart_scroll_back(), 1);
+}
+
+#[test]
+fn the_request_lists_use_a_bounded_record_window() {
+    let total = MAX_RECORD_WINDOW + 10;
+    let records = (0..total)
+        .map(|index| TelemetryRecord {
+            id: format!("req-{index}"),
+            session: "session".to_owned(),
+            ..TelemetryRecord::default()
+        })
+        .collect();
+    let mut page = TelemetryPage::new();
+    set_report(
+        &mut page,
+        TelemetryReport {
+            records,
+            ..TelemetryReport::default()
+        },
+    );
+
+    assert_eq!(page.record_indices.len(), MAX_RECORD_WINDOW);
+    assert_eq!(page.record_indices.first(), Some(&(total - 1)));
+    assert_eq!(page.record_indices.last(), Some(&10));
 }
 
 #[test]
@@ -322,6 +360,18 @@ fn the_stacked_charts_draw_a_scrollbar_when_they_overflow() {
 
     let rail = page(&tree).chart_rail().expect("stack scrollbar");
     assert_eq!(buf[(rail.x, rail.y + rail.top)].symbol(), "█");
+}
+
+#[test]
+fn the_chart_composition_buffer_is_reused() {
+    let (mut tree, _, theme) = chart_tree();
+    render_charts(&mut tree, &theme, 50);
+    let capacity = page(&tree).chart_page_capacity();
+    assert!(capacity > 0);
+
+    render_charts(&mut tree, &theme, 50);
+
+    assert_eq!(page(&tree).chart_page_capacity(), capacity);
 }
 
 #[test]

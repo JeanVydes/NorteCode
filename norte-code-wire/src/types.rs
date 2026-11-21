@@ -306,7 +306,7 @@ pub struct CatalogModelInfo {
 }
 
 /// One model the catalogue knows, flattened for a picker.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelInfo {
     /// The provider id.
@@ -454,7 +454,7 @@ pub struct SkillInfo {
 }
 
 /// The reasoning controls a model declares.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningInfo {
     /// Whether the model reasons at all.
