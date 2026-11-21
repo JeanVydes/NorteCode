@@ -12,6 +12,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::style::Style;
 use terminalui::components::button::Button;
 
+use crate::attachment::{AttachmentNotice, ComposerAction, NoticeTone};
 use crate::client::{ClientEvent, UiCommand, start};
 use crate::compact_notice;
 use crate::config::ClientConfig;
@@ -299,6 +300,7 @@ fn poll_event(
             drain_models_actions(tree, commands, model);
             drain_plugins_actions(tree, commands);
             drain_message_actions(tree, commands, model);
+            drain_composer_actions(tree, commands, model);
             drain_plan_requests(tree, model);
             if drain_config_actions(tree, model) {
                 ui::refresh_views(tree, model);
@@ -310,6 +312,7 @@ fn poll_event(
         other => {
             let input = terminalui::InputEvent::from(other);
             let _ = tree.handle_event(&input);
+            drain_composer_actions(tree, commands, model);
             sync_selectors(tree, commands, model);
             ui::sync_views(tree, model);
             Ok(PollOutcome::Event(InputKind::Other))
@@ -347,7 +350,7 @@ fn drain_message_actions(
     for action in actions {
         match action {
             MessageAction::Copy { text } => {
-                let _ = terminalui::osc52_write(&text);
+                let _ = crate::clipboard::system().write(&text);
             }
             MessageAction::Fork { turn } => {
                 if let Some(commands) = commands.as_ref() {
@@ -362,6 +365,47 @@ fn drain_message_actions(
                     let _ = commands.try_send(UiCommand::Rewind {
                         session: session.clone(),
                         turn,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn push_attachment_notice(tree: &mut terminalui::Tree, notice: &AttachmentNotice) {
+    let tone = match notice.tone() {
+        NoticeTone::Warn => ui::Tone::Warn,
+        NoticeTone::Error => ui::Tone::Error,
+    };
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.push(ui::Item::Notice {
+            text: notice.text(),
+            tone,
+        });
+    }
+}
+
+fn drain_composer_actions(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &UiModel,
+) {
+    let actions = tree
+        .find_mut::<ui::Composer>("composer")
+        .map(ui::Composer::take_actions)
+        .unwrap_or_default();
+    for action in actions {
+        match action {
+            ComposerAction::Notice(notice) => push_attachment_notice(tree, &notice),
+            ComposerAction::Attach(attachment) => {
+                if let Err(error) = crate::attachment::validate(model, &attachment.mime) {
+                    push_attachment_notice(tree, &error.into());
+                    continue;
+                }
+                if let (Some(commands), Some(session)) = (commands.as_ref(), model.active.clone()) {
+                    let _ = commands.try_send(UiCommand::Upload {
+                        session,
+                        attachment,
                     });
                 }
             }
@@ -440,7 +484,13 @@ fn handle_key(
     let mut pass_to_tree = true;
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-            return ctrl_c(tree, commands, model);
+            let copied = tree
+                .find_mut::<ui::Composer>("composer")
+                .is_some_and(ui::Composer::copy_selection);
+            if !copied {
+                return ctrl_c(tree, commands, model);
+            }
+            pass_to_tree = false;
         }
         (KeyModifiers::NONE, KeyCode::Tab) if model.tab.is_list_tab() => {
             toggle_list_focus(tree, model.tab);
@@ -528,6 +578,7 @@ fn handle_key(
     drain_sessions_actions(tree, commands, model);
     drain_plugins_actions(tree, commands);
     drain_message_actions(tree, commands, model);
+    drain_composer_actions(tree, commands, model);
     drain_plan_requests(tree, model);
     if drain_config_actions(tree, model) {
         ui::refresh_views(tree, model);
@@ -614,9 +665,14 @@ fn send_current_prompt(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) {
-    let prompt = tree
+    let (prompt, parts) = tree
         .find::<ui::Composer>("composer")
-        .map(|composer| composer.text().trim().to_string())
+        .map(|composer| {
+            (
+                composer.expanded_text().trim().to_string(),
+                composer.wire_parts(),
+            )
+        })
         .unwrap_or_default();
     if prompt.is_empty() {
         return;
@@ -668,6 +724,7 @@ fn send_current_prompt(
         let _ = commands.try_send(UiCommand::Send {
             session,
             text: prompt,
+            parts,
             queue_mode: queue_mode.to_string(),
         });
     }
@@ -1061,6 +1118,30 @@ fn fold_host_event(event: &ClientEvent, model: &mut UiModel) {
     }
 }
 
+fn fold_upload_event(event: &ClientEvent, tree: &mut terminalui::Tree) -> bool {
+    match event {
+        ClientEvent::Uploaded {
+            attachment,
+            receipt,
+        } => {
+            if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
+                composer.insert_upload(attachment.cursor, attachment.kind, receipt.clone());
+            }
+            true
+        }
+        ClientEvent::UploadFailed { reason } => {
+            push_attachment_notice(
+                tree,
+                &AttachmentNotice::UploadFailed {
+                    reason: reason.clone(),
+                },
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
 fn drain_server_events(
     events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
@@ -1124,6 +1205,9 @@ fn drain_server_events(
                     });
                 }
                 changed = true;
+            }
+            Ok(event @ (ClientEvent::Uploaded { .. } | ClientEvent::UploadFailed { .. })) => {
+                changed = fold_upload_event(&event, tree) || changed;
             }
             Ok(ClientEvent::Notice { text }) => {
                 if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
@@ -1644,3 +1728,7 @@ fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
         rail.set_compact_enabled(model.active.is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod tests;

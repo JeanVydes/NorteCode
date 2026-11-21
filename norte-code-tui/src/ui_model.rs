@@ -342,24 +342,26 @@ impl UiModel {
         let mut usage = self.context;
         if usage.window.is_none() {
             usage.window = self
-                .active_model
-                .as_ref()
-                .and_then(|agent| {
-                    self.models
-                        .iter()
-                        .find(|info| {
-                            info.model == agent.id
-                                && self
-                                    .active_provider
-                                    .as_ref()
-                                    .is_none_or(|provider| provider == &info.provider)
-                        })
-                        .or_else(|| self.models.iter().find(|info| info.model == agent.id))
-                })
+                .active_model_info()
                 .and_then(|info| info.max_context)
                 .filter(|window| *window > 0);
         }
         usage
+    }
+
+    /// The catalogue entry for the model the attached session is using.
+    pub(crate) fn active_model_info(&self) -> Option<&norte_code_wire::ModelInfo> {
+        let agent = self.active_model.as_ref()?;
+        self.models
+            .iter()
+            .find(|info| {
+                info.model == agent.id
+                    && self
+                        .active_provider
+                        .as_ref()
+                        .is_none_or(|provider| provider == &info.provider)
+            })
+            .or_else(|| self.models.iter().find(|info| info.model == agent.id))
     }
 
     /// Whether the attached session has a model configured.

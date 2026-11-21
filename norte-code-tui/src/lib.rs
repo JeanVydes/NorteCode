@@ -6,7 +6,10 @@
 //! never pretends to be attached when it is not.
 
 mod app;
+mod attachment;
+mod chip;
 mod client;
+mod clipboard;
 mod compact_notice;
 mod config;
 mod console_log;
