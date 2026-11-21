@@ -16,6 +16,7 @@ use terminalui::components::table::{Table, TableCell, TableRow};
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
 use super::detail_panel::{DetailPanel, Field};
+use super::leaderboard_section::LeaderboardSection;
 use crate::session_stats::{SessionUsage, SharedUsage};
 use crate::shared_telemetry::SharedTelemetry;
 use crate::telemetry::{ChartInterval, short_label};
@@ -35,6 +36,8 @@ enum TelemetryView {
     Sessions,
     /// The selected session's requests and their detail.
     Requests,
+    /// Rankings of models, providers and sessions.
+    Leaderboards,
 }
 
 /// The charts share one interval so their x axes line up.
@@ -68,6 +71,9 @@ pub(crate) struct TelemetryPage {
     last_request_page: usize,
     /// Last highlighted request row, to switch the panel on selection.
     last_request_row: usize,
+    /// The rankings view and its shared report.
+    #[serde(skip)]
+    leaderboard: LeaderboardSection,
     pub(crate) children: Vec<Node>,
 }
 
@@ -89,6 +95,7 @@ impl TelemetryPage {
             last_session_page: 0,
             last_request_page: 0,
             last_request_row: 0,
+            leaderboard: LeaderboardSection::new(),
             children: vec![
                 node("cost_chart", CandleChart::new()),
                 node("token_chart", LineChart::new()),
@@ -103,6 +110,7 @@ impl TelemetryPage {
                             node("h-model", TableCell::text("model").with_weight(5)),
                             node("h-status", TableCell::text("status").with_weight(2)),
                             node("h-tokens", TableCell::text("tokens").with_weight(2)),
+                            node("h-cost", TableCell::text("usd").with_weight(3)),
                         ]),
                     )),
                 ),
@@ -112,12 +120,18 @@ impl TelemetryPage {
         }
     }
 
-    /// Tab cycles charts, then the two paginated lists.
+    /// Whether Tab currently shows the rankings.
+    pub(crate) fn is_leaderboard_focused(&self) -> bool {
+        self.view == TelemetryView::Leaderboards
+    }
+
+    /// Tab cycles charts, the two paginated lists, then the rankings.
     pub(crate) fn toggle_focus(&mut self) {
         self.view = match self.view {
             TelemetryView::Charts => TelemetryView::Sessions,
             TelemetryView::Sessions => TelemetryView::Requests,
-            TelemetryView::Requests => TelemetryView::Charts,
+            TelemetryView::Requests => TelemetryView::Leaderboards,
+            TelemetryView::Leaderboards => TelemetryView::Charts,
         };
     }
 
@@ -158,6 +172,7 @@ impl TelemetryPage {
         self.rebuild_charts();
         self.rebuild_session_pager();
         self.rebuild_request_table();
+        self.rebuild_leaderboard();
         self.sync_detail();
     }
 
@@ -307,6 +322,14 @@ impl TelemetryPage {
                                     TableCell::text(status_label(record.status)).with_weight(2),
                                 ),
                                 node("tokens", TableCell::text(tokens.to_string()).with_weight(2)),
+                                node(
+                                    "cost",
+                                    TableCell::text(record.cost_usd.map_or_else(
+                                        || "n/a".to_owned(),
+                                        |cost| format!("{cost:.4}"),
+                                    ))
+                                    .with_weight(3),
+                                ),
                             ]),
                         ))
                     })
@@ -322,6 +345,14 @@ impl TelemetryPage {
             table.state.selected = 0;
         }
         self.last_request_row = 0;
+    }
+
+    fn rebuild_leaderboard(&mut self) {
+        let records: &[norte_code_wire::TelemetryRecord] = self
+            .report
+            .as_ref()
+            .map_or(&[], |report| report.records.as_slice());
+        self.leaderboard.rebuild(records);
     }
 
     pub(crate) fn sync_detail(&mut self) {
@@ -464,21 +495,25 @@ impl TelemetryPage {
         if let Some(summary) = summary {
             let _ = write!(
                 caption,
-                " · {} req · {} in / {} out",
-                summary.requests, summary.input_tokens, summary.output_tokens
+                " · {} req · {} in / {} out · ${:.4}",
+                summary.requests, summary.input_tokens, summary.output_tokens, summary.cost_usd
             );
         }
         caption
     }
 
     fn paint_charts(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
-        const SLOT: u16 = 16;
+        const SLOT: u16 = 18;
+        const GAP: u16 = 2;
         let titles = [
             "cost · cumulative usd",
             "tokens · in + out",
             "cache · hit rate %",
         ];
-        let total = SLOT.saturating_mul(u16::try_from(titles.len()).unwrap_or(u16::MAX));
+        let count = u16::try_from(titles.len()).unwrap_or(u16::MAX);
+        let total = SLOT
+            .saturating_mul(count)
+            .saturating_add(GAP.saturating_mul(count.saturating_sub(1)));
         let max_scroll = total.saturating_sub(area.height);
         self.chart_scroll = self.chart_scroll.min(max_scroll);
         let mut page = Buffer::empty(Rect::new(0, 0, area.width, total));
@@ -489,7 +524,7 @@ impl TelemetryPage {
         for (index, title) in titles.iter().enumerate() {
             let y = u16::try_from(index)
                 .unwrap_or(u16::MAX)
-                .saturating_mul(SLOT);
+                .saturating_mul(SLOT + GAP);
             page.set_stringn(0, y, title, title.len(), bold);
             if let Some(child) = self.children.get_mut(index) {
                 child.view.render(
@@ -561,6 +596,16 @@ impl TelemetryPage {
                 Style::default().fg(theme.muted),
             );
         }
+    }
+
+    fn paint_leaderboards(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        cx: &mut Context,
+        theme: &Theme,
+    ) {
+        self.leaderboard.render(area, buf, cx, theme);
     }
 
     fn paint_lower(
@@ -698,7 +743,7 @@ impl View for TelemetryPage {
             usize::from(area.width.saturating_sub(2)),
             Style::default().fg(theme.muted),
         );
-        let hint = "Tab charts/sessions/requests · j/k navigate · [ ] interval";
+        let hint = "Tab views | rankings: 1/2 group, left/right entity | [ ] interval";
         if area.width > 56 {
             let w = u16::try_from(hint.len()).unwrap_or(u16::MAX);
             buf.set_stringn(
@@ -714,10 +759,12 @@ impl View for TelemetryPage {
             height: area.height.saturating_sub(1),
             ..area
         };
-        if self.view == TelemetryView::Charts {
-            self.paint_charts(body, buf, cx, theme);
-        } else {
-            self.paint_lower(area, area.y + 1, buf, cx, theme);
+        match self.view {
+            TelemetryView::Charts => self.paint_charts(body, buf, cx, theme),
+            TelemetryView::Leaderboards => self.paint_leaderboards(body, buf, cx, theme),
+            TelemetryView::Sessions | TelemetryView::Requests => {
+                self.paint_lower(area, area.y + 1, buf, cx, theme);
+            }
         }
     }
 
@@ -751,7 +798,38 @@ impl View for TelemetryPage {
                     self.cycle_interval(false);
                     return Outcome::Consumed;
                 }
-                KeyCode::Char('j') | KeyCode::Down if self.view != TelemetryView::Charts => {
+                KeyCode::Char('1') if self.view == TelemetryView::Leaderboards => {
+                    self.leaderboard.select_usage();
+                    self.rebuild_leaderboard();
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('2') if self.view == TelemetryView::Leaderboards => {
+                    self.leaderboard.select_cost();
+                    self.rebuild_leaderboard();
+                    return Outcome::Consumed;
+                }
+                KeyCode::Left if self.view == TelemetryView::Leaderboards => {
+                    self.leaderboard.cycle_subject(true);
+                    self.rebuild_leaderboard();
+                    return Outcome::Consumed;
+                }
+                KeyCode::Right if self.view == TelemetryView::Leaderboards => {
+                    self.leaderboard.cycle_subject(false);
+                    self.rebuild_leaderboard();
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('j') | KeyCode::Down if self.view == TelemetryView::Leaderboards => {
+                    self.leaderboard.move_selection(1);
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('k') | KeyCode::Up if self.view == TelemetryView::Leaderboards => {
+                    self.leaderboard.move_selection(-1);
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('j') | KeyCode::Down
+                    if self.view != TelemetryView::Charts
+                        && self.view != TelemetryView::Leaderboards =>
+                {
                     if self.view == TelemetryView::Sessions {
                         let current = self.session_page() * SESSION_PAGE + self.selected_session;
                         let next = (current + 1).min(self.sessions.len().saturating_sub(1));
@@ -762,7 +840,10 @@ impl View for TelemetryPage {
                     }
                     return Outcome::Consumed;
                 }
-                KeyCode::Char('k') | KeyCode::Up if self.view != TelemetryView::Charts => {
+                KeyCode::Char('k') | KeyCode::Up
+                    if self.view != TelemetryView::Charts
+                        && self.view != TelemetryView::Leaderboards =>
+                {
                     if self.view == TelemetryView::Sessions {
                         let current = self.session_page() * SESSION_PAGE + self.selected_session;
                         self.select_session(current.saturating_sub(1));

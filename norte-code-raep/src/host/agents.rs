@@ -267,12 +267,14 @@ impl NorteCodeRaepHost {
         let mut errors = 0_u64;
         let mut cancelled = 0_u64;
         let mut duration_ms = 0_u64;
+        let mut cost_usd = 0.0_f64;
         for row in &records {
             input_tokens += row.input_tokens.unwrap_or(0);
             output_tokens += row.output_tokens.unwrap_or(0);
             cache_read_tokens += row.cache_read_tokens.unwrap_or(0);
             cache_write_tokens += row.cache_write_tokens.unwrap_or(0);
             duration_ms += row.duration_ms;
+            cost_usd += row.cost_usd.unwrap_or(0.0);
             match row.status {
                 norte_code_protocol::sqlite::RequestStatus::Error => errors += 1,
                 norte_code_protocol::sqlite::RequestStatus::Cancelled => cancelled += 1,
@@ -292,6 +294,7 @@ impl NorteCodeRaepHost {
                 output_tokens,
                 cache_read_tokens,
                 cache_write_tokens,
+                cost_usd,
             },
         }))
     }

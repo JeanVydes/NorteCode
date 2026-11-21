@@ -15,6 +15,7 @@ mod key_prompt;
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod layout_tests;
+mod leaderboard_section;
 mod markdown;
 mod models_page;
 mod overlay_frame;
@@ -28,6 +29,7 @@ mod rail_tests;
 mod selector;
 mod session_detail;
 mod sessions_page;
+mod settings_layout;
 mod settings_page;
 mod telemetry_page;
 #[cfg(test)]

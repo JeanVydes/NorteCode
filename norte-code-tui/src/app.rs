@@ -388,6 +388,17 @@ fn cycle_theme(tree: &mut terminalui::Tree, model: &mut UiModel) {
     ui::refresh_views(tree, model);
 }
 
+fn telemetry_rankings_focused(tree: &terminalui::Tree) -> bool {
+    tree.find::<ui::TelemetryPage>("telemetry")
+        .is_some_and(ui::TelemetryPage::is_leaderboard_focused)
+}
+
+fn digit_switches_tab(tree: &terminalui::Tree, model: &UiModel) -> bool {
+    model.tab != Tab::Chat
+        && model.tab != Tab::Models
+        && !(model.tab == Tab::Telemetry && telemetry_rankings_focused(tree))
+}
+
 fn toggle_list_focus(tree: &mut terminalui::Tree, tab: Tab) {
     // The tree would spend Tab moving focus between the charts and pagers;
     // here it switches the page between its two lists.
@@ -491,9 +502,7 @@ fn handle_key(
                 pass_to_tree = false;
             }
         }
-        (KeyModifiers::NONE, KeyCode::Char(digit))
-            if model.tab != Tab::Chat && model.tab != Tab::Models =>
-        {
+        (KeyModifiers::NONE, KeyCode::Char(digit)) if digit_switches_tab(tree, model) => {
             if let Some(tab) = Tab::from_digit(digit) {
                 model.tab = tab;
                 ui::sync_views(tree, model);
