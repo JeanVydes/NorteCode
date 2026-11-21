@@ -309,15 +309,18 @@ impl EventReader {
                         }
                     }
                     loop {
-                        if let Some((event, terminal)) = pending.pop_front() {
+                        if let Some((event, _)) = pending.pop_front() {
                             return Some((
                                 event,
+                                // A finished turn still belongs to this
+                                // stream. Closing here would drop the host
+                                // attachment and reject the next prompt.
                                 (
                                     bytes,
                                     buffer,
                                     pending,
                                     session,
-                                    finished || terminal,
+                                    finished,
                                     session_seq,
                                     command_result,
                                     command_reported,
@@ -389,7 +392,10 @@ impl EventReader {
                                     .await;
                             });
                         }
-                        if finished {
+                        // Deliver decoded frames before waiting for more
+                        // bytes. An idle stream can stay quiet for a long
+                        // time after a turn ends.
+                        if !pending.is_empty() || finished {
                             continue;
                         }
                         #[allow(clippy::single_match_else)]

@@ -1,10 +1,13 @@
 //! The live event queue stays bounded without dropping terminal events.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
+use futures_util::StreamExt;
 use norte_code_wire::{ServerEvent, ServerEventKind};
 
-use super::{MAX_PENDING_EVENTS, queue_event};
+use super::super::mock_host;
+use super::{MAX_PENDING_EVENTS, RemoteClient, queue_event};
 
 fn event(request_id: u64) -> ServerEvent {
     ServerEvent {
@@ -41,4 +44,27 @@ fn a_terminal_event_is_kept_when_the_queue_is_full() {
     assert_eq!(pending.len(), MAX_PENDING_EVENTS);
     let front = pending.front().expect("front");
     assert!(front.1, "the terminal event is still first");
+}
+
+#[tokio::test]
+async fn a_finished_turn_keeps_the_event_stream_open() {
+    let host = mock_host::start_with_stream().await;
+    let client = RemoteClient::new(host.base_url.clone(), None, None).expect("client");
+    let mut events = client
+        .open_events_of("session-1")
+        .await
+        .expect("event stream");
+
+    let first = tokio::time::timeout(Duration::from_secs(2), events.next())
+        .await
+        .expect("a terminal frame arrives")
+        .expect("a decoded event");
+    assert!(matches!(first.kind, ServerEventKind::TurnFinished { .. }));
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), events.next())
+            .await
+            .is_err(),
+        "a finished turn must not close the attachment"
+    );
 }

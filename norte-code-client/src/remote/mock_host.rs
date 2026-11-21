@@ -42,6 +42,11 @@ pub(crate) async fn start_with_jobs() -> MockHost {
     serve(Answer::Jobs).await
 }
 
+/// Starts a host whose event stream stays open after a finished turn.
+pub(crate) async fn start_with_stream() -> MockHost {
+    serve(Answer::Stream).await
+}
+
 /// What the mock host answers.
 #[derive(Clone, Copy)]
 enum Answer {
@@ -51,6 +56,8 @@ enum Answer {
     RefuseAlways,
     /// Answer job commands and refuse the rest.
     Jobs,
+    /// Keep the event stream open after a terminal frame.
+    Stream,
 }
 
 async fn serve(answer: Answer) -> MockHost {
@@ -74,6 +81,10 @@ async fn serve(answer: Answer) -> MockHost {
             let commands = Arc::clone(&commands);
             tokio::spawn(async move {
                 let request = read_request(&mut stream).await;
+                if matches!(answer, Answer::Stream) && request.contains("/events") {
+                    stream_events(&mut stream).await;
+                    return;
+                }
                 let answer = if request.contains("SESSION_ATTACH") {
                     attaches.fetch_add(1, Ordering::SeqCst);
                     response(200, r#"{"events":[]}"#)
@@ -157,6 +168,24 @@ fn not_attached() -> String {
         },
     })
     .to_string()
+}
+
+async fn stream_events(stream: &mut TcpStream) {
+    let body = concat!(
+        "event: turn_state_changed\n",
+        "data: {\"session_id\":\"session-1\",\"seq\":1,\"payload\":{\"event\":\"turn_state_changed\",\"state\":\"finished\",\"turn\":1,\"phase\":\"idle\",\"committed\":true}}\n",
+        "\n",
+    );
+    // One byte short on purpose: the frame is delivered, but the response
+    // stays open so a finished turn cannot close the stream.
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nContent-Length: {}\r\n\r\n",
+        body.len() + 1
+    );
+    let _ = stream.write_all(headers.as_bytes()).await;
+    let _ = stream.write_all(body.as_bytes()).await;
+    let _ = stream.flush().await;
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 }
 
 fn response(status: u16, body: &str) -> Vec<u8> {
