@@ -1,5 +1,6 @@
 //! The rankings view inside the telemetry tab.
 
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -9,6 +10,13 @@ use terminalui::{Context, Theme, View, node};
 use crate::leaderboard::{Leaderboard, LeaderboardGroup, LeaderboardSubject};
 use norte_code_wire::TelemetryRecord;
 
+/// What a click changed in the rankings view.
+pub(crate) enum LeaderboardClick {
+    None,
+    Tab,
+    Row,
+}
+
 /// Owns the six rankings, their tabs and their selection.
 pub(crate) struct LeaderboardSection {
     group: LeaderboardGroup,
@@ -16,6 +24,7 @@ pub(crate) struct LeaderboardSection {
     board: Leaderboard,
     selected: usize,
     table: Table,
+    area: Rect,
 }
 
 impl LeaderboardSection {
@@ -25,6 +34,7 @@ impl LeaderboardSection {
             subject: LeaderboardSubject::Model,
             board: Leaderboard::default(),
             selected: 0,
+            area: Rect::new(0, 0, 0, 0),
             table: Table::new().with_header(node(
                 "header",
                 TableRow::header(vec![
@@ -78,6 +88,26 @@ impl LeaderboardSection {
         self.table.state.selected = 0;
     }
 
+    #[cfg(test)]
+    pub(crate) fn group(&self) -> LeaderboardGroup {
+        self.group
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subject(&self) -> LeaderboardSubject {
+        self.subject
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected(&self) -> usize {
+        self.selected
+    }
+
+    #[cfg(test)]
+    pub(crate) fn area(&self) -> Rect {
+        self.area
+    }
+
     pub(crate) fn select_usage(&mut self) {
         self.group = LeaderboardGroup::Usage;
     }
@@ -94,6 +124,14 @@ impl LeaderboardSection {
         };
     }
 
+    pub(crate) fn cycle_group(&mut self, backwards: bool) {
+        self.group = if backwards {
+            self.group.previous()
+        } else {
+            self.group.next()
+        };
+    }
+
     pub(crate) fn move_selection(&mut self, delta: isize) {
         let last = isize::try_from(self.board.rows.len().saturating_sub(1)).unwrap_or(isize::MAX);
         let current = isize::try_from(self.selected).unwrap_or(isize::MAX);
@@ -101,7 +139,54 @@ impl LeaderboardSection {
         self.table.state.selected = self.selected;
     }
 
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> LeaderboardClick {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return LeaderboardClick::None;
+        }
+        let row = mouse.row.saturating_sub(self.area.y);
+        let column = mouse.column.saturating_sub(self.area.x);
+        match row {
+            1 if (1..=5).contains(&column) => self.select_group(LeaderboardGroup::Usage),
+            1 if (10..=13).contains(&column) => self.select_group(LeaderboardGroup::Cost),
+            2 if (1..=6).contains(&column) => self.select_subject(LeaderboardSubject::Model),
+            2 if (10..=18).contains(&column) => self.select_subject(LeaderboardSubject::Provider),
+            2 if (22..=29).contains(&column) => self.select_subject(LeaderboardSubject::Session),
+            _ if row >= 6 => {
+                let index = usize::from(row - 6);
+                if index < self.board.rows.len() {
+                    self.selected = index;
+                    self.table.state.selected = index;
+                    LeaderboardClick::Row
+                } else {
+                    LeaderboardClick::None
+                }
+            }
+            _ => LeaderboardClick::None,
+        }
+    }
+
+    fn select_group(&mut self, group: LeaderboardGroup) -> LeaderboardClick {
+        let changed = self.group != group;
+        self.group = group;
+        if changed {
+            LeaderboardClick::Tab
+        } else {
+            LeaderboardClick::None
+        }
+    }
+
+    fn select_subject(&mut self, subject: LeaderboardSubject) -> LeaderboardClick {
+        let changed = self.subject != subject;
+        self.subject = subject;
+        if changed {
+            LeaderboardClick::Tab
+        } else {
+            LeaderboardClick::None
+        }
+    }
+
     pub(crate) fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
+        self.area = area;
         let active = Style::default()
             .fg(theme.foreground)
             .add_modifier(Modifier::BOLD);
@@ -122,8 +207,8 @@ impl LeaderboardSection {
             LeaderboardGroup::Usage => (active, idle),
             LeaderboardGroup::Cost => (idle, active),
         };
-        buf.set_stringn(area.x + 1, area.y + 1, "1 usage", 7, usage);
-        buf.set_stringn(area.x + 10, area.y + 1, "2 cost", 6, cost);
+        buf.set_stringn(area.x + 1, area.y + 1, "usage", 5, usage);
+        buf.set_stringn(area.x + 10, area.y + 1, "cost", 4, cost);
 
         let (models, providers, sessions) = match self.subject {
             LeaderboardSubject::Model => (active, idle, idle),

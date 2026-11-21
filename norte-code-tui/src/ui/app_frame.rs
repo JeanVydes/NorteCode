@@ -13,22 +13,22 @@ use terminalui::{Context, InputEvent, Node, Outcome, Theme, View};
 /// The four bands of the main frame.
 #[derive(Serialize)]
 pub(crate) struct AppFrame {
-    show_composer: bool,
+    show_chat_chrome: bool,
     children: Vec<Node>,
 }
 
 impl AppFrame {
     /// Compose the frame from its four bands.
-    pub(crate) fn new(children: Vec<Node>, show_composer: bool) -> Self {
+    pub(crate) fn new(children: Vec<Node>, show_chat_chrome: bool) -> Self {
         Self {
-            show_composer,
+            show_chat_chrome,
             children,
         }
     }
 
-    /// Show the composer band only on the chat tab.
-    pub(crate) fn set_show_composer(&mut self, show: bool) {
-        self.show_composer = show;
+    /// Show the composer and status bands only on the chat tab.
+    pub(crate) fn set_show_chat_chrome(&mut self, show: bool) {
+        self.show_chat_chrome = show;
     }
 }
 
@@ -50,9 +50,13 @@ impl View for AppFrame {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
-        let composer_height = if self.show_composer { 6 } else { 0 };
+        let composer_height = if self.show_chat_chrome { 6 } else { 0 };
         let header_height = 1u16.min(area.height);
-        let status_height = 1u16.min(area.height.saturating_sub(header_height));
+        let status_height = if self.show_chat_chrome {
+            1u16.min(area.height.saturating_sub(header_height + composer_height))
+        } else {
+            0
+        };
         let middle_height = area
             .height
             .saturating_sub(header_height + composer_height + status_height);
