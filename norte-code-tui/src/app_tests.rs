@@ -7,7 +7,7 @@ use norte_code_wire::{SessionKey, UploadReceipt};
 use terminalui::{InputEvent, Theme, Tree, node};
 use tokio::sync::mpsc;
 
-use super::{fold_upload_event, handle_key};
+use super::{drain_plan_requests, fold, fold_upload_event, handle_key};
 use crate::attachment::{AttachmentKind, AttachmentSource, PreparedAttachment};
 use crate::client::{ClientEvent, UiCommand};
 use crate::clipboard::{Clipboard, FakeClipboard};
@@ -192,4 +192,89 @@ fn a_failed_upload_leaves_no_chip() {
     let composer = tree.find::<Composer>("composer").expect("composer");
     assert_eq!(composer.expanded_text(), "");
     assert_eq!(composer.wire_parts(), []);
+}
+
+fn turn_finished() -> norte_code_wire::ServerEvent {
+    norte_code_wire::ServerEvent {
+        request_id: 1,
+        session: Some(SessionKey::new("session_1")),
+        kind: norte_code_wire::ServerEventKind::TurnFinished {
+            turn: 1,
+            phase: norte_code_wire::Phase::Idle,
+            committed: true,
+            output_schema_valid: None,
+        },
+    }
+}
+
+#[test]
+fn turn_finish_refreshes_the_rail() {
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = UiModel::detached();
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+
+    fold(&turn_finished(), &mut tree, &mut model, &mut commands);
+
+    assert!(matches!(commands_rx.try_recv(), Ok(UiCommand::RefreshRail)));
+}
+
+#[test]
+fn a_started_job_appears_in_the_rail_model() {
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = UiModel::detached();
+    let mut commands = None;
+    let event = norte_code_wire::ServerEvent {
+        request_id: 1,
+        session: Some(SessionKey::new("session_1")),
+        kind: norte_code_wire::ServerEventKind::JobStarted {
+            job_id: "job_1".to_owned(),
+            tool_call_id: "call_1".to_owned(),
+            command: "echo hello".to_owned(),
+            started_at: 0,
+            limits: norte_code_wire::JobLimits::default(),
+        },
+    };
+
+    fold(&event, &mut tree, &mut model, &mut commands);
+
+    assert_eq!(model.jobs.len(), 1);
+    assert_eq!(model.jobs[0].job_id, "job_1");
+    assert_eq!(model.jobs[0].command, "echo hello");
+}
+
+#[test]
+fn the_preview_button_opens_the_newest_plan() {
+    let mut model = UiModel::detached();
+    model.plans.push(norte_code_wire::PlanSummary {
+        id: "plan_1".to_owned(),
+        title: Some("A plan".to_owned()),
+        content: "body".to_owned(),
+        ..Default::default()
+    });
+    let mut tree = ui::build_tree(&model);
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let button = tree
+        .find::<terminalui::components::button::Button>("preview")
+        .expect("preview");
+    let x = button.state.area.x;
+    let y = button.state.area.y;
+    let click = InputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: x,
+        row: y,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    });
+    let _ = tree.handle_event(&click);
+
+    drain_plan_requests(&mut tree, &model);
+
+    assert!(
+        tree.find::<ui::PlanOverlay>("plan_overlay")
+            .expect("plan overlay")
+            .is_open()
+    );
 }

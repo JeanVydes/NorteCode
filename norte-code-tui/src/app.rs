@@ -321,10 +321,15 @@ fn poll_event(
 }
 
 fn drain_plan_requests(tree: &mut terminalui::Tree, model: &UiModel) {
-    let Some(id) = tree
+    let clicked = tree
         .find_mut::<ui::Rail>("rail")
-        .and_then(ui::Rail::take_plan_request)
-    else {
+        .and_then(ui::Rail::take_plan_request);
+    let previewed = tree
+        .find_mut::<Button>("preview")
+        .is_some_and(Button::take_pressed)
+        .then(|| model.plans.first().map(|plan| plan.id.clone()))
+        .flatten();
+    let Some(id) = clicked.or(previewed) else {
         return;
     };
     if let Some(plan) = model.plans.iter().find(|plan| plan.id == id).cloned()
@@ -1224,7 +1229,7 @@ fn drain_server_events(
                 changed = fold_history_failure(tree, model, &reason) || changed;
             }
             Ok(ClientEvent::Server(event)) => {
-                fold(&event, tree, model);
+                fold(&event, tree, model, commands);
                 changed = true;
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
@@ -1244,11 +1249,23 @@ fn drain_server_events(
     }
 }
 
-fn fold_job_event(kind: &norte_code_wire::ServerEventKind, tree: &mut terminalui::Tree) {
+fn fold_job_event(
+    kind: &norte_code_wire::ServerEventKind,
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+) {
     match kind {
         norte_code_wire::ServerEventKind::JobStarted {
             job_id, command, ..
         } => {
+            upsert_job(
+                model,
+                norte_code_wire::JobSummary {
+                    job_id: job_id.clone(),
+                    command: command.clone(),
+                    ..Default::default()
+                },
+            );
             notice(
                 tree,
                 crate::job_notice::started(job_id, command),
@@ -1256,11 +1273,48 @@ fn fold_job_event(kind: &norte_code_wire::ServerEventKind, tree: &mut terminalui
             );
         }
         norte_code_wire::ServerEventKind::JobFinished { job, .. } => {
+            upsert_job(model, job_summary(job));
             let text = crate::job_notice::finished(job);
             let tone = crate::job_notice::tone(job);
             notice(tree, text, tone);
         }
         _ => {}
+    }
+}
+
+fn upsert_job(model: &mut UiModel, job: norte_code_wire::JobSummary) {
+    model.jobs.retain(|existing| existing.job_id != job.job_id);
+    model.jobs.insert(0, job);
+}
+
+fn job_summary(info: &norte_code_wire::JobInfo) -> norte_code_wire::JobSummary {
+    use norte_code_wire::{JobState, JobStatus};
+
+    let status = if info.timed_out {
+        JobStatus::TimedOut
+    } else {
+        match info.state {
+            JobState::Running => JobStatus::Running,
+            JobState::Finished => match info.exit_code {
+                Some(code) if code != 0 => JobStatus::Failed,
+                _ => JobStatus::Completed,
+            },
+            JobState::Cancelled => JobStatus::Killed,
+        }
+    };
+    norte_code_wire::JobSummary {
+        job_id: info.id.clone(),
+        command: if info.label.is_empty() {
+            info.script.clone()
+        } else {
+            info.label.clone()
+        },
+        status,
+        exit_code: info.exit_code,
+        output_snapshot: (!info.output.is_empty()).then(|| info.output.clone()),
+        output_bytes_total: info.output_bytes_total,
+        output_truncated: info.dropped,
+        duration_ms: Some(info.elapsed_ms),
     }
 }
 
@@ -1307,7 +1361,12 @@ fn fold_compaction_event(kind: &ServerEventKind, tree: &mut terminalui::Tree, mo
     }
 }
 
-fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model: &mut UiModel) {
+fn fold(
+    event: &norte_code_wire::ServerEvent,
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+) {
     if fold_error_event(&event.kind, tree, model) {
         return;
     }
@@ -1375,6 +1434,12 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
         ServerEventKind::PluginChanged { .. } => {
             model.plugin_job = None;
         }
+        ServerEventKind::PlanList { plans } => {
+            model.plans.clone_from(plans);
+        }
+        ServerEventKind::JobList { jobs } => {
+            model.jobs = jobs.iter().map(job_summary).collect();
+        }
         ServerEventKind::QuestionAnswered { .. } => {
             model.question = None;
             if model.turn == TurnState::AwaitingAnswer {
@@ -1389,18 +1454,29 @@ fn fold(event: &norte_code_wire::ServerEvent, tree: &mut terminalui::Tree, model
             }
         }
         ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. } => {
-            model.turn = TurnState::Idle;
-            model.active_turn = None;
-            model.question = None;
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.stop_thinking();
-                stream.complete_running_tools();
-            }
+            finish_turn(tree, model, commands);
         }
         _ => {
-            fold_job_event(&event.kind, tree);
+            fold_job_event(&event.kind, tree, model);
             fold_compaction_event(&event.kind, tree, model);
         }
+    }
+}
+
+fn finish_turn(
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+) {
+    model.turn = TurnState::Idle;
+    model.active_turn = None;
+    model.question = None;
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.stop_thinking();
+        stream.complete_running_tools();
+    }
+    if let Some(commands) = commands {
+        let _ = commands.try_send(UiCommand::RefreshRail);
     }
 }
 
