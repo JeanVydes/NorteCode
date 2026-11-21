@@ -99,13 +99,17 @@ fn key(code: KeyCode) -> InputEvent {
     InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
-fn click(column: u16, row: u16) -> InputEvent {
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> InputEvent {
     InputEvent::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
+        kind,
         column,
         row,
         modifiers: KeyModifiers::NONE,
     })
+}
+
+fn click(column: u16, row: u16) -> InputEvent {
+    mouse(MouseEventKind::Down(MouseButton::Left), column, row)
 }
 
 fn wheel(column: u16, row: u16, modifiers: KeyModifiers) -> InputEvent {
@@ -229,26 +233,95 @@ fn wheel_inside_a_line_chart_scrolls_the_shared_history_only() {
 }
 
 #[test]
-fn shift_wheel_over_a_chart_scrolls_the_stack_only() {
+fn shift_wheel_over_a_chart_still_scrolls_its_history() {
     let (mut tree, _, theme) = chart_tree();
     render_charts(&mut tree, &theme, 50);
     let area = page(&tree).chart_area(0);
 
     tree.handle_event(&wheel(area.x + 20, area.y + 5, KeyModifiers::SHIFT));
 
-    assert_eq!(page(&tree).chart_scroll_back(), 0);
-    assert_eq!(page(&tree).chart_scroll(), 3);
+    assert!(page(&tree).chart_scroll_back() > 0);
+    assert_eq!(page(&tree).chart_scroll(), 0);
 }
 
 #[test]
-fn wheel_outside_the_charts_scrolls_the_stack_only() {
+fn wheel_outside_the_charts_does_not_scroll_the_stack() {
     let (mut tree, _, theme) = chart_tree();
     render_charts(&mut tree, &theme, 50);
 
     tree.handle_event(&wheel(20, 1, KeyModifiers::NONE));
 
     assert_eq!(page(&tree).chart_scroll_back(), 0);
+    assert_eq!(page(&tree).chart_scroll(), 0);
+}
+
+#[test]
+fn arrows_scroll_the_stacked_charts() {
+    let (mut tree, _, theme) = chart_tree();
+    render_charts(&mut tree, &theme, 50);
+    assert_eq!(page(&tree).chart_scroll(), 0);
+
+    tree.handle_event(&key(KeyCode::Down));
     assert_eq!(page(&tree).chart_scroll(), 3);
+
+    tree.handle_event(&key(KeyCode::Up));
+    assert_eq!(page(&tree).chart_scroll(), 0);
+}
+
+#[test]
+fn clicking_the_chart_scrollbar_pages_the_stack() {
+    let (mut tree, _, theme) = chart_tree();
+    render_charts(&mut tree, &theme, 30);
+    let rail = page(&tree).chart_rail().expect("stack scrollbar");
+
+    tree.handle_event(&click(rail.x, rail.y + rail.height - 1));
+
+    assert!(page(&tree).chart_scroll() > 0);
+    assert_eq!(page(&tree).chart_scroll_back(), 0);
+}
+
+#[test]
+fn dragging_the_chart_scrollbar_thumb_moves_the_stack() {
+    let (mut tree, _, theme) = chart_tree();
+    render_charts(&mut tree, &theme, 30);
+    let rail = page(&tree).chart_rail().expect("stack scrollbar");
+
+    tree.handle_event(&mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        rail.x,
+        rail.y + rail.top + 1,
+    ));
+    tree.handle_event(&mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        rail.x,
+        rail.y + rail.height - 1,
+    ));
+    assert!(page(&tree).chart_scroll() > 0);
+
+    tree.handle_event(&mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        rail.x,
+        rail.y + rail.height - 1,
+    ));
+    let settled = page(&tree).chart_scroll();
+    tree.handle_event(&mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        rail.x,
+        rail.y,
+    ));
+    assert_eq!(page(&tree).chart_scroll(), settled);
+}
+
+#[test]
+fn the_stacked_charts_draw_a_scrollbar_when_they_overflow() {
+    let (mut tree, _, theme) = chart_tree();
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+
+    tree.render(area, &mut buf, &theme);
+
+    let rail = page(&tree).chart_rail().expect("stack scrollbar");
+    assert_eq!(buf[(rail.x, rail.y + rail.top)].symbol(), "█");
 }
 
 #[test]

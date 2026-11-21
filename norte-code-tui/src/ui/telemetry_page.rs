@@ -22,6 +22,10 @@ use crate::session_stats::{SessionUsage, SharedUsage};
 use crate::shared_telemetry::SharedTelemetry;
 use crate::telemetry::{ChartInterval, short_label};
 use crate::telemetry_series::{Series, series};
+use chart_scroll::ChartScroll;
+
+#[path = "telemetry_chart_scroll.rs"]
+mod chart_scroll;
 
 /// Sessions and requests shown per page.
 const SESSION_PAGE: usize = 4;
@@ -69,10 +73,9 @@ pub(crate) struct TelemetryPage {
     pub(crate) detail_is_request: bool,
     /// Which view is on screen.
     view: TelemetryView,
-    /// Scroll offset in the tall stacked charts.
-    chart_scroll: u16,
-    /// Visible height of the stacked chart viewport.
-    chart_viewport: u16,
+    /// Scroll offset and rail of the tall stacked charts.
+    #[serde(skip)]
+    chart_scroll: ChartScroll,
     /// Screen areas of the three chart bodies, for wheel hit-testing.
     #[serde(skip)]
     chart_areas: Vec<Rect>,
@@ -110,8 +113,7 @@ impl TelemetryPage {
             selected_session: 0,
             detail_is_request: false,
             view: TelemetryView::Charts,
-            chart_scroll: 0,
-            chart_viewport: 0,
+            chart_scroll: ChartScroll::default(),
             chart_areas: Vec::new(),
             chart_data: Series::default(),
             bucket_labels: Arc::new(Vec::new()),
@@ -171,7 +173,12 @@ impl TelemetryPage {
 
     #[cfg(test)]
     pub(crate) fn chart_scroll(&self) -> u16 {
-        self.chart_scroll
+        self.chart_scroll.offset()
+    }
+
+    #[cfg(test)]
+    pub(super) fn chart_rail(&self) -> Option<chart_scroll::Rail> {
+        self.chart_scroll.rail()
     }
 
     #[cfg(test)]
@@ -375,24 +382,10 @@ impl TelemetryPage {
         chart.state.scroll_back = usize::try_from((current + delta).clamp(0, max)).unwrap_or(0);
     }
 
-    fn disable_chart_hit_test(&mut self) {
-        if let Some(chart) = self
-            .children
-            .first_mut()
-            .and_then(|node| node.view.as_any().downcast_mut::<CandleChart>())
-        {
-            chart.state.area = Rect::new(0, 0, 0, 0);
-        }
-    }
-
     pub(crate) fn scroll_chart_view(&mut self, delta: isize) {
-        if self.view != TelemetryView::Charts {
-            return;
+        if self.view == TelemetryView::Charts {
+            self.chart_scroll.scroll(delta, CHART_ROWS);
         }
-        let max =
-            isize::try_from(CHART_ROWS.saturating_sub(self.chart_viewport)).unwrap_or(isize::MAX);
-        let current = isize::try_from(self.chart_scroll).unwrap_or(isize::MAX);
-        self.chart_scroll = u16::try_from((current + delta).clamp(0, max)).unwrap_or(0);
     }
 
     fn pager_page(&self, index: usize) -> usize {
@@ -676,10 +669,8 @@ impl TelemetryPage {
             "tokens · in + out",
             "cache · hit rate %",
         ];
-        self.chart_viewport = area.height;
-        self.chart_scroll = self
-            .chart_scroll
-            .min(CHART_ROWS.saturating_sub(area.height));
+        self.chart_scroll.set_viewport(area.height, CHART_ROWS);
+        let offset = self.chart_scroll.offset();
         self.chart_areas.clear();
         let mut page = Buffer::empty(Rect::new(0, 0, area.width, CHART_ROWS));
         let bold = Style::default()
@@ -699,7 +690,7 @@ impl TelemetryPage {
             if let Some(chart) = child.view.as_any().downcast_mut::<CandleChart>() {
                 chart.state.area = Rect {
                     x: area.x,
-                    y: area.y + body_y.saturating_sub(self.chart_scroll),
+                    y: area.y + body_y.saturating_sub(offset),
                     width: area.width,
                     height: CHART_SLOT - 1,
                 };
@@ -707,7 +698,7 @@ impl TelemetryPage {
         }
         self.chart_areas.push(Rect {
             x: area.x,
-            y: area.y + body_y.saturating_sub(self.chart_scroll),
+            y: area.y + body_y.saturating_sub(offset),
             width: area.width,
             height: CHART_SLOT - 1,
         });
@@ -735,13 +726,13 @@ impl TelemetryPage {
             );
             self.chart_areas.push(Rect {
                 x: area.x,
-                y: area.y + body_y.saturating_sub(self.chart_scroll),
+                y: area.y + body_y.saturating_sub(offset),
                 width: area.width,
                 height: CHART_SLOT - 1,
             });
         }
         for row in 0..area.height {
-            let source = row.saturating_add(self.chart_scroll);
+            let source = row.saturating_add(offset);
             if source >= CHART_ROWS {
                 break;
             }
@@ -754,6 +745,7 @@ impl TelemetryPage {
                 }
             }
         }
+        self.chart_scroll.paint(area, buf, theme, CHART_ROWS);
     }
 
     fn paint_sessions(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
@@ -913,9 +905,12 @@ impl TelemetryPage {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Option<Outcome> {
-        use crossterm::event::{KeyModifiers, MouseEventKind};
+        use crossterm::event::MouseEventKind;
         match self.view {
             TelemetryView::Charts => {
+                if self.chart_scroll.handle_mouse(mouse, CHART_ROWS) {
+                    return Some(Outcome::Consumed);
+                }
                 if !matches!(
                     mouse.kind,
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
@@ -928,16 +923,14 @@ impl TelemetryPage {
                         && mouse.row >= area.y
                         && mouse.row < area.y.saturating_add(area.height)
                 });
-                let up = mouse.kind == MouseEventKind::ScrollUp;
-                let delta = if up { -3 } else { 3 };
-                if mouse.modifiers.contains(KeyModifiers::SHIFT) || chart.is_none() {
-                    self.disable_chart_hit_test();
-                    self.scroll_chart_view(delta);
-                    return Some(Outcome::Consumed);
-                }
-                if chart == Some(0) {
+                if chart.is_none_or(|index| index == 0) {
                     return None;
                 }
+                let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                    -3
+                } else {
+                    3
+                };
                 self.scroll_chart_history(delta);
                 Some(Outcome::Consumed)
             }
@@ -1031,7 +1024,7 @@ impl View for TelemetryPage {
         );
         let hint = match self.view {
             TelemetryView::Charts => {
-                "wheel charts/history | shift+wheel stack | pgup/pgdn stack | [ ] interval"
+                "wheel charts history | up/down stack | click bar to scroll | [ ] interval"
             }
             TelemetryView::Leaderboards => {
                 "up/down group, left/right entity, j/k rows | [ ] interval"
@@ -1078,12 +1071,12 @@ impl View for TelemetryPage {
                 return outcome;
             }
             match key.code {
-                KeyCode::PageUp if self.view == TelemetryView::Charts => {
-                    self.scroll_chart_view(-6);
+                KeyCode::Up | KeyCode::PageUp if self.view == TelemetryView::Charts => {
+                    self.scroll_chart_view(if key.code == KeyCode::Up { -3 } else { -6 });
                     return Outcome::Consumed;
                 }
-                KeyCode::PageDown if self.view == TelemetryView::Charts => {
-                    self.scroll_chart_view(6);
+                KeyCode::Down | KeyCode::PageDown if self.view == TelemetryView::Charts => {
+                    self.scroll_chart_view(if key.code == KeyCode::Down { 3 } else { 6 });
                     return Outcome::Consumed;
                 }
                 KeyCode::Char('[') => {
