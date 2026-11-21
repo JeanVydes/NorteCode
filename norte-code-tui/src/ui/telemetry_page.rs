@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use chrono::Utc;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use serde::Serialize;
@@ -18,12 +19,18 @@ use crate::session_stats::SharedUsage;
 use crate::shared_telemetry::SharedTelemetry;
 use crate::telemetry::ChartInterval;
 use crate::telemetry_series::Series;
+use crate::usage_calendar::{CALENDAR_WEEKS, UsageCalendar};
 use chart_scroll::ChartScroll;
 
 #[path = "telemetry_chart_scroll.rs"]
 mod chart_scroll;
 #[path = "telemetry_page_charts.rs"]
 mod charts;
+#[path = "telemetry_page_heatmap.rs"]
+mod heatmap;
+#[cfg(test)]
+#[path = "telemetry_page_heatmap_tests.rs"]
+mod heatmap_tests;
 #[path = "telemetry_page_leaderboards.rs"]
 mod leaderboards;
 #[path = "telemetry_page_lists.rs"]
@@ -39,6 +46,8 @@ pub(crate) const MAX_RECORD_WINDOW: usize = 1_000;
 const CHART_SLOT: u16 = 18;
 const CHART_GAP: u16 = 2;
 const CHART_ROWS: u16 = CHART_SLOT * 3 + CHART_GAP * 2;
+/// Month labels plus the seven weekday rows of the usage heatmap.
+const HEATMAP_ROWS: u16 = 8;
 const LINE_AXIS_WIDTH: u16 = 9;
 const CHART_TITLES: [&str; 3] = [
     "cost · cumulative usd",
@@ -101,6 +110,14 @@ pub(crate) struct TelemetryPage {
     /// Reused composition surface for the stacked charts.
     #[serde(skip)]
     chart_page: Buffer,
+    /// Trailing year of burned tokens, bucketed by calendar day.
+    #[serde(skip)]
+    usage_calendar: UsageCalendar,
+    /// Screen area and visible width of the heatmap drawn above the charts.
+    #[serde(skip)]
+    heatmap_area: Rect,
+    #[serde(skip)]
+    heatmap_weeks: usize,
     /// Pages the request table was last rebuilt for.
     last_session_page: usize,
     last_request_page: usize,
@@ -132,6 +149,9 @@ impl TelemetryPage {
             bucket_labels: Arc::new(Vec::new()),
             line_window: None,
             chart_page: Buffer::empty(Rect::new(0, 0, 0, CHART_ROWS)),
+            usage_calendar: UsageCalendar::from_report(None, Utc::now().date_naive()),
+            heatmap_area: Rect::default(),
+            heatmap_weeks: CALENDAR_WEEKS,
             last_session_page: 0,
             last_request_page: 0,
             last_request_row: 0,
@@ -195,6 +215,8 @@ impl TelemetryPage {
         }
         self.report = report;
         self.usage = usage;
+        self.usage_calendar =
+            UsageCalendar::from_report(self.report.as_deref(), Utc::now().date_naive());
         let start = self.report.as_ref().map_or(0, |report| {
             report.records.len().saturating_sub(MAX_RECORD_WINDOW)
         });

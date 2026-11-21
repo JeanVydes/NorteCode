@@ -34,6 +34,7 @@ mod theme;
 mod tui_error;
 mod ui;
 mod ui_model;
+mod usage_calendar;
 
 pub use tui_error::TuiError;
 

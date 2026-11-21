@@ -10,7 +10,7 @@ use terminalui::{Context, InputEvent, Node, Outcome, Theme, View};
 
 use crate::ui::leaderboard_section::LeaderboardClick;
 
-use super::{CHART_ROWS, SESSION_PAGE, TelemetryPage, TelemetryView};
+use super::{CHART_ROWS, HEATMAP_ROWS, SESSION_PAGE, TelemetryPage, TelemetryView};
 
 impl TelemetryPage {
     pub(super) fn paint_lower(
@@ -215,7 +215,27 @@ impl View for TelemetryPage {
             ..area
         };
         match self.view {
-            TelemetryView::Charts => self.paint_charts(body, buf, cx, theme),
+            TelemetryView::Charts => {
+                let heatmap_height = HEATMAP_ROWS.min(body.height);
+                self.paint_heatmap(
+                    Rect {
+                        height: heatmap_height,
+                        ..body
+                    },
+                    buf,
+                    theme,
+                );
+                self.paint_charts(
+                    Rect {
+                        y: body.y + heatmap_height,
+                        height: body.height - heatmap_height,
+                        ..body
+                    },
+                    buf,
+                    cx,
+                    theme,
+                );
+            }
             TelemetryView::Leaderboards => self.paint_leaderboards(body, buf, cx, theme),
             TelemetryView::Sessions | TelemetryView::Requests => {
                 self.paint_lower(area, area.y + 1, buf, cx, theme);

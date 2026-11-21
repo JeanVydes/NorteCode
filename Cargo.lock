@@ -1645,6 +1645,7 @@ name = "norte-code-tui"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "chrono",
  "crossterm 0.29.0",
  "futures-util",
  "norte-code-client",
