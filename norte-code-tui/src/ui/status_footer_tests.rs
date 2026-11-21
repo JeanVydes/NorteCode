@@ -3,7 +3,10 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use crate::ui::{build_tree, sync_views};
+use terminalui::components::statusbar::StatusBar;
+
+use crate::theme::{ThemeChoice, ThemeKind};
+use crate::ui::{build_tree, sync_theme, sync_views};
 use crate::ui_model::{Tab, UiModel};
 
 fn render(tab: Tab) -> (Buffer, Rect) {
@@ -46,6 +49,31 @@ fn chat_shows_the_reasoning_and_tab_hint() {
     let focusable = focusable_ids(Tab::Chat);
     assert!(focusable.iter().any(|id| id == "reasoning"));
     assert!(focusable.iter().any(|id| id == "queue"));
+}
+
+#[test]
+fn changing_the_theme_repaints_the_status_strip() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    let dark = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    model.preferences.theme = ThemeChoice::BuiltIn(ThemeKind::ByeRetina);
+    let light = model.preferences.catalog.theme(&model.preferences.theme);
+    assert_ne!(dark, light);
+
+    sync_theme(&mut tree, &model);
+    sync_views(&mut tree, &model);
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &light);
+
+    let bar = tree.find::<StatusBar>("status").expect("status");
+    assert_eq!(bar.style.background, Some(light.secondary));
+    assert_eq!(bar.style.separator, Some(light.border));
+    let status = bar.state.area;
+    let repainted = (status.y..status.y + status.height)
+        .any(|y| (status.x..status.x + status.width).any(|x| buf[(x, y)].fg == light.muted));
+    assert!(repainted);
 }
 
 #[test]
