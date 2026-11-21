@@ -76,6 +76,7 @@ where
         self.entries.contains_key(key)
     }
 
+    #[cfg(test)]
     pub(super) fn remove<Q>(&mut self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -86,10 +87,6 @@ where
             self.order.retain(|entry| entry.borrow() != key);
         }
         removed
-    }
-
-    pub(super) fn values(&self) -> impl Iterator<Item = &V> {
-        self.entries.values()
     }
 
     #[cfg(test)]

@@ -74,12 +74,12 @@ impl ArtifactStore for BlobArtifactStore {
 #[derive(Default)]
 pub(super) struct HostState {
     pub(super) attached: HashSet<String>,
-    pub(super) attachment_modes: super::bounded_map::BoundedMap<String, AttachMode>,
+    pub(super) attachment_modes: HashMap<String, AttachMode>,
     pub(super) sequences: super::bounded_map::BoundedMap<String, u64>,
     pub(super) idempotency: HashMap<(String, FrameId), CachedRequest>,
     pub(super) idempotency_order: VecDeque<(String, FrameId)>,
-    pub(super) session_owners: super::bounded_map::BoundedMap<String, String>,
-    pub(super) artifact_owners: super::bounded_map::BoundedMap<String, String>,
+    pub(super) session_owners: HashMap<String, String>,
+    pub(super) artifact_owners: HashMap<String, String>,
     pub(super) exports: HashMap<String, StoredExport>,
     pub(super) imports: HashMap<String, StoredImport>,
     pub(super) session_agents: super::bounded_map::BoundedMap<String, String>,
