@@ -63,6 +63,11 @@ pub(crate) enum ClientEvent {
     Readiness(norte_code_client::Readiness),
     /// The tenant's quota report.
     Quota(norte_code_wire::QuotaReport),
+    /// A fork completed; the host should open this session.
+    Forked {
+        /// The new session, as listed by the host.
+        session: Box<norte_code_wire::SessionSummary>,
+    },
     /// A command failed; carry the reason for the transcript.
     SendFailed {
         /// What went wrong, in words a person can act on.
@@ -554,6 +559,7 @@ async fn compact_session(
 }
 
 async fn fork_session(
+    client: &RemoteClient,
     api: &RestClient,
     session: &norte_code_wire::SessionKey,
     turn: Option<u64>,
@@ -562,11 +568,27 @@ async fn fork_session(
     let id = turn.map(|turn| format!("turn_{turn}"));
     match api.fork(session.as_str(), id.as_deref(), None).await {
         Ok(forked) => {
-            let _ = events
-                .send(ClientEvent::Notice {
-                    text: format!("forked session {forked}"),
+            // The fork is a real session in the host's list; find its summary
+            // so the app can attach to it instead of leaving us on the original.
+            let summary = client
+                .list_sessions()
+                .await
+                .ok()
+                .and_then(|sessions| {
+                    sessions
+                        .into_iter()
+                        .find(|candidate| candidate.session_id == forked)
                 })
-                .await;
+                .map(Box::new);
+            if let Some(session) = summary {
+                let _ = events.send(ClientEvent::Forked { session }).await;
+            } else {
+                let _ = events
+                    .send(ClientEvent::Notice {
+                        text: format!("forked session {forked} · reopen it from Sessions"),
+                    })
+                    .await;
+            }
         }
         Err(error) => {
             let _ = events
@@ -772,7 +794,7 @@ async fn drive_stream(
                         compact_session(api, &target, events).await;
                     }
                     UiCommand::Fork { session: target, turn } => {
-                        fork_session(api, &target, turn, events).await;
+                        fork_session(client, api, &target, turn, events).await;
                     }
                     UiCommand::Rewind { session: target, turn } => {
                         rewind_session(api, &target, turn, events).await;
