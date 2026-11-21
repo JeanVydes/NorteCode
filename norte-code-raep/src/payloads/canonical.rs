@@ -350,6 +350,12 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             model: None,
             details: Some(payload(CatalogUpdatedDetails { models: *models })),
         },
+        ServerEventKind::SecretSaved { provider } => CanonicalEvent::AgentChanged {
+            change: AgentChange::SecretSaved,
+            provider: Some(provider.as_str()),
+            model: None,
+            details: None,
+        },
         ServerEventKind::CatalogDetail { providers, models } => CanonicalEvent::AgentCatalog {
             kind: CatalogKind::Providers,
             entries: payload(CatalogDetailPayload {

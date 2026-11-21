@@ -23,6 +23,13 @@ fn attachment_failures_name_their_operation() {
 }
 
 #[test]
+fn key_save_failures_name_their_operation() {
+    let error = ClientError::save_secret("read-only home");
+    assert!(matches!(error, ClientError::SaveSecret(_)));
+    assert_eq!(error.to_string(), "could not save the key: read-only home");
+}
+
+#[test]
 fn stream_failures_are_distinguished_from_command_failures() {
     assert!(matches!(
         ClientError::unstable_stream(),

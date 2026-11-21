@@ -104,7 +104,7 @@ pub(super) fn run() -> Result<(), crate::TuiError> {
         sync_chrome(&mut tree, &model);
         metrics.record(Phase::SyncChrome, sync_started.elapsed());
 
-        let animating = animating(&model);
+        let animating = animating(&tree, &model);
         if overlay_clock.due(now, model.preferences.debug.enabled()) {
             redraw = true;
         }
@@ -217,7 +217,7 @@ fn draw_if_needed(
     now: Instant,
     redraw: &mut bool,
 ) -> io::Result<()> {
-    if (!*redraw && !animating(model)) || !frame_limiter.allow(now) {
+    if (!*redraw && !animating(tree, model)) || !frame_limiter.allow(now) {
         metrics.frame_skipped();
         return Ok(());
     }
@@ -266,8 +266,11 @@ fn poll_timeout(
 }
 
 /// Whether anything on screen moves on its own.
-fn animating(model: &UiModel) -> bool {
+fn animating(tree: &terminalui::Tree, model: &UiModel) -> bool {
     model.turn != TurnState::Idle
+        || tree
+            .find::<ui::ToastHost>("toast")
+            .is_some_and(ui::ToastHost::is_active)
 }
 
 /// How input events are folded into the model.
@@ -459,6 +462,61 @@ fn toggle_list_focus(tree: &mut terminalui::Tree, tab: Tab) {
     }
 }
 
+/// Feed the command palette first. Returns true when it handled the key.
+fn handle_palette_key(
+    tree: &mut terminalui::Tree,
+    key: crossterm::event::KeyEvent,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) -> bool {
+    if (key.modifiers, key.code) == (KeyModifiers::CONTROL, KeyCode::Char('p')) {
+        let return_focus = tree.focused_id().map(str::to_owned);
+        let restored = tree
+            .find_mut::<ui::CommandPalette>("command_palette")
+            .and_then(|palette| palette.toggle(return_focus.as_deref()));
+        if let Some(id) = restored {
+            tree.focus(&id);
+        } else if tree
+            .find::<ui::CommandPalette>("command_palette")
+            .is_some_and(ui::CommandPalette::is_open)
+        {
+            tree.focus("command_palette");
+        }
+        settle_input(tree, commands, model);
+        return true;
+    }
+    if tree
+        .find::<ui::CommandPalette>("command_palette")
+        .is_some_and(ui::CommandPalette::is_open)
+    {
+        if (key.modifiers, key.code) == (KeyModifiers::CONTROL, KeyCode::Char('c')) {
+            tree.find_mut::<ui::CommandPalette>("command_palette")
+                .expect("command palette")
+                .close();
+        } else {
+            let input = terminalui::InputEvent::from(Event::Key(key));
+            tree.handle_event(&input);
+        }
+        restore_palette_focus(tree);
+        settle_input(tree, commands, model);
+        return true;
+    }
+    false
+}
+
+fn overlay_owns_enter(tree: &terminalui::Tree) -> bool {
+    let question_open = tree
+        .find::<ui::QuestionPrompt>("question_prompt")
+        .is_some_and(ui::QuestionPrompt::is_open);
+    let prompt_open = tree
+        .find::<ui::KeyPrompt>("key_prompt")
+        .is_some_and(ui::KeyPrompt::is_open);
+    let plan_open = tree
+        .find::<ui::PlanOverlay>("plan_overlay")
+        .is_some_and(ui::PlanOverlay::is_open);
+    question_open || prompt_open || plan_open
+}
+
 /// Handle one key press; returns `true` when the loop quits.
 fn handle_key(
     tree: &mut terminalui::Tree,
@@ -469,6 +527,9 @@ fn handle_key(
     config: Option<&ClientConfig>,
 ) -> bool {
     let mut pass_to_tree = true;
+    if handle_palette_key(tree, key, commands, model) {
+        return false;
+    }
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             let copied = tree
@@ -522,25 +583,11 @@ fn handle_key(
         (KeyModifiers::NONE | KeyModifiers::CONTROL, KeyCode::Enter) => {
             // Plain Enter sends from Chat; Shift+Enter is left to the tree
             // and lands as a newline in the composer.
-            let question_open = tree
-                .find::<ui::QuestionPrompt>("question_prompt")
-                .is_some_and(ui::QuestionPrompt::is_open);
-            let prompt_open = tree
-                .find::<ui::KeyPrompt>("key_prompt")
-                .is_some_and(ui::KeyPrompt::is_open);
-            let plan_open = tree
-                .find::<ui::PlanOverlay>("plan_overlay")
-                .is_some_and(ui::PlanOverlay::is_open);
-            if question_open || plan_open {
-                // Enter goes to the open overlay.
-            } else if prompt_open {
-                // Enter belongs to the prompt (save).
-            } else if model.tab == Tab::Chat {
+            if !overlay_owns_enter(tree) && model.tab == Tab::Chat {
                 send_current_prompt(tree, commands, model);
                 pass_to_tree = false;
             }
-            // Every other tab lets Enter fall through to the tree, which
-            // routes it to the page's own handler (models, sessions, ...).
+            // Other tabs let Enter fall through to the page's own handler.
         }
         (KeyModifiers::CONTROL | KeyModifiers::ALT, KeyCode::Char(digit)) => {
             if let Some(tab) = Tab::from_digit(digit) {
@@ -570,16 +617,115 @@ fn handle_key(
     false
 }
 
+fn restore_palette_focus(tree: &mut terminalui::Tree) {
+    let focus = tree
+        .find_mut::<ui::CommandPalette>("command_palette")
+        .and_then(ui::CommandPalette::take_return_focus);
+    if let Some(id) = focus {
+        tree.focus(&id);
+    }
+}
+
+fn drain_palette(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) {
+    let taken = tree
+        .find_mut::<ui::CommandPalette>("command_palette")
+        .and_then(ui::CommandPalette::take_action);
+    let Some((action, focus)) = taken else {
+        return;
+    };
+    if let Some(id) = focus {
+        tree.focus(&id);
+    }
+    match action {
+        ui::PaletteAction::SwitchTab(tab) => {
+            model.tab = tab;
+            ui::sync_views(tree, model);
+        }
+        ui::PaletteAction::CycleTheme => cycle_theme(tree, model),
+        ui::PaletteAction::Refresh => {
+            if let Some(commands) = commands.as_ref() {
+                let _ = commands.try_send(UiCommand::Refresh);
+                let _ = commands.try_send(UiCommand::RefreshViews);
+            }
+        }
+        ui::PaletteAction::NewSession => {
+            if let Some(commands) = commands.as_ref() {
+                let _ = commands.try_send(UiCommand::CreateSession { title: None });
+            }
+        }
+        ui::PaletteAction::Compact => {
+            tree.press("compact");
+        }
+    }
+}
+
+fn apply_key_intent(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+    intent: ui::KeyIntent,
+) {
+    match intent {
+        ui::KeyIntent::SwitchModel {
+            provider,
+            model: model_id,
+        } => {
+            set_model(commands, model, &provider, &model_id);
+        }
+        ui::KeyIntent::Expand { provider } => {
+            if let Some(page) = tree.find_mut::<ui::ModelsPage>("models") {
+                page.expand(&provider);
+            }
+        }
+    }
+}
+
+fn drain_key_prompt(
+    tree: &mut terminalui::Tree,
+    commands: Option<&tokio::sync::mpsc::Sender<UiCommand>>,
+) {
+    let Some(action) = tree
+        .find_mut::<ui::KeyPrompt>("key_prompt")
+        .and_then(ui::KeyPrompt::take_action)
+    else {
+        return;
+    };
+    match action {
+        ui::KeyPromptAction::Submit { provider, key } => {
+            if let Some(commands) = commands {
+                let _ = commands.try_send(UiCommand::SaveSecret { provider, key });
+            }
+        }
+        ui::KeyPromptAction::Cancel => {}
+    }
+}
+
 fn settle_input(
     tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) {
+    drain_palette(tree, commands, model);
+    if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt") {
+        prompt.drain();
+    }
+    drain_key_prompt(tree, commands.as_ref());
     drain_compact(tree, commands, model);
     drain_plan_review(tree, commands, model);
     drain_question_answer(tree, commands, model);
     drain_models_actions(tree, commands, model);
     drain_sessions_actions(tree, commands, model);
+    let modal_focus = tree
+        .find::<ui::SessionsPage>("sessions")
+        .and_then(ui::SessionsPage::focus_id)
+        .map(str::to_owned);
+    if let Some(id) = modal_focus {
+        tree.focus(&id);
+    }
     drain_plugins_actions(tree, commands);
     drain_message_actions(tree, commands, model);
     drain_composer_actions(tree, commands, model);
@@ -853,7 +999,7 @@ fn open_key_prompt(
     tree: &mut terminalui::Tree,
     provider: &str,
     model_id: Option<String>,
-    env_keys: Vec<String>,
+    env_keys: &[String],
 ) {
     if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt") {
         prompt.open_with_intent(
@@ -958,6 +1104,7 @@ fn cancel_active_turn(
         turn_id: active.id,
     });
     model.turn = TurnState::Idle;
+    toast(tree, "turn cancelled", ui::Tone::Neutral);
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
         stream.stop_thinking();
         stream.push(ui::Item::Notice {
@@ -1098,32 +1245,15 @@ fn drain_models_actions(
                 model: model_id,
             } => {
                 let keys = env_keys(model, &provider);
-                open_key_prompt(tree, &provider, Some(model_id), keys);
+                open_key_prompt(tree, &provider, Some(model_id), &keys);
             }
             ui::ModelsAction::AskKeyForExpand { provider } => {
                 let keys = env_keys(model, &provider);
-                open_key_prompt(tree, &provider, None, keys);
+                open_key_prompt(tree, &provider, None, &keys);
             }
             ui::ModelsAction::ToggleExpand { provider } => {
                 if let Some(page) = tree.find_mut::<ui::ModelsPage>("models") {
                     page.toggle_expansion(&provider);
-                }
-            }
-        }
-    }
-    if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt")
-        && let Some(intent) = prompt.take_saved()
-    {
-        match intent {
-            crate::ui::KeyIntent::SwitchModel {
-                provider,
-                model: model_id,
-            } => {
-                set_model(commands, model, &provider, &model_id);
-            }
-            crate::ui::KeyIntent::Expand { provider } => {
-                if let Some(page) = tree.find_mut::<ui::ModelsPage>("models") {
-                    page.expand(&provider);
                 }
             }
         }
@@ -1243,6 +1373,38 @@ fn fold_upload_event(event: &ClientEvent, tree: &mut terminalui::Tree) -> bool {
     }
 }
 
+fn fold_secret_event(
+    event: &ClientEvent,
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) -> bool {
+    match event {
+        ClientEvent::SecretSaved { provider } => {
+            let intent = tree
+                .find_mut::<ui::KeyPrompt>("key_prompt")
+                .and_then(|prompt| {
+                    let matches = prompt.provider() == Some(provider.as_str());
+                    matches.then(|| prompt.saved()).flatten()
+                });
+            if let Some(intent) = intent {
+                apply_key_intent(tree, commands, model, intent);
+            }
+            if let Some(commands) = commands.as_ref() {
+                let _ = commands.try_send(UiCommand::RefreshViews);
+            }
+            true
+        }
+        ClientEvent::SecretSaveFailed { reason } => {
+            if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt") {
+                prompt.fail(reason.to_string());
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 fn drain_server_events(
     events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
@@ -1310,6 +1472,11 @@ fn drain_server_events(
             Ok(event @ (ClientEvent::Uploaded { .. } | ClientEvent::UploadFailed { .. })) => {
                 changed = fold_upload_event(&event, tree) || changed;
             }
+            Ok(
+                event @ (ClientEvent::SecretSaved { .. } | ClientEvent::SecretSaveFailed { .. }),
+            ) => {
+                changed = fold_secret_event(&event, tree, commands, model) || changed;
+            }
             Ok(ClientEvent::Notice { text }) => {
                 if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
                     stream.push(ui::Item::Notice {
@@ -1370,6 +1537,7 @@ fn fold_job_finished(
     upsert_job(model, job_summary(job));
     let text = crate::job_notice::finished(job);
     let tone = crate::job_notice::tone(job);
+    toast(tree, &text, tone);
     notice(tree, text, tone);
 }
 
@@ -1441,6 +1609,7 @@ fn fold_compaction_finished(
     tree: &mut terminalui::Tree,
 ) {
     let (text, tone) = compact_notice::finished(compacted, summary, error);
+    toast(tree, &text, tone);
     notice(tree, text, tone);
     set_compact_loading(tree, false);
 }
@@ -1523,7 +1692,8 @@ fn fold(
         | ServerEventKind::HistoryPage { .. }
         | ServerEventKind::HistoryRewound { .. }
         | ServerEventKind::OutputPartStarted { .. }
-        | ServerEventKind::OutputPartFinished { .. } => {}
+        | ServerEventKind::OutputPartFinished { .. }
+        | ServerEventKind::SecretSaved { .. } => {}
     }
 }
 
@@ -1882,6 +2052,7 @@ fn stop_with_notice(
     tone: ui::Tone,
 ) -> bool {
     model.turn = TurnState::Idle;
+    toast(tree, &text, tone);
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
         stream.stop_thinking();
         stream.complete_running_tools();
@@ -1895,6 +2066,19 @@ fn notice(tree: &mut terminalui::Tree, text: String, tone: ui::Tone) -> bool {
         stream.push(ui::Item::Notice { text, tone });
     }
     true
+}
+
+fn toast(tree: &mut terminalui::Tree, text: &str, tone: ui::Tone) {
+    use terminalui::components::toast::ToastKind;
+
+    let kind = match tone {
+        ui::Tone::Neutral => ToastKind::Info,
+        ui::Tone::Warn => ToastKind::Warning,
+        ui::Tone::Error => ToastKind::Destructive,
+    };
+    if let Some(host) = tree.find_mut::<ui::ToastHost>("toast") {
+        host.show(kind, text.to_owned());
+    }
 }
 
 fn drain_compact(

@@ -13,13 +13,25 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
 use terminalui::components::button::{Button, ButtonVariant};
+use terminalui::components::dialog::Dialog;
+use terminalui::components::form::{Form, FormField};
+use terminalui::components::input::Input;
 use terminalui::components::pagination::Pagination;
-use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
+use terminalui::{Context, InputEvent, Node, Outcome, Stack, Theme, View, node};
 
+use super::copy::{
+    CANCEL, CONFIRM, NO_SESSIONS, SESSIONS_CAPTION, SESSIONS_HINT, TITLE_REQUIRED, delete_question,
+};
 use super::detail_panel::{DetailPanel, Field};
+use super::node_lookup::find_node_mut;
 
 /// Rows shown per page; keeps the pager meaningful on tall terminals.
 const PAGE_ROWS: usize = 10;
+const PAGER_INDEX: usize = 0;
+const DETAIL_INDEX: usize = 1;
+const NEW_INDEX: usize = 2;
+const RENAME_DIALOG_INDEX: usize = 3;
+const DELETE_DIALOG_INDEX: usize = 4;
 
 /// The interaction mode of the page.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -27,14 +39,12 @@ enum Mode {
     /// Browsing the list.
     #[default]
     Listing,
-    /// Typing the new title; carries the session.
+    /// Renaming a session in the composed dialog.
     Rename {
         /// The session to rename.
         session: norte_code_wire::SessionKey,
-        /// The title so far.
-        title: String,
     },
-    /// Confirming the removal; carries the session.
+    /// Confirming the removal in the composed dialog.
     ConfirmDelete {
         /// The session to delete.
         session: norte_code_wire::SessionKey,
@@ -42,7 +52,7 @@ enum Mode {
 }
 
 /// What the page is doing, as far as the host is concerned.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) enum SessionsAction {
     /// Create a fresh session.
     Create,
@@ -110,8 +120,52 @@ impl SessionsPage {
                 node("sessions_pager", Pagination::new(1)),
                 node("session_detail", DetailPanel::new()),
                 node("new_session", Button::new(ButtonVariant::Outline, "+ new")),
+                node("rename_dialog", Dialog::new(Vec::new())),
+                node("delete_dialog", Dialog::new(Vec::new())),
             ],
         }
+    }
+
+    fn dialog_actions(cancel_id: &str, confirm_id: &str, destructive: bool) -> Node {
+        let confirm = if destructive {
+            ButtonVariant::Destructive
+        } else {
+            ButtonVariant::Primary
+        };
+        node(
+            "actions",
+            Stack::horizontal().gap(2).children(vec![
+                node(cancel_id, Button::new(ButtonVariant::Secondary, CANCEL)),
+                node(confirm_id, Button::new(confirm, CONFIRM)),
+            ]),
+        )
+    }
+
+    fn rename_dialog(title: &str) -> Dialog {
+        let mut field = FormField::text("title", "title")
+            .required_with_message(TITLE_REQUIRED)
+            .placeholder(title);
+        for child in field.children_mut() {
+            if let Some(input) = child.view.as_any().downcast_mut::<Input>() {
+                input.set_value(title);
+            }
+        }
+        let form = Form::new(vec![node("title_field", field)]);
+        Dialog::new(vec![
+            node("rename_form", form),
+            Self::dialog_actions("rename_cancel", "rename_confirm", false),
+        ])
+        .with_title(super::copy::RENAME_TITLE)
+    }
+
+    fn delete_dialog(title: &str) -> Dialog {
+        Dialog::new(vec![Self::dialog_actions(
+            "delete_cancel",
+            "delete_confirm",
+            true,
+        )])
+        .with_title(super::copy::DELETE_TITLE)
+        .with_message(delete_question(title))
     }
 
     /// Replace the session list; selection is preserved when possible.
@@ -130,6 +184,7 @@ impl SessionsPage {
 
     /// Take any pending requests the host should action.
     pub(crate) fn take_pending(&mut self) -> Vec<SessionsAction> {
+        self.drain_modal();
         std::mem::take(&mut self.pending)
     }
 
@@ -223,54 +278,139 @@ impl SessionsPage {
         }
     }
 
-    fn type_title(&mut self, key: &crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
-        if !matches!(
-            key.modifiers,
-            crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
-        ) {
-            return;
+    fn open_rename(&mut self, session: &norte_code_wire::SessionSummary) {
+        let title = session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.session_id.clone());
+        if let Some(dialog) = self
+            .children
+            .get_mut(RENAME_DIALOG_INDEX)
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+        {
+            *dialog = Self::rename_dialog(&title);
+            dialog.open();
         }
-        let Mode::Rename { session, title } = &mut self.mode else {
-            return;
+        self.mode = Mode::Rename {
+            session: norte_code_wire::SessionKey::new(session.session_id.clone()),
         };
-        match key.code {
-            KeyCode::Esc => self.mode = Mode::Listing,
-            KeyCode::Backspace => {
-                title.pop();
-            }
-            KeyCode::Char(character) => title.push(character),
-            KeyCode::Enter => {
-                let title = std::mem::take(title).trim().to_owned();
-                if !title.is_empty() {
-                    self.pending.push(SessionsAction::Rename {
-                        session: session.clone(),
-                        title,
-                    });
-                }
-                self.mode = Mode::Listing;
-            }
-            _ => {}
+    }
+
+    fn open_delete(&mut self, session: &norte_code_wire::SessionSummary) {
+        let title = session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.session_id.clone());
+        if let Some(dialog) = self
+            .children
+            .get_mut(DELETE_DIALOG_INDEX)
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+        {
+            *dialog = Self::delete_dialog(&title);
+            dialog.open();
+        }
+        self.mode = Mode::ConfirmDelete {
+            session: norte_code_wire::SessionKey::new(session.session_id.clone()),
+        };
+    }
+
+    /// The view the host should focus while a dialog is open.
+    pub(crate) fn focus_id(&self) -> Option<&'static str> {
+        match self.mode {
+            Mode::Listing => None,
+            Mode::Rename { .. } => Some("title:input"),
+            Mode::ConfirmDelete { .. } => Some("delete_confirm"),
         }
     }
 
-    fn confirm_delete(&mut self, key: &crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
-        if !matches!(
-            key.modifiers,
-            crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
-        ) {
-            return;
-        }
-        match key.code {
-            KeyCode::Esc => self.mode = Mode::Listing,
-            KeyCode::Enter => {
-                if let Mode::ConfirmDelete { session } = std::mem::take(&mut self.mode) {
-                    self.pending.push(SessionsAction::Delete { session });
-                    self.mode = Mode::Listing;
+    fn dialog_child<F, R>(
+        &mut self,
+        index: usize,
+        child_id: &str,
+        action: impl FnOnce(&mut F) -> R,
+    ) -> Option<R>
+    where
+        F: 'static,
+    {
+        self.children
+            .get_mut(index)
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+            .and_then(|dialog| find_node_mut(dialog.children_mut(), child_id))
+            .and_then(|node| node.view.as_any().downcast_mut::<F>())
+            .map(action)
+    }
+
+    fn dialog_open(&self, index: usize) -> bool {
+        self.children
+            .get(index)
+            .and_then(|node| node.view.as_any_ref().downcast_ref::<Dialog>())
+            .is_some_and(Dialog::is_open)
+    }
+
+    /// Close finished dialogs and turn their component outcomes into actions.
+    fn drain_modal(&mut self) {
+        let mode = self.mode.clone();
+        let (submitted, renamed, deleted) = match &mode {
+            Mode::Listing => return,
+            Mode::Rename { session } => {
+                let submitted = self
+                    .dialog_child::<Form, _>(RENAME_DIALOG_INDEX, "rename_form", |form| {
+                        form.take_submitted().is_some()
+                    })
+                    .unwrap_or(false);
+                let cancelled = self
+                    .dialog_child::<Button, _>(RENAME_DIALOG_INDEX, "rename_cancel", |button| {
+                        button.take_pressed()
+                    })
+                    .unwrap_or(false);
+                if submitted || cancelled || !self.dialog_open(RENAME_DIALOG_INDEX) {
+                    let title = self
+                        .dialog_child::<Form, _>(RENAME_DIALOG_INDEX, "rename_form", |form| {
+                            form.values()
+                                .first()
+                                .map(|(_, value)| value.trim().to_owned())
+                                .unwrap_or_default()
+                        })
+                        .unwrap_or_default();
+                    (submitted, Some((session.clone(), title)), None)
+                } else {
+                    return;
                 }
             }
-            _ => {}
+            Mode::ConfirmDelete { session } => {
+                let confirmed = self
+                    .dialog_child::<Button, _>(DELETE_DIALOG_INDEX, "delete_confirm", |button| {
+                        button.take_pressed()
+                    })
+                    .unwrap_or(false);
+                if confirmed || !self.dialog_open(DELETE_DIALOG_INDEX) {
+                    (false, None, Some(session.clone()))
+                } else {
+                    return;
+                }
+            }
+        };
+        let index = match self.mode {
+            Mode::Rename { .. } => RENAME_DIALOG_INDEX,
+            Mode::ConfirmDelete { .. } => DELETE_DIALOG_INDEX,
+            Mode::Listing => return,
+        };
+        if let Some(dialog) = self
+            .children
+            .get_mut(index)
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+        {
+            dialog.close();
+        }
+        self.mode = Mode::Listing;
+        if submitted
+            && let Some((session, title)) = renamed
+            && !title.is_empty()
+        {
+            self.pending.push(SessionsAction::Rename { session, title });
+        }
+        if let Some(session) = deleted {
+            self.pending.push(SessionsAction::Delete { session });
         }
     }
 
@@ -299,25 +439,16 @@ impl SessionsPage {
             KeyCode::Char('n') => self.pending.push(SessionsAction::Create),
             KeyCode::Enter => self.attach(),
             KeyCode::Char('r') => {
-                if let Some(session) = self.selected_session() {
-                    let title = session
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| session.session_id.clone());
-                    self.mode = Mode::Rename {
-                        session: norte_code_wire::SessionKey::new(session.session_id.clone()),
-                        title,
-                    };
+                if let Some(session) = self.selected_session().cloned() {
+                    self.open_rename(&session);
                 }
             }
             KeyCode::Char('d') => {
-                if let Some(session) = self.selected_session() {
+                if let Some(session) = self.selected_session().cloned() {
                     if self.active.as_deref() == Some(session.session_id.as_str()) {
                         return;
                     }
-                    self.mode = Mode::ConfirmDelete {
-                        session: norte_code_wire::SessionKey::new(session.session_id.clone()),
-                    };
+                    self.open_delete(&session);
                 }
             }
             _ => return,
@@ -391,6 +522,7 @@ impl View for SessionsPage {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
+        let _ = cx.is_focused();
         self.area = area;
         buf.set_style(area, Style::default().bg(theme.background));
         let detail_width = (area.width / 2)
@@ -414,30 +546,13 @@ impl View for SessionsPage {
             width: 7,
             height: 1,
         };
-        if let Some(child) = self.children.get_mut(2) {
+        if let Some(child) = self.children.get_mut(NEW_INDEX) {
             child.view.render(button_rect, buf, cx, theme);
             if let Some(button) = child.view.as_any().downcast_mut::<Button>() {
                 button.state.area = button_rect;
             }
         }
-        let listing = match &self.mode {
-            Mode::Rename { title, .. } => {
-                Self::paint_rename(list_area, buf, theme, title);
-                false
-            }
-            Mode::ConfirmDelete { session } => {
-                let title = self
-                    .sessions
-                    .iter()
-                    .find(|candidate| candidate.session_id == session.as_str())
-                    .and_then(|session| session.title.clone())
-                    .unwrap_or_else(|| clip(session.as_str(), 48));
-                Self::paint_delete(list_area, buf, theme, &title);
-                false
-            }
-            Mode::Listing => true,
-        };
-        if listing {
+        if self.mode == Mode::Listing {
             self.paint_list(list_area, buf, theme);
             Self::paint_hint(list_area, buf, theme);
         }
@@ -450,27 +565,34 @@ impl View for SessionsPage {
             height: 1,
             ..list_area
         };
-        if let Some(child) = self.children.first_mut() {
+        if let Some(child) = self.children.get_mut(PAGER_INDEX) {
             child.view.render(pager_rect, buf, cx, theme);
         }
-        if let Some(child) = self.children.get_mut(1) {
+        if let Some(child) = self.children.get_mut(DETAIL_INDEX) {
             child.view.render(detail_area, buf, cx, theme);
+        }
+        let dialog_index = match self.mode {
+            Mode::Listing => None,
+            Mode::Rename { .. } => Some(RENAME_DIALOG_INDEX),
+            Mode::ConfirmDelete { .. } => Some(DELETE_DIALOG_INDEX),
+        };
+        if let Some(index) = dialog_index
+            && let Some(dialog) = self.children.get_mut(index)
+        {
+            dialog.view.render(area, buf, cx, theme);
         }
     }
 
-    fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
+    fn handle_event(&mut self, event: &InputEvent, cx: &mut Context) -> Outcome {
         use crossterm::event::KeyEventKind;
+        let _ = cx.is_focused();
         match event {
             InputEvent::Mouse(mouse) => self.handle_mouse(*mouse),
             InputEvent::Key(key) => {
-                if key.kind != KeyEventKind::Press {
+                if key.kind != KeyEventKind::Press || self.mode != Mode::Listing {
                     return Outcome::Ignored;
                 }
-                match &self.mode {
-                    Mode::Rename { .. } => self.type_title(key),
-                    Mode::ConfirmDelete { .. } => self.confirm_delete(key),
-                    Mode::Listing => self.handle_listing_key(key),
-                }
+                self.handle_listing_key(key);
                 Outcome::Consumed
             }
             _ => Outcome::Ignored,
@@ -480,7 +602,7 @@ impl View for SessionsPage {
 
 impl SessionsPage {
     fn paint_caption(area: Rect, buf: &mut Buffer, theme: &Theme) {
-        let caption = "sessions · newest first";
+        let caption = SESSIONS_CAPTION;
         buf.set_stringn(
             area.x + 1,
             area.y,
@@ -492,72 +614,10 @@ impl SessionsPage {
 
     fn paint_hint(area: Rect, buf: &mut Buffer, theme: &Theme) {
         let y = area.y + area.height.saturating_sub(2);
-        let hint = "⏎ attach · n new · r rename · d delete";
+        let hint = SESSIONS_HINT;
         buf.set_stringn(
             area.x + 1,
             y,
-            hint,
-            hint.chars().count(),
-            Style::default().fg(theme.muted),
-        );
-    }
-
-    fn paint_rename(area: Rect, buf: &mut Buffer, theme: &Theme, title: &str) {
-        let y = area.y + 2;
-        buf.set_stringn(
-            area.x + 1,
-            y,
-            "rename session",
-            15,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-        let input = format!("{title}▏");
-        let budget = usize::from(area.width.saturating_sub(2)).min(input.chars().count() + 2);
-        buf.set_stringn(
-            area.x + 1,
-            y + 2,
-            &input,
-            budget,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-        let hint = "Enter renames, Esc cancels";
-        buf.set_stringn(
-            area.x + 1,
-            y + 4,
-            hint,
-            hint.chars().count(),
-            Style::default().fg(theme.muted),
-        );
-    }
-
-    fn paint_delete(area: Rect, buf: &mut Buffer, theme: &Theme, title: &str) {
-        let y = area.y + 2;
-        buf.set_stringn(
-            area.x + 1,
-            y,
-            "delete session",
-            14,
-            Style::default()
-                .fg(theme.destructive)
-                .add_modifier(Modifier::BOLD),
-        );
-        let question = format!("Delete {title}?");
-        let budget = usize::from(area.width.saturating_sub(2));
-        buf.set_stringn(
-            area.x + 1,
-            y + 2,
-            &question,
-            budget,
-            Style::default().fg(theme.foreground),
-        );
-        let hint = "Enter deletes, Esc cancels";
-        buf.set_stringn(
-            area.x + 1,
-            y + 4,
             hint,
             hint.chars().count(),
             Style::default().fg(theme.muted),
@@ -647,7 +707,7 @@ impl SessionsPage {
             );
         }
         if self.sessions.is_empty() {
-            let text = "no sessions yet";
+            let text = NO_SESSIONS;
             buf.set_stringn(
                 area.x + 1,
                 area.y + 1,

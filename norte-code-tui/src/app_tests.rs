@@ -131,7 +131,7 @@ fn escape_closing_an_overlay_does_not_cancel_the_turn() {
     let mut tree = ui::build_tree(&model);
     tree.find_mut::<ui::KeyPrompt>("key_prompt")
         .expect("key prompt")
-        .open("provider", Vec::new());
+        .open("provider", &[]);
     ui::sync_views(&mut tree, &model);
     let (commands_tx, mut commands_rx) = mpsc::channel(4);
     let mut commands = Some(commands_tx);

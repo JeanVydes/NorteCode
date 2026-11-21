@@ -9,12 +9,36 @@ use ratatui::style::{Modifier, Style};
 use serde::Serialize;
 
 use terminalui::components::spinner::Spinner;
-use terminalui::{Context, InputEvent, Outcome, Theme, View};
+use terminalui::components::tabs::{Tab as TabView, Tabs, TabsStyle};
+use terminalui::{Context, InputEvent, Outcome, Theme, View, node};
 
+use crate::ui::copy::{CONNECTING, READY_TEXT, THEME_KEY, THINKING, WAITING, WORKING};
 use crate::ui_model::{Tab, TurnState};
 
 /// Cells reserved between the tabs and the turn state for job activity.
 const ACTIVITY_WIDTH: u16 = 6;
+
+fn build_tabs(short: bool) -> Tabs {
+    let children = Tab::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let label = if short {
+                tab.short_label()
+            } else {
+                tab.label()
+            };
+            node(
+                format!("tab-{index}"),
+                TabView::with_title(format!("{} {label}", index + 1)),
+            )
+        })
+        .collect();
+    Tabs::new(children).with_style(TabsStyle {
+        gap: Some(0),
+        ..TabsStyle::default()
+    })
+}
 
 fn job_count(count: usize) -> String {
     if count > 99 {
@@ -38,7 +62,9 @@ pub(crate) struct Header {
     #[serde(skip)]
     spinner: Spinner,
     #[serde(skip)]
-    tab_rects: Vec<(Rect, Tab)>,
+    tabs: Tabs,
+    #[serde(skip)]
+    short_tabs: bool,
     #[serde(skip)]
     requested_tab: Option<Tab>,
 }
@@ -52,7 +78,8 @@ impl Header {
             tab: Tab::Chat,
             jobs: 0,
             spinner: Spinner::new(),
-            tab_rects: Vec::new(),
+            tabs: build_tabs(false),
+            short_tabs: false,
             requested_tab: None,
         }
     }
@@ -69,48 +96,43 @@ impl Header {
 
     fn turn_label(&self) -> &'static str {
         match self.turn {
-            TurnState::Idle => "ready",
-            TurnState::Connecting => "connecting",
-            TurnState::Thinking => "thinking",
-            TurnState::Streaming => "working",
-            TurnState::AwaitingAnswer => "waiting",
+            TurnState::Idle => READY_TEXT,
+            TurnState::Connecting => CONNECTING,
+            TurnState::Thinking => THINKING,
+            TurnState::Streaming => WORKING,
+            TurnState::AwaitingAnswer => WAITING,
         }
     }
 
     fn state_width(&self) -> u16 {
-        let text = format!("{}  {} · ⌃T", self.turn_label(), self.theme_name);
+        let text = format!("{}  {} · {THEME_KEY}", self.turn_label(), self.theme_name);
         3 + u16::try_from(text.chars().count()).unwrap_or(u16::MAX)
     }
 
-    fn paint_tabs(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme, status_x: u16) {
-        self.tab_rects.clear();
-        let mut x = area.x + 3;
+    fn paint_tabs(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        cx: &mut Context,
+        theme: &Theme,
+        status_x: u16,
+    ) {
+        let available = status_x.saturating_sub(ACTIVITY_WIDTH);
         let full_width: u16 = Tab::ALL
             .iter()
             .map(|tab| 4 + u16::try_from(tab.label().chars().count()).unwrap_or(0))
             .sum();
-        let short = x + full_width > status_x.saturating_sub(ACTIVITY_WIDTH);
-        for (index, tab) in Tab::ALL.iter().enumerate() {
-            let digit = (index + 1).to_string();
-            let label = if short {
-                tab.short_label()
-            } else {
-                tab.label()
-            };
-            let text = format!(" {digit} {label} ");
-            let style = if *tab == self.tab {
-                Style::default()
-                    .fg(theme.secondary)
-                    .bg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.muted).bg(theme.secondary)
-            };
-            let width = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
-            buf.set_stringn(x, area.y, &text, text.chars().count(), style);
-            self.tab_rects.push((Rect::new(x, area.y, width, 1), *tab));
-            x += width;
+        let short = area.x + 3 + full_width > available;
+        if short != self.short_tabs {
+            self.short_tabs = short;
+            self.tabs = build_tabs(short);
         }
+        self.tabs.set_selected(self.tab.index());
+        let x = area.x + 3;
+        let width = available.saturating_sub(x);
+        let mut tab_cx = *cx;
+        self.tabs
+            .render(Rect::new(x, area.y, width, 1), buf, &mut tab_cx, theme);
     }
 
     fn paint_activity(
@@ -155,7 +177,7 @@ impl Header {
             TurnState::Connecting | TurnState::AwaitingAnswer => ("●", theme.warning),
             TurnState::Thinking | TurnState::Streaming => ("●", theme.accent),
         };
-        let state = format!("{}  {} · ⌃T", self.turn_label(), self.theme_name);
+        let state = format!("{}  {} · {THEME_KEY}", self.turn_label(), self.theme_name);
         let width = self.state_width();
         let x = area.x + area.width.saturating_sub(width);
         buf.set_stringn(
@@ -210,7 +232,7 @@ impl View for Header {
         );
 
         let status_x = area.x + area.width.saturating_sub(self.state_width());
-        self.paint_tabs(area, buf, theme, status_x);
+        self.paint_tabs(area, buf, cx, theme, status_x);
         self.paint_activity(area, buf, cx, theme, status_x);
         self.paint_state(area, buf, theme);
     }
@@ -219,21 +241,14 @@ impl View for Header {
         self.spinner.tick(delta, cx);
     }
 
-    fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
-        if let InputEvent::Mouse(mouse) = event {
-            use crossterm::event::{MouseButton, MouseEventKind};
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                for (rect, tab) in &self.tab_rects {
-                    if mouse.row == rect.y
-                        && mouse.column >= rect.x
-                        && mouse.column < rect.x + rect.width
-                    {
-                        self.requested_tab = Some(*tab);
-                        return Outcome::Consumed;
-                    }
-                }
-            }
+    fn handle_event(&mut self, event: &InputEvent, cx: &mut Context) -> Outcome {
+        let before = self.tabs.selected();
+        let mut tab_cx = *cx;
+        let outcome = self.tabs.handle_event(event, &mut tab_cx);
+        let after = self.tabs.selected();
+        if before != after {
+            self.requested_tab = Tab::ALL.get(after).copied();
         }
-        Outcome::Ignored
+        outcome
     }
 }

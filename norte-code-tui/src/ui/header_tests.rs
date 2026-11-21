@@ -1,11 +1,13 @@
 //! The header reports running jobs as a spinner next to the turn state.
 
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use terminalui::InputEvent;
 
 use super::Header;
 use crate::ui::build_tree;
-use crate::ui_model::UiModel;
+use crate::ui_model::{Tab, UiModel};
 
 fn header_row(jobs: usize) -> (Buffer, Rect) {
     let model = UiModel::detached();
@@ -35,6 +37,26 @@ fn running_jobs_add_activity_next_to_the_turn_state() {
     );
     let painted: String = changed.iter().map(|x| busy[(*x, 0)].symbol()).collect();
     assert!(painted.contains('2'));
+}
+
+#[test]
+fn clicking_a_tab_requests_the_switch() {
+    let model = UiModel::detached();
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    let area = Rect::new(0, 0, 160, 30);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+
+    let click = InputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 12,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    tree.handle_event(&click);
+    let header = tree.find_mut::<Header>("header").expect("header");
+    assert_eq!(header.take_requested_tab(), Some(Tab::Sessions));
 }
 
 #[test]

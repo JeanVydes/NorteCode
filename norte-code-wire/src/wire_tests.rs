@@ -15,6 +15,21 @@ fn round_trips_request(kind: ClientRequestKind) -> ClientRequest {
 }
 
 #[test]
+fn a_secret_save_round_trips_without_a_session() {
+    let request = round_trips_request(ClientRequestKind::SaveSecret {
+        provider: "anthropic".to_owned(),
+        key: "secret".to_owned(),
+    });
+    match request.kind {
+        ClientRequestKind::SaveSecret { provider, key } => {
+            assert_eq!(provider, "anthropic");
+            assert_eq!(key, "secret");
+        }
+        other => panic!("expected a secret save, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_fork_without_new_fields_adds_no_fields() {
     let request = round_trips_request(ClientRequestKind::ForkSession {
         session: SessionKey::new("s"),

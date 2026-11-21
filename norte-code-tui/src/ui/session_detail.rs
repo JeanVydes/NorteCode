@@ -1,6 +1,8 @@
 //! The fields shown for a session, shared by the sessions and telemetry tabs.
 
-use norte_code_wire::SessionSummary;
+use terminalui::components::badge::BadgeVariant;
+
+use norte_code_wire::{SessionStatus, SessionSummary};
 
 use super::detail_panel::Field;
 use crate::context::human_count;
@@ -23,6 +25,14 @@ fn duration(ms: u64) -> String {
         format!("{}m {}s", secs / 60, secs % 60)
     } else {
         format!("{secs}s")
+    }
+}
+
+fn status_variant(status: SessionStatus) -> BadgeVariant {
+    match status {
+        SessionStatus::Active => BadgeVariant::Success,
+        SessionStatus::Suspended => BadgeVariant::Warning,
+        SessionStatus::Closed | SessionStatus::Unknown => BadgeVariant::Neutral,
     }
 }
 
@@ -52,7 +62,11 @@ pub(crate) fn fields(session: &SessionSummary, usage: &SessionUsage) -> Vec<Fiel
         Field::new("title", title),
         Field::new("id", clip(&session.session_id, 36)),
         Field::new("model", clip(&model, 36)),
-        Field::new("status", session.status.label()),
+        Field::badge(
+            "status",
+            session.status.label(),
+            status_variant(session.status),
+        ),
         Field::new(
             "agent",
             session
@@ -92,7 +106,24 @@ pub(crate) fn fields(session: &SessionSummary, usage: &SessionUsage) -> Vec<Fiel
     if let Some(parent) = &session.parent_session_id {
         fields.push(Field::new("parent", clip(parent, 34)));
     }
-    fields.push(Field::new("pinned", session.pinned.to_string()));
-    fields.push(Field::new("archived", session.archived.to_string()));
+    fields.push(Field::separator());
+    fields.push(Field::badge(
+        "pinned",
+        session.pinned.to_string(),
+        if session.pinned {
+            BadgeVariant::Success
+        } else {
+            BadgeVariant::Neutral
+        },
+    ));
+    fields.push(Field::badge(
+        "archived",
+        session.archived.to_string(),
+        if session.archived {
+            BadgeVariant::Warning
+        } else {
+            BadgeVariant::Neutral
+        },
+    ));
     fields
 }

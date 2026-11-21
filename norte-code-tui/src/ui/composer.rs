@@ -136,7 +136,7 @@ impl Composer {
         Self {
             input: Input::new()
                 .multiline(true)
-                .with_placeholder("Ask NORTE to do anything...")
+                .with_placeholder(crate::ui::copy::COMPOSER_PLACEHOLDER)
                 .with_style(input_style(theme)),
             draft: Draft::default(),
             history: History::default(),

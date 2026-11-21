@@ -18,7 +18,7 @@ impl PlanOverlay {
         paint_scrim(buf, area, theme);
         let inner = draw_box(buf, dialog(area), &chrome(theme), theme);
         let title = if self.question.is_some() {
-            " plan review ".to_owned()
+            format!(" {} ", crate::ui::copy::PLAN_REVIEW)
         } else {
             format!(" {} ", plan.title.as_deref().unwrap_or(&plan.id))
         };
@@ -116,7 +116,7 @@ fn button_label(index: usize) -> &'static str {
     match index {
         0 => "accept",
         1 => "decline",
-        _ => "feedback",
+        _ => crate::ui::copy::FEEDBACK,
     }
 }
 

@@ -671,6 +671,8 @@ pub enum AgentChange {
     ReasoningDowngraded,
     /// The catalogue was reloaded.
     CatalogUpdated,
+    /// A provider key was stored on the host.
+    SecretSaved,
     /// The skills were rescanned.
     SkillsUpdated,
 }

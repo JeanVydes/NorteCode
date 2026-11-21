@@ -1459,7 +1459,8 @@ pub(crate) fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKe
         | ClientRequestKind::ListMcp
         | ClientRequestKind::RefreshMcp
         | ClientRequestKind::SetMcpActive { .. }
-        | ClientRequestKind::SessionImport { .. } => None,
+        | ClientRequestKind::SessionImport { .. }
+        | ClientRequestKind::SaveSecret { .. } => None,
     }
 }
 

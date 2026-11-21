@@ -1,190 +1,215 @@
 //! The masked key prompt, shown when the host knows a provider's key is
 //! missing.
 //!
-//! Type the key, press Enter: it is written to the same 0600 `secrets.json`
-//! every other Norte Code client reads. Esc cancels. Nothing leaves this
-//! process beyond the file it writes.
+//! The prompt only collects the secret and reports it to the host. The host
+//! owns the key store, so the TUI never writes a secret to disk itself.
 
 use std::any::Any;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::Path;
+use std::fmt;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Color;
 use serde::Serialize;
 
-use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius};
-use terminalui::{Context, InputEvent, Outcome, Theme, View};
+use terminalui::components::button::{Button, ButtonVariant};
+use terminalui::components::dialog::Dialog;
+use terminalui::components::form::FormField;
+use terminalui::components::input::Input;
+use terminalui::{Context, InputEvent, Node, Outcome, Stack, Text, TextStyle, Theme, View, node};
 
-use norte_code_protocol::keys::{environment_value, read_secret, save_secret, secrets_path};
+use super::copy::{
+    CANCEL, KEY_FIELD_LABEL, KEY_PROMPT_TITLE, KEY_REQUIRED, KEY_SAVE, KEY_SAVING, key_expectation,
+};
+pub(crate) use super::key_prompt_action::{KeyIntent, KeyPromptAction};
+use super::key_status::invalidate_key;
+use super::node_lookup::{find_child_mut, find_node, find_node_mut};
 
-use super::key_prompt_error::KeyPromptError;
-
-thread_local! {
-    /// Disk lookups are rare but happen on every catalog refresh, so keep
-    /// the result until a key is saved or the secrets file moves.
-    static KEY_STATUS: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
-}
-
-pub(crate) fn cache_key(path: &Path, provider_id: &str) -> String {
-    format!("{}:{}", path.display(), provider_id)
-}
-
-/// Whether a provider has a usable key, on disk or in the environment.
-pub(crate) fn provider_has_key(provider_id: &str, environment_keys: &[String]) -> bool {
-    if environment_keys.is_empty() || environment_value(environment_keys).is_some() {
-        return true;
-    }
-    let Some(path) = secrets_path() else {
-        return false;
-    };
-    let key = cache_key(&path, provider_id);
-    if let Some(cached) = KEY_STATUS.with(|cache| cache.borrow().get(&key).copied()) {
-        return cached;
-    }
-    let present = read_secret(&path, provider_id).is_some();
-    KEY_STATUS.with(|cache| {
-        cache.borrow_mut().insert(key, present);
-    });
-    present
-}
-
-/// Forget the cached status after writing a key to disk.
-pub(crate) fn invalidate_key(provider_id: &str) {
-    let Some(path) = secrets_path() else {
-        return;
-    };
-    let key = cache_key(&path, provider_id);
-    KEY_STATUS.with(|cache| {
-        cache.borrow_mut().remove(&key);
-    });
-}
-
-/// The masked prompt state.
-#[derive(Debug, Default, Serialize)]
-struct KeyPromptState {
-    /// The provider id the key is for; `None` when the prompt is closed.
-    provider: Option<String>,
-    /// The environment keys the provider names, for display.
-    environment_keys: Vec<String>,
-}
-
-/// What to do after the key is saved.
-#[derive(Clone, Debug)]
-pub(crate) enum KeyIntent {
-    /// Save the key, then switch the session to this model.
-    SwitchModel {
-        /// The provider the model belongs to.
-        provider: String,
-        /// The model id.
-        model: String,
-    },
-    /// Save the key, then expand the provider's models.
-    Expand {
-        /// The provider to expand.
-        provider: String,
-    },
-}
-
-/// A full-area scrim with a centered masked field; used when a provider the
-/// user picked has no key.
-#[derive(Default, Serialize)]
+/// A modal form that collects a provider key without persisting it.
+#[derive(Serialize)]
 pub(crate) struct KeyPrompt {
-    state: KeyPromptState,
-    buffer: String,
-    /// The last save attempt's error, shown until the prompt closes.
-    #[serde(skip)]
-    error: Option<KeyPromptError>,
-    /// The intent that armed this prompt, cleared when saved.
+    provider: Option<String>,
+    children: Vec<Node>,
+    /// The intent that armed this prompt, drained after the host confirms.
     #[serde(skip)]
     intent: Option<KeyIntent>,
-    /// The intent satisfied by the last save, waiting for the app.
+    /// Actions waiting for the host.
     #[serde(skip)]
-    saved: Option<KeyIntent>,
+    pending: Vec<KeyPromptAction>,
+    /// A submit is already in flight; ignore further Enter presses.
+    #[serde(skip)]
+    saving: bool,
+    /// Set by Enter or the save button, drained by [`KeyPrompt::drain`].
+    #[serde(skip)]
+    submit_requested: bool,
+}
+
+impl Default for KeyPrompt {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl KeyPrompt {
     /// Creates a closed prompt.
     pub(crate) fn new() -> Self {
         Self {
-            state: KeyPromptState::default(),
-            buffer: String::new(),
-            error: None,
+            provider: None,
+            children: vec![node("key_dialog", Dialog::new(Vec::new()))],
             intent: None,
-            saved: None,
+            pending: Vec::new(),
+            saving: false,
+            submit_requested: false,
         }
     }
 
+    fn dialog(environment_keys: &[String]) -> Dialog {
+        Dialog::new(vec![
+            node(
+                "key_field",
+                FormField::text("key", KEY_FIELD_LABEL).required_with_message(KEY_REQUIRED),
+            ),
+            node(
+                "key_actions",
+                Stack::horizontal().gap(2).children(vec![
+                    node("key_cancel", Button::new(ButtonVariant::Secondary, CANCEL)),
+                    node("key_confirm", Button::new(ButtonVariant::Primary, KEY_SAVE)),
+                ]),
+            ),
+        ])
+        .with_title(KEY_PROMPT_TITLE)
+        .with_message(key_expectation(environment_keys))
+    }
+
     /// Open the prompt for `provider_id`.
-    pub(crate) fn open(&mut self, provider_id: impl Into<String>, environment_keys: Vec<String>) {
-        self.state = KeyPromptState {
-            provider: Some(provider_id.into()),
-            environment_keys,
-        };
-        self.buffer.clear();
-        self.error = None;
+    pub(crate) fn open(&mut self, provider_id: impl Into<String>, environment_keys: &[String]) {
+        if let Some(dialog) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+        {
+            *dialog = Self::dialog(environment_keys);
+            dialog.open();
+        }
+        self.provider = Some(provider_id.into());
         self.intent = None;
+        self.pending.clear();
+        self.saving = false;
+        self.submit_requested = false;
     }
 
     /// Open the prompt armed with `intent`; the intent is drained after the
-    /// key is saved.
+    /// host stores the key.
     pub(crate) fn open_with_intent(
         &mut self,
         provider_id: impl Into<String>,
-        environment_keys: Vec<String>,
+        environment_keys: &[String],
         intent: KeyIntent,
     ) {
         self.open(provider_id, environment_keys);
         self.intent = Some(intent);
     }
 
-    /// Take the saved intent, when the key was just saved.
-    pub(crate) fn take_saved(&mut self) -> Option<KeyIntent> {
-        self.saved.take()
-    }
-
     /// Whether the prompt is collecting input.
     pub(crate) fn is_open(&self) -> bool {
-        self.state.provider.is_some()
+        self.provider.is_some()
     }
 
     /// The provider the prompt is open for, when open.
     pub(crate) fn provider(&self) -> Option<&str> {
-        self.state.provider.as_deref()
+        self.provider.as_deref()
     }
 
-    /// Close the prompt; buffers and the pending intent are cleared.
-    pub(crate) fn close(&mut self) {
-        self.state = KeyPromptState::default();
-        self.buffer.clear();
-        self.error = None;
-        self.intent = None;
+    /// The view the host should focus while the prompt is open.
+    pub(crate) fn focus_id(&self) -> Option<&'static str> {
+        self.is_open().then_some("key:input")
     }
 
-    fn masked_visual(&self) -> String {
-        "•".repeat(self.buffer.chars().count())
+    /// Take the actions waiting for the host.
+    pub(crate) fn take_action(&mut self) -> Option<KeyPromptAction> {
+        self.pending.pop()
     }
 
-    /// Save the current buffer to `secrets.json`.
-    ///
-    /// # Errors
-    /// Returns a short human-readable reason when the key cannot be stored.
-    fn save(&mut self) -> Result<(), KeyPromptError> {
-        let Some(provider) = self.provider().map(str::to_owned) else {
-            return Err(KeyPromptError::NoProvider);
+    /// Close the prompt after the host stored the key and return its intent.
+    pub(crate) fn saved(&mut self) -> Option<KeyIntent> {
+        let provider = self.provider.take()?;
+        invalidate_key(&provider);
+        self.close();
+        self.intent.take()
+    }
+
+    /// Keep the prompt open and show why the host refused the key.
+    pub(crate) fn fail(&mut self, reason: impl fmt::Display) {
+        self.saving = false;
+        self.set_message(reason.to_string(), TextStyle::default().fg(Color::Red));
+    }
+
+    fn close(&mut self) {
+        if let Some(dialog) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+        {
+            dialog.close();
+        }
+        self.provider = None;
+        self.pending.clear();
+        self.saving = false;
+        self.submit_requested = false;
+    }
+
+    fn set_message(&mut self, message: String, style: TextStyle) {
+        if let Some(dialog) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+            && let Some(message_node) = find_node_mut(dialog.children_mut(), "message")
+            && let Some(text) = message_node.view.as_any().downcast_mut::<Text>()
+        {
+            text.set_text(message);
+            text.set_style(style);
+        }
+    }
+
+    /// Turn component outcomes into host actions.
+    pub(crate) fn drain(&mut self) {
+        let Some(provider) = self.provider.clone() else {
+            return;
         };
-        let Some(path) = secrets_path() else {
-            return Err(KeyPromptError::NoSecretsPath);
+        let open = self
+            .children
+            .first()
+            .and_then(|node| node.view.as_any_ref().downcast_ref::<Dialog>())
+            .is_some_and(Dialog::is_open);
+        let cancelled = find_child_mut::<Button>(self.children.first_mut(), "key_cancel")
+            .is_some_and(Button::take_pressed);
+        if cancelled || !open {
+            self.close();
+            self.pending.push(KeyPromptAction::Cancel);
+            return;
+        }
+        if self.saving {
+            return;
+        }
+        let confirmed = find_child_mut::<Button>(self.children.first_mut(), "key_confirm")
+            .is_some_and(Button::take_pressed);
+        if !confirmed && !self.submit_requested {
+            return;
+        }
+        self.submit_requested = false;
+        let field = find_child_mut::<FormField>(self.children.first_mut(), "key_field");
+        let Some(field) = field else {
+            return;
         };
-        save_secret(&path, &provider, &self.buffer)
-            .map(|()| {
-                invalidate_key(&provider);
-                self.saved = self.intent.take();
-                self.close();
-            })
-            .map_err(|error| KeyPromptError::Save(error.to_string()))
+        let key = field.value();
+        if key.trim().is_empty() {
+            field.set_error(Some(KEY_REQUIRED));
+            return;
+        }
+        field.set_error(None::<String>);
+        self.saving = true;
+        self.set_message(KEY_SAVING.to_owned(), TextStyle::default());
+        self.pending.push(KeyPromptAction::Submit { provider, key });
     }
 }
 
@@ -201,154 +226,71 @@ impl View for KeyPrompt {
         "key_prompt"
     }
 
-    fn children(&self) -> &[terminalui::Node] {
-        &[]
+    fn children(&self) -> &[Node] {
+        &self.children
     }
 
-    fn children_mut(&mut self) -> &mut [terminalui::Node] {
-        &mut []
+    fn children_mut(&mut self) -> &mut [Node] {
+        &mut self.children
     }
 
     fn measure(&self) -> Option<(u16, u16)> {
         None
     }
 
-    fn focusable(&self) -> bool {
-        self.is_open()
-    }
-
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _cx: &mut Context, theme: &Theme) {
-        if !self.is_open() {
-            return;
-        }
-        let Some(provider) = self.provider().map(str::to_owned) else {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
+        let Some(dialog) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+        else {
             return;
         };
-        // Dim the rest of the screen with a solid backdrop.
-        let dim = Style::default().bg(theme.background).fg(theme.muted);
-        for row in area.y..area.y + area.height {
-            buf.set_stringn(
-                area.x,
-                row,
-                " ".repeat(area.width as usize),
-                area.width as usize,
-                dim,
-            );
+        if !dialog.is_open() {
+            return;
         }
-
-        let chrome = Chrome {
-            border: Some(Border {
-                set: BorderSet::Rounded,
-                color: Some(theme.accent),
-                radius: Radius::Small,
-            }),
-            background: Some(theme.secondary),
-            radius: Radius::Small,
-            padding: Padding {
-                horizontal: 2,
-                vertical: 1,
-            },
-            border_gradient: None,
-            fill_gradient: None,
+        dialog.render(area, buf, cx, theme);
+        let Some(input) = find_node(&self.children, "key:input")
+            .and_then(|node| node.view.as_any_ref().downcast_ref::<Input>())
+        else {
+            return;
         };
-        let width = area.width.min(64);
-        let height = 7;
-        let x = area.x + (area.width - width) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let panel = Rect::new(x, y, width, height);
-        let inner = terminalui::components::chrome::draw_box(buf, panel, &chrome, theme);
-
-        let mut row = inner.y;
-        let headline = format!("{provider} · no key on file");
-        buf.set_stringn(
-            inner.x,
-            row,
-            &headline,
-            headline.chars().count(),
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::BOLD),
-        );
-        row += 1;
-        let env_line = if self.state.environment_keys.is_empty() {
-            "this provider expects an API key".to_string()
-        } else {
-            format!("expects {}", self.state.environment_keys.join(" or "))
-        };
-        buf.set_stringn(
-            inner.x,
-            row,
-            &env_line,
-            env_line.chars().count(),
-            Style::default().fg(theme.muted),
-        );
-        row += 1;
-
-        let visual = format!("{}▏", self.masked_visual());
-        buf.set_stringn(
-            inner.x,
-            row,
-            &visual,
-            visual.chars().count(),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-        row += 1;
-
-        let hint = if let Some(error) = &self.error {
-            format!("save failed: {error}")
-        } else {
-            "enter: save · ctrl+v: paste · esc: cancel".to_string()
-        };
-        let hint_style = if self.error.is_some() {
-            Style::default().fg(theme.destructive)
-        } else {
-            Style::default().fg(theme.muted)
-        };
-        buf.set_stringn(inner.x, row, &hint, hint.chars().count(), hint_style);
+        if input.state.value.is_empty() {
+            return;
+        }
+        let field = input.state.area;
+        for y in field.y..field.y + field.height {
+            for x in field.x..field.x + field.width {
+                let Some(cell) = buf.cell_mut((x, y)) else {
+                    continue;
+                };
+                if cell.symbol() != " " && !cell.symbol().is_empty() {
+                    cell.set_symbol("*");
+                }
+            }
+        }
+        let cursor = u16::try_from(input.state.cursor.saturating_sub(input.state.scroll_x))
+            .unwrap_or(u16::MAX);
+        let x = field.x.saturating_add(1).saturating_add(cursor);
+        if field.height > 0
+            && x < field.x + field.width
+            && let Some(cell) = buf.cell_mut((x, field.y + field.height / 2))
+        {
+            cell.set_symbol("|");
+        }
     }
 
     fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
-        if !self.is_open() {
+        let InputEvent::Key(key) = event else {
             return Outcome::Ignored;
+        };
+        if self.provider.is_some()
+            && key.kind == crossterm::event::KeyEventKind::Press
+            && key.code == crossterm::event::KeyCode::Enter
+        {
+            self.submit_requested = true;
+            return Outcome::Consumed;
         }
-        match event {
-            InputEvent::Paste(text) => {
-                self.buffer.push_str(text);
-                self.error = None;
-                Outcome::Consumed
-            }
-            InputEvent::Key(key) => {
-                use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-                if key.kind != KeyEventKind::Press {
-                    return Outcome::Ignored;
-                }
-                match (key.modifiers, key.code) {
-                    (KeyModifiers::NONE, KeyCode::Esc) => {
-                        self.close();
-                        Outcome::Consumed
-                    }
-                    (KeyModifiers::NONE, KeyCode::Enter) => {
-                        if let Err(error) = self.save() {
-                            self.error = Some(error);
-                        }
-                        Outcome::Consumed
-                    }
-                    (KeyModifiers::NONE, KeyCode::Backspace) => {
-                        self.buffer.pop();
-                        self.error = None;
-                        Outcome::Consumed
-                    }
-                    (KeyModifiers::NONE, KeyCode::Char(character)) => {
-                        self.buffer.push(character);
-                        self.error = None;
-                        Outcome::Consumed
-                    }
-                    _ => Outcome::Consumed,
-                }
-            }
-            _ => Outcome::Consumed,
-        }
+        Outcome::Ignored
     }
 }

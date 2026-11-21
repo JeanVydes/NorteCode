@@ -164,7 +164,7 @@ impl QuestionPrompt {
 impl QuestionPrompt {
     fn paint_header(inner: Rect, buf: &mut Buffer, prompt_lines: &[String], theme: &Theme) -> u16 {
         let mut row = inner.y;
-        let title = "ask_user";
+        let title = crate::ui::copy::ASK_USER;
         buf.set_stringn(
             inner.x,
             row,
@@ -246,7 +246,13 @@ impl QuestionPrompt {
         if self.mode != InputMode::Answer || row >= inner.y + inner.height {
             return row;
         }
-        buf.set_stringn(inner.x, row, "answer", 6, Style::default().fg(theme.muted));
+        buf.set_stringn(
+            inner.x,
+            row,
+            crate::ui::copy::ANSWER,
+            6,
+            Style::default().fg(theme.muted),
+        );
         let row = row + 1;
         let visual = format!("{}▏", self.response);
         buf.set_stringn(

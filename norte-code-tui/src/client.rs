@@ -99,6 +99,16 @@ pub(crate) enum ClientEvent {
         /// What went wrong, in words a person can act on.
         reason: ClientError,
     },
+    /// The host stored a provider key.
+    SecretSaved {
+        /// The provider the key belongs to.
+        provider: String,
+    },
+    /// The host refused to store a provider key.
+    SecretSaveFailed {
+        /// What went wrong, in words a person can act on.
+        reason: ClientError,
+    },
 }
 
 /// Commands the interface sends to the connection task.
@@ -202,6 +212,13 @@ pub(crate) enum UiCommand {
         session: norte_code_wire::SessionKey,
         /// The turn to rewind to, when known.
         turn: Option<u64>,
+    },
+    /// Store a provider key on the host.
+    SaveSecret {
+        /// The provider the key belongs to.
+        provider: String,
+        /// The secret value.
+        key: String,
     },
 }
 
@@ -865,6 +882,44 @@ async fn stream_loop(
     }
 }
 
+async fn set_model_and_refresh(
+    client: &RemoteClient,
+    api: &RestClient,
+    events: &Sender<ClientEvent>,
+    session: &SessionKey,
+    provider: &str,
+    model: &str,
+) {
+    let _ = api
+        .set_session_model(session.as_str(), provider, model)
+        .await;
+    if let Ok(models) = api.models().await {
+        let _ = events.send(ClientEvent::Models(models)).await;
+    }
+    if let Ok(sessions) = client.list_sessions().await {
+        let _ = events.send(ClientEvent::Sessions(sessions)).await;
+    }
+}
+
+async fn save_secret(api: &RestClient, events: &Sender<ClientEvent>, provider: &str, key: &str) {
+    match api.save_secret(provider, key).await {
+        Ok(()) => {
+            let _ = events
+                .send(ClientEvent::SecretSaved {
+                    provider: provider.to_owned(),
+                })
+                .await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SecretSaveFailed {
+                    reason: ClientError::save_secret(error),
+                })
+                .await;
+        }
+    }
+}
+
 /// Pump events from the stream while dispatching commands.
 async fn apply_command(
     command: UiCommand,
@@ -944,15 +999,10 @@ async fn apply_command(
             provider,
             model,
         } => {
-            let _ = api
-                .set_session_model(session.as_str(), &provider, &model)
-                .await;
-            if let Ok(models) = api.models().await {
-                let _ = events.send(ClientEvent::Models(models)).await;
-            }
-            if let Ok(sessions) = client.list_sessions().await {
-                let _ = events.send(ClientEvent::Sessions(sessions)).await;
-            }
+            set_model_and_refresh(client, api, events, &session, &provider, &model).await;
+        }
+        UiCommand::SaveSecret { provider, key } => {
+            save_secret(api, events, &provider, &key).await;
         }
         UiCommand::SetReasoning { session, effort } => {
             let reasoning = match effort.as_str() {

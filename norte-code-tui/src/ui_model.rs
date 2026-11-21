@@ -302,6 +302,17 @@ impl Tab {
         Self::Settings,
     ];
 
+    /// The tab's position in display order.
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Chat => 0,
+            Self::Sessions => 1,
+            Self::Models => 2,
+            Self::Telemetry => 3,
+            Self::Settings => 4,
+        }
+    }
+
     /// Whether this tab has two lists that Tab switches between.
     pub(crate) const fn is_list_tab(self) -> bool {
         matches!(self, Self::Telemetry | Self::Settings)

@@ -1,5 +1,8 @@
 //! The sessions page: attach, rename and delete from the keyboard.
 
+use crossterm::event::Event;
+use terminalui::{InputEvent, Tree, node};
+
 use super::{Mode, SessionsAction, SessionsPage};
 use crate::ui::detail_panel::DetailPanel;
 
@@ -43,6 +46,14 @@ fn enter() -> crossterm::event::KeyEvent {
     }
 }
 
+fn key_input(character: char) -> InputEvent {
+    InputEvent::from(Event::Key(key(character)))
+}
+
+fn enter_input() -> InputEvent {
+    InputEvent::from(Event::Key(enter()))
+}
+
 #[test]
 fn the_detail_panel_tracks_the_selected_session() {
     let mut page = page_with(vec![session("a", None), session("b", Some("Second"))]);
@@ -82,13 +93,22 @@ fn enter_asks_to_attach_the_selected_session() {
 
 #[test]
 fn rename_collects_the_typed_title() {
-    let mut page = page_with(vec![session("a", Some("old title"))]);
-    page.handle_listing_key(&key('r'));
+    let mut tree = Tree::new(node(
+        "sessions",
+        page_with(vec![session("a", Some("old title"))]),
+    ));
+    tree.focus("sessions");
+    tree.handle_event(&key_input('r'));
+    assert!(tree.focus("title:input"));
+    assert_eq!(tree.focused_id(), Some("title:input"));
     for character in "fresh".chars() {
-        page.type_title(&key(character));
+        tree.handle_event(&key_input(character));
     }
-    page.type_title(&enter());
-    let actions = page.take_pending();
+    tree.handle_event(&enter_input());
+    let actions = tree
+        .find_mut::<SessionsPage>("sessions")
+        .expect("page")
+        .take_pending();
     assert!(matches!(
         &actions[..],
         [SessionsAction::Rename { title, .. }] if title == "old titlefresh"
@@ -97,11 +117,22 @@ fn rename_collects_the_typed_title() {
 
 #[test]
 fn delete_requires_confirmation_and_carries_the_session() {
-    let mut page = page_with(vec![session("doomed", None)]);
-    page.handle_listing_key(&key('d'));
-    assert!(page.take_pending().is_empty());
-    page.confirm_delete(&enter());
-    let actions = page.take_pending();
+    let mut tree = Tree::new(node("sessions", page_with(vec![session("doomed", None)])));
+    tree.focus("sessions");
+    tree.handle_event(&key_input('d'));
+    assert!(tree.focus("delete_confirm"));
+    assert_eq!(tree.focused_id(), Some("delete_confirm"));
+    assert!(
+        tree.find_mut::<SessionsPage>("sessions")
+            .expect("page")
+            .take_pending()
+            .is_empty()
+    );
+    tree.handle_event(&enter_input());
+    let actions = tree
+        .find_mut::<SessionsPage>("sessions")
+        .expect("page")
+        .take_pending();
     assert!(
         matches!(&actions[..], [SessionsAction::Delete { session } ] if session.as_str() == "doomed")
     );

@@ -3,6 +3,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
+use terminalui::Text;
 use terminalui::components::statusbar::StatusBar;
 
 use crate::theme::{ThemeChoice, ThemeKind};
@@ -74,6 +75,29 @@ fn changing_the_theme_repaints_the_status_strip() {
     let repainted = (status.y..status.y + status.height)
         .any(|y| (status.x..status.x + status.width).any(|x| buf[(x, y)].fg == light.muted));
     assert!(repainted);
+}
+
+#[test]
+fn syncing_the_theme_keeps_the_status_text_instances() {
+    let mut model = UiModel::detached();
+    let mut tree = build_tree(&model);
+    let (hint, state) = {
+        let hint = std::ptr::from_ref(
+            tree.find::<super::copy::ShortcutHint>("hint")
+                .expect("hint"),
+        );
+        let state = std::ptr::from_ref(tree.find::<Text>("state").expect("state"));
+        (hint, state)
+    };
+    model.preferences.theme = ThemeChoice::BuiltIn(ThemeKind::ByeRetina);
+    sync_theme(&mut tree, &model);
+    let hint_after = std::ptr::from_ref(
+        tree.find::<super::copy::ShortcutHint>("hint")
+            .expect("hint"),
+    );
+    let state_after = std::ptr::from_ref(tree.find::<Text>("state").expect("state"));
+    assert!(std::ptr::eq(hint, hint_after));
+    assert!(std::ptr::eq(state, state_after));
 }
 
 #[test]

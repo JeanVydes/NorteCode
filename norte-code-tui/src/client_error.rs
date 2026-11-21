@@ -54,6 +54,8 @@ pub(crate) enum ClientError {
     LostStream(String),
     /// Fetching a session's history.
     History(String),
+    /// Storing a provider key on the host.
+    SaveSecret(String),
 }
 
 impl ClientError {
@@ -165,6 +167,11 @@ impl ClientError {
     pub(crate) fn history(error: impl fmt::Display) -> Self {
         Self::History(error.to_string())
     }
+
+    /// The host refused to store a provider key.
+    pub(crate) fn save_secret(error: impl fmt::Display) -> Self {
+        Self::SaveSecret(format!("could not save the key: {error}"))
+    }
 }
 
 impl fmt::Display for ClientError {
@@ -188,7 +195,8 @@ impl fmt::Display for ClientError {
             | Self::Fork(message)
             | Self::Rewind(message)
             | Self::LostStream(message)
-            | Self::History(message) => formatter.write_str(message),
+            | Self::History(message)
+            | Self::SaveSecret(message) => formatter.write_str(message),
             Self::UnstableStream => formatter.write_str(
                 "the stream keeps closing; retrying in the background, check the raep server",
             ),

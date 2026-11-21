@@ -16,6 +16,7 @@ mod history;
 mod import;
 mod mcp;
 mod plugins;
+mod secrets;
 mod sessions;
 mod shared;
 mod skills;

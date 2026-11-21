@@ -478,6 +478,17 @@ impl Service {
                 self.import_session(request_id, bundle, decryption_jwk)
                     .await
             }
+            Kind::SaveSecret { provider, key } => {
+                let store = self
+                    .key_store()
+                    .ok_or(norte_code_protocol::keys::KeyStoreError::Unsupported)?;
+                store.save(&provider, &key)?;
+                Ok(single(
+                    request_id,
+                    None,
+                    ServerEventKind::SecretSaved { provider },
+                ))
+            }
             Kind::ListPlugins
             | Kind::InstallPlugin { .. }
             | Kind::UpdatePlugins { .. }

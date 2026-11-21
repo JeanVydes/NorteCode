@@ -66,7 +66,7 @@ impl PlanOverlay {
     pub(crate) fn begin_review(&mut self, question: String, content: String) {
         self.plan = Some(norte_code_wire::PlanSummary {
             id: question.clone(),
-            title: Some("plan review".to_owned()),
+            title: Some(crate::ui::copy::PLAN_REVIEW.to_owned()),
             content,
             ..Default::default()
         });

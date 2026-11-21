@@ -623,6 +623,13 @@ pub enum ClientRequestKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decryption_jwk: Option<serde_json::Value>,
     },
+    /// Store a provider key in the host's key store.
+    SaveSecret {
+        /// The provider the key belongs to.
+        provider: String,
+        /// The secret value.
+        key: String,
+    },
 }
 
 /// What a replayed message carries, so the client renders it the way the
@@ -1159,6 +1166,11 @@ pub enum ServerEventKind {
     CatalogUpdated {
         /// How many models it carries.
         models: usize,
+    },
+    /// A provider key was stored on the host.
+    SecretSaved {
+        /// The provider the key belongs to.
+        provider: String,
     },
     /// The editable catalogue: the providers and models written in the files,
     /// with which of them came from a plugin and so cannot be edited here.

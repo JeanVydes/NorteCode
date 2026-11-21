@@ -8,6 +8,9 @@ pub enum ServiceError {
     /// The configuration could not be loaded or a key resolved.
     #[error(transparent)]
     Config(#[from] ConfigError),
+    /// A provider key could not be stored.
+    #[error(transparent)]
+    Secret(#[from] norte_code_protocol::keys::KeyStoreError),
     /// The catalogue could not be loaded or written.
     #[error(transparent)]
     Catalog(#[from] norte_code_protocol::catalog::CatalogError),

@@ -11,12 +11,18 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::{Deserialize, Serialize};
 
+use terminalui::components::badge::{Badge, BadgeVariant};
 use terminalui::components::button::{Button, ButtonVariant};
 use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius, draw_box};
 use terminalui::components::gauge::{Gauge, GaugeStyle};
+use terminalui::components::stat::Stat;
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
 use crate::context::{ContextUsage, compaction_threshold, human_count};
+use crate::ui::copy::{
+    ATTACHED, COMPACT_AT, CONNECTING_DOT, CONNECTION, CONTEXT, DETACHED, FAILED, NO_SESSION, NONE,
+    PLANS, SESSION,
+};
 use crate::ui_model::SessionAttachmentState;
 
 const RAIL_WIDTH: u16 = 26;
@@ -251,16 +257,11 @@ impl Rail {
         let usage = self.context;
         let start = y + 1;
         let dim = Style::default().fg(theme.muted).bg(theme.background);
-        let color = if usage.over_limit() {
-            theme.warning
-        } else {
-            theme.foreground
-        };
 
         buf.set_stringn(
             inner.x + 1,
             start,
-            "CONTEXT",
+            CONTEXT,
             8,
             dim.add_modifier(Modifier::BOLD),
         );
@@ -269,24 +270,25 @@ impl Rail {
             None => (human_count(usage.used), "?".to_owned()),
         };
         let counts = format!("{used} / {limit}");
-        buf.set_stringn(
-            inner.x + 1,
-            start + 2,
-            &counts,
-            counts.chars().count(),
-            Style::default().fg(color).bg(theme.background),
-        );
         let compact = if usage.window.is_some() {
-            format!("compact at {}", human_count(usage.compaction_limit()))
+            format!("{COMPACT_AT} {}", human_count(usage.compaction_limit()))
         } else {
-            "compact at ?".to_owned()
+            format!("{COMPACT_AT} ?")
         };
-        buf.set_stringn(
-            inner.x + 1,
-            start + 3,
-            &compact,
-            compact.chars().count(),
-            Style::default().fg(theme.muted).bg(theme.background),
+        let mut metric = Stat::new(compact, counts);
+        if usage.over_limit() {
+            metric.style.value = Some(theme.warning);
+        }
+        metric.render(
+            Rect {
+                x: inner.x + 1,
+                y: start + 2,
+                width: inner.width.saturating_sub(2),
+                height: 2,
+            },
+            buf,
+            cx,
+            theme,
         );
 
         let bar_y = start + 1;
@@ -333,9 +335,9 @@ impl Rail {
             return;
         }
         let dim = Style::default().fg(theme.muted).bg(theme.background);
-        buf.set_stringn(inner.x + 1, y, "PLANS", 6, dim.add_modifier(Modifier::BOLD));
+        buf.set_stringn(inner.x + 1, y, PLANS, 6, dim.add_modifier(Modifier::BOLD));
         if self.plans.is_empty() {
-            buf.set_stringn(inner.x + 1, y + 1, "none", 4, dim);
+            buf.set_stringn(inner.x + 1, y + 1, NONE, 4, dim);
             return;
         }
         for (index, (row, plan)) in (y + 1..).zip(self.plans.iter()).enumerate() {
@@ -451,7 +453,7 @@ impl View for Rail {
                 self.provider.as_deref(),
                 theme,
             );
-            y = paint_connection(&mut scratch, content, y, &self.attachment, theme);
+            y = paint_connection(&mut scratch, content, y, &self.attachment, cx, theme);
         }
         let viewport = RailViewport {
             inner,
@@ -533,13 +535,7 @@ fn paint_session(
 ) -> u16 {
     let dim = Style::default().fg(theme.muted).bg(theme.background);
     let text = Style::default().fg(theme.foreground).bg(theme.background);
-    buf.set_stringn(
-        inner.x + 1,
-        y,
-        "SESSION",
-        7,
-        dim.add_modifier(Modifier::BOLD),
-    );
+    buf.set_stringn(inner.x + 1, y, SESSION, 7, dim.add_modifier(Modifier::BOLD));
     let y = y + 1;
     let usable = usize::from(inner.width.saturating_sub(2));
     if let Some(session) = session {
@@ -566,7 +562,7 @@ fn paint_session(
             y + 1
         }
     } else {
-        buf.set_stringn(inner.x + 1, y, "no session", 10, dim);
+        buf.set_stringn(inner.x + 1, y, NO_SESSION, 10, dim);
         y + 2
     }
 }
@@ -603,55 +599,46 @@ fn paint_model(
     y + 2
 }
 
+fn badge_row(inner: Rect, y: u16, label: &str) -> Rect {
+    Rect {
+        x: inner.x + 1,
+        y,
+        width: u16::try_from(label.chars().count() + 2).unwrap_or(u16::MAX),
+        height: 1,
+    }
+}
+
 fn paint_connection(
     buf: &mut Buffer,
     inner: Rect,
     y: u16,
     attachment: &SessionAttachmentState,
+    cx: &mut Context,
     theme: &Theme,
 ) -> u16 {
     let dim = Style::default().fg(theme.muted).bg(theme.background);
     buf.set_stringn(
         inner.x + 1,
         y,
-        "CONNECTION",
+        CONNECTION,
         10,
         dim.add_modifier(Modifier::BOLD),
     );
     let y = y + 1;
     match attachment {
-        SessionAttachmentState::Disconnected => {
-            buf.set_stringn(inner.x + 1, y, "detached", 8, dim);
-        }
-        SessionAttachmentState::Connecting => {
-            buf.set_stringn(
-                inner.x + 1,
-                y,
-                "● connecting…",
-                14,
-                Style::default().fg(theme.warning).bg(theme.background),
-            );
-        }
-        SessionAttachmentState::Attached => {
-            buf.set_stringn(
-                inner.x + 1,
-                y,
-                "● attached",
-                10,
-                Style::default().fg(theme.success).bg(theme.background),
-            );
-        }
+        SessionAttachmentState::Disconnected => Badge::new(DETACHED)
+            .with_variant(BadgeVariant::Neutral)
+            .render(badge_row(inner, y, DETACHED), buf, cx, theme),
+        SessionAttachmentState::Connecting => Badge::new(CONNECTING_DOT)
+            .with_variant(BadgeVariant::Warning)
+            .render(badge_row(inner, y, CONNECTING_DOT), buf, cx, theme),
+        SessionAttachmentState::Attached => Badge::new(ATTACHED)
+            .with_variant(BadgeVariant::Success)
+            .render(badge_row(inner, y, ATTACHED), buf, cx, theme),
         SessionAttachmentState::Failed { reason } => {
-            buf.set_stringn(
-                inner.x + 1,
-                y,
-                "✗ failed",
-                9,
-                Style::default()
-                    .fg(theme.destructive)
-                    .bg(theme.background)
-                    .add_modifier(Modifier::BOLD),
-            );
+            Badge::new(FAILED)
+                .with_variant(BadgeVariant::Destructive)
+                .render(badge_row(inner, y, FAILED), buf, cx, theme);
             let detail: String = reason
                 .chars()
                 .take(usize::from(inner.width.saturating_sub(3)))

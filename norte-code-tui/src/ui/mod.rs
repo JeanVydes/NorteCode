@@ -2,8 +2,13 @@
 
 mod app_frame;
 mod chat_layout;
+mod command_palette;
+#[cfg(test)]
+#[path = "command_palette_tests.rs"]
+mod command_palette_tests;
 mod composer;
 mod config_page;
+mod copy;
 mod debug_overlay;
 mod detail_panel;
 #[cfg(test)]
@@ -15,16 +20,18 @@ mod header;
 mod header_tests;
 mod host_info;
 mod key_prompt;
-mod key_prompt_error;
+mod key_prompt_action;
 #[cfg(test)]
 #[path = "key_prompt_tests.rs"]
 mod key_prompt_tests;
+mod key_status;
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod layout_tests;
 mod leaderboard_section;
 mod markdown;
 mod models_page;
+mod node_lookup;
 mod overlay_frame;
 mod plan_overlay;
 mod plugins_page;
@@ -46,17 +53,22 @@ mod telemetry_page;
 #[cfg(test)]
 #[path = "telemetry_page_tests.rs"]
 mod telemetry_page_tests;
+mod toast_host;
+#[cfg(test)]
+#[path = "toast_host_tests.rs"]
+mod toast_host_tests;
 mod transcript;
 
 use terminalui::{Pane, Spacer};
 
 pub(crate) use chat_layout::ChatLayout;
+pub(crate) use command_palette::{CommandPalette, PaletteAction};
 pub(crate) use composer::Composer;
 pub(crate) use config_page::{ConfigAction, ConfigData, Setting};
 pub(crate) use debug_overlay::{DebugOverlay, OverlayClock};
 pub(crate) use header::Header;
 
-pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
+pub(crate) use key_prompt::{KeyIntent, KeyPrompt, KeyPromptAction};
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
 pub(crate) use plan_overlay::{PLAN_REVIEW_PREFIX, PlanOverlay, PlanReviewAction};
 pub(crate) use plugins_page::PluginsAction;
@@ -66,6 +78,7 @@ pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
 pub(crate) use settings_page::SettingsPage;
 pub(crate) use telemetry_page::TelemetryPage;
+pub(crate) use toast_host::ToastHost;
 pub(crate) use transcript::{Item, MessageAction, Tone, ToolState, Transcript};
 
 use crate::ui_model::{Tab, UiModel};
@@ -74,18 +87,7 @@ use terminalui::{Text, TextStyle, Tree, node};
 
 use terminalui::components::statusbar::{StatusBar, StatusBarStyle};
 
-const STATUS_HINT: &str = "alt+0-9 tabs · ⏎ send · ⇧⏎ newline";
-const STATUS_READY: &str = "● ready";
-
-fn tab_index(tab: Tab) -> usize {
-    match tab {
-        Tab::Chat => 0,
-        Tab::Sessions => 1,
-        Tab::Models => 2,
-        Tab::Telemetry => 3,
-        Tab::Settings => 4,
-    }
-}
+use self::copy::{READY, ShortcutHint};
 
 /// The chat-only bottom strip: queue, reasoning, hints and connection chip.
 fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
@@ -116,14 +118,10 @@ fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
                 ),
             ])
             .right(vec![
-                node(
-                    "hint",
-                    Text::new(STATUS_HINT).with_style(TextStyle::default().fg(theme.muted)),
-                ),
+                node("hint", ShortcutHint::chat(theme)),
                 node(
                     "state",
-                    Text::new(STATUS_READY)
-                        .with_style(TextStyle::default().fg(theme.success).bold()),
+                    Text::new(READY).with_style(TextStyle::default().fg(theme.success).bold()),
                 ),
             ])
             .with_style(StatusBarStyle {
@@ -192,8 +190,20 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
         overlay_frame::OverlayFrame::new(
             root,
             node(
-                "debug_overlay",
-                DebugOverlay::new(model.preferences.debug.enabled()),
+                "toast_layer",
+                overlay_frame::OverlayFrame::new(
+                    node("toast", ToastHost::new()),
+                    node(
+                        "command_layer",
+                        overlay_frame::OverlayFrame::new(
+                            node("command_palette", CommandPalette::new()),
+                            node(
+                                "debug_overlay",
+                                DebugOverlay::new(model.preferences.debug.enabled()),
+                            ),
+                        ),
+                    ),
+                ),
             ),
         ),
     );
@@ -212,7 +222,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
 /// they are open; the frame returns when they close.
 pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     if let Some(pane) = tree.find_mut::<Pane>("middle") {
-        pane.set_visible(tab_index(model.tab));
+        pane.set_visible(model.tab.index());
     }
     let chat = model.tab == Tab::Chat;
     if let Some(frame) = tree.find_mut::<app_frame::AppFrame>("frame") {
@@ -261,7 +271,10 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
         let focus = match visible {
             3 => "plan_overlay",
             2 => "question_prompt",
-            1 => "key_prompt",
+            1 => tree
+                .find::<key_prompt::KeyPrompt>("key_prompt")
+                .and_then(key_prompt::KeyPrompt::focus_id)
+                .unwrap_or("composer"),
             _ => "composer",
         };
         tree.focus(focus);
@@ -281,7 +294,7 @@ fn update_models(tree: &mut Tree, model: &UiModel) {
         for provider in &catalog.providers {
             key_status.insert(
                 provider.provider_id.clone(),
-                key_prompt::provider_has_key(&provider.provider_id, &provider.environment_keys),
+                key_status::provider_has_key(&provider.provider_id, &provider.environment_keys),
             );
         }
     }
@@ -335,13 +348,15 @@ pub(crate) fn sync_theme(tree: &mut Tree, model: &UiModel) {
             }
         }
         "hint" => {
-            node.view =
-                Box::new(Text::new(STATUS_HINT).with_style(TextStyle::default().fg(theme.muted)));
+            if let Some(hint) = node.view.as_any().downcast_mut::<ShortcutHint>() {
+                hint.restyle(&theme);
+            }
         }
         "state" => {
-            node.view = Box::new(
-                Text::new(STATUS_READY).with_style(TextStyle::default().fg(theme.success).bold()),
-            );
+            if let Some(text) = node.view.as_any().downcast_mut::<Text>() {
+                text.set_style(TextStyle::default().fg(theme.success).bold());
+                text.set_text(READY);
+            }
         }
         _ => {}
     });
