@@ -31,13 +31,16 @@ mod session_detail;
 mod sessions_page;
 mod settings_layout;
 mod settings_page;
+#[cfg(test)]
+#[path = "status_footer_tests.rs"]
+mod status_footer_tests;
 mod telemetry_page;
 #[cfg(test)]
 #[path = "telemetry_page_tests.rs"]
 mod telemetry_page_tests;
 mod transcript;
 
-use terminalui::Pane;
+use terminalui::{Pane, Spacer};
 
 pub(crate) use chat_layout::ChatLayout;
 pub(crate) use composer::Composer;
@@ -73,7 +76,7 @@ fn tab_index(tab: Tab) -> usize {
     }
 }
 
-/// The bottom strip: queue, reasoning, hints and the connection chip.
+/// The chat-only bottom strip: queue, reasoning, hints and connection chip.
 fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
     node(
         "status",
@@ -148,7 +151,13 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
                 ),
                 middle,
                 node("composer", composer::Composer::new(&theme)),
-                status_bar(model, &theme),
+                node(
+                    "status_pane",
+                    Pane::new(vec![
+                        status_bar(model, &theme),
+                        node("status_blank", Spacer::new()),
+                    ]),
+                ),
             ],
             model.tab == Tab::Chat,
         ),
@@ -191,11 +200,15 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     if let Some(pane) = tree.find_mut::<Pane>("middle") {
         pane.set_visible(tab_index(model.tab));
     }
+    let chat = model.tab == Tab::Chat;
     if let Some(frame) = tree.find_mut::<app_frame::AppFrame>("frame") {
-        frame.set_show_composer(model.tab == Tab::Chat);
+        frame.set_show_chat_chrome(chat);
     }
     if let Some(composer) = tree.find_mut::<Composer>("composer") {
-        composer.set_visible(model.tab == Tab::Chat);
+        composer.set_visible(chat);
+    }
+    if let Some(pane) = tree.find_mut::<Pane>("status_pane") {
+        pane.set_visible(usize::from(!chat));
     }
     if let Some(header) = tree.find_mut::<Header>("header") {
         header.tab = model.tab;

@@ -16,7 +16,7 @@ use terminalui::components::table::{Table, TableCell, TableRow};
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
 use super::detail_panel::{DetailPanel, Field};
-use super::leaderboard_section::LeaderboardSection;
+use super::leaderboard_section::{LeaderboardClick, LeaderboardSection};
 use crate::session_stats::{SessionUsage, SharedUsage};
 use crate::shared_telemetry::SharedTelemetry;
 use crate::telemetry::{ChartInterval, short_label};
@@ -123,6 +123,26 @@ impl TelemetryPage {
     /// Whether Tab currently shows the rankings.
     pub(crate) fn is_leaderboard_focused(&self) -> bool {
         self.view == TelemetryView::Leaderboards
+    }
+
+    #[cfg(test)]
+    pub(crate) fn leaderboard_group(&self) -> crate::leaderboard::LeaderboardGroup {
+        self.leaderboard.group()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn leaderboard_subject(&self) -> crate::leaderboard::LeaderboardSubject {
+        self.leaderboard.subject()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn leaderboard_selected(&self) -> usize {
+        self.leaderboard.selected()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn leaderboard_area(&self) -> ratatui::layout::Rect {
+        self.leaderboard.area()
     }
 
     /// Tab cycles charts, the two paginated lists, then the rankings.
@@ -711,6 +731,77 @@ impl TelemetryPage {
             child.view.render(detail_rect, buf, cx, theme);
         }
     }
+
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Option<Outcome> {
+        use crossterm::event::MouseEventKind;
+        match self.view {
+            TelemetryView::Charts => match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.chart_scroll = self.chart_scroll.saturating_sub(3);
+                    Some(Outcome::Consumed)
+                }
+                MouseEventKind::ScrollDown => {
+                    self.chart_scroll = self.chart_scroll.saturating_add(3);
+                    Some(Outcome::Consumed)
+                }
+                _ => None,
+            },
+            TelemetryView::Leaderboards => match self.leaderboard.handle_mouse(mouse) {
+                LeaderboardClick::Tab => {
+                    self.rebuild_leaderboard();
+                    Some(Outcome::Consumed)
+                }
+                LeaderboardClick::Row => Some(Outcome::Consumed),
+                LeaderboardClick::None => None,
+            },
+            TelemetryView::Sessions | TelemetryView::Requests => None,
+        }
+    }
+
+    fn handle_leaderboard_key(&mut self, code: crossterm::event::KeyCode) -> Option<Outcome> {
+        use crossterm::event::KeyCode;
+        let consumed = match code {
+            KeyCode::Char('1') => {
+                self.leaderboard.select_usage();
+                true
+            }
+            KeyCode::Char('2') => {
+                self.leaderboard.select_cost();
+                true
+            }
+            KeyCode::Up => {
+                self.leaderboard.cycle_group(true);
+                true
+            }
+            KeyCode::Down => {
+                self.leaderboard.cycle_group(false);
+                true
+            }
+            KeyCode::Left => {
+                self.leaderboard.cycle_subject(true);
+                true
+            }
+            KeyCode::Right => {
+                self.leaderboard.cycle_subject(false);
+                true
+            }
+            KeyCode::Char('j') => {
+                self.leaderboard.move_selection(1);
+                return Some(Outcome::Consumed);
+            }
+            KeyCode::Char('k') => {
+                self.leaderboard.move_selection(-1);
+                return Some(Outcome::Consumed);
+            }
+            _ => false,
+        };
+        if consumed {
+            self.rebuild_leaderboard();
+            Some(Outcome::Consumed)
+        } else {
+            None
+        }
+    }
 }
 
 impl View for TelemetryPage {
@@ -743,7 +834,7 @@ impl View for TelemetryPage {
             usize::from(area.width.saturating_sub(2)),
             Style::default().fg(theme.muted),
         );
-        let hint = "Tab views | rankings: 1/2 group, left/right entity | [ ] interval";
+        let hint = "Tab views | up/down group, left/right entity, j/k rows | [ ] interval";
         if area.width > 56 {
             let w = u16::try_from(hint.len()).unwrap_or(u16::MAX);
             buf.set_stringn(
@@ -771,24 +862,18 @@ impl View for TelemetryPage {
     fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
         use crossterm::event::KeyCode;
         if let InputEvent::Mouse(mouse) = event
-            && self.view == TelemetryView::Charts
+            && let Some(outcome) = self.handle_mouse(*mouse)
         {
-            use crossterm::event::MouseEventKind;
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.chart_scroll = self.chart_scroll.saturating_sub(3);
-                    return Outcome::Consumed;
-                }
-                MouseEventKind::ScrollDown => {
-                    self.chart_scroll = self.chart_scroll.saturating_add(3);
-                    return Outcome::Consumed;
-                }
-                _ => {}
-            }
+            return outcome;
         }
         if let InputEvent::Key(key) = event
             && key.kind == crossterm::event::KeyEventKind::Press
         {
+            if self.view == TelemetryView::Leaderboards
+                && let Some(outcome) = self.handle_leaderboard_key(key.code)
+            {
+                return outcome;
+            }
             match key.code {
                 KeyCode::Char('[') => {
                     self.cycle_interval(true);
@@ -796,34 +881,6 @@ impl View for TelemetryPage {
                 }
                 KeyCode::Char(']') => {
                     self.cycle_interval(false);
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('1') if self.view == TelemetryView::Leaderboards => {
-                    self.leaderboard.select_usage();
-                    self.rebuild_leaderboard();
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('2') if self.view == TelemetryView::Leaderboards => {
-                    self.leaderboard.select_cost();
-                    self.rebuild_leaderboard();
-                    return Outcome::Consumed;
-                }
-                KeyCode::Left if self.view == TelemetryView::Leaderboards => {
-                    self.leaderboard.cycle_subject(true);
-                    self.rebuild_leaderboard();
-                    return Outcome::Consumed;
-                }
-                KeyCode::Right if self.view == TelemetryView::Leaderboards => {
-                    self.leaderboard.cycle_subject(false);
-                    self.rebuild_leaderboard();
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('j') | KeyCode::Down if self.view == TelemetryView::Leaderboards => {
-                    self.leaderboard.move_selection(1);
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('k') | KeyCode::Up if self.view == TelemetryView::Leaderboards => {
-                    self.leaderboard.move_selection(-1);
                     return Outcome::Consumed;
                 }
                 KeyCode::Char('j') | KeyCode::Down

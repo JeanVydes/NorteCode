@@ -1,10 +1,13 @@
 //! Settings keeps its section order and scrolls when it overflows.
 
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use norte_code_client::PluginSummary;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use terminalui::InputEvent;
+use terminalui::{InputEvent, Theme, Tree};
 
-use crate::ui::{build_tree, sync_views};
+use super::{Focus, SettingsPage};
+use crate::ui::{build_tree, refresh_views, sync_views};
 use crate::ui_model::{Tab, UiModel};
 
 fn render_settings(height: u16) -> (Buffer, Rect) {
@@ -79,4 +82,64 @@ fn page_down_moves_the_settings_content() {
         .collect::<String>();
 
     assert_ne!(before_text, after_text);
+}
+
+fn settings_tree() -> (Tree, UiModel, Theme) {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Settings;
+    model.plugins = (0..3)
+        .map(|index| PluginSummary {
+            name: format!("plugin-{index}"),
+            enabled: true,
+            loaded: true,
+            ..PluginSummary::default()
+        })
+        .collect();
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    sync_views(&mut tree, &model);
+    refresh_views(&mut tree, &model);
+    assert!(tree.focus("settings"));
+    (tree, model, theme)
+}
+
+#[test]
+fn clicks_select_plugins_and_preferences() {
+    let (mut tree, _, theme) = settings_tree();
+    let area = Rect::new(0, 0, 80, 40);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+
+    let (plugin_row, preference_row) = {
+        let page = tree
+            .find::<SettingsPage>("settings")
+            .expect("settings page");
+        let layout = page.layout();
+        (
+            page.area.y + layout.plugin_rows_y() + 2,
+            page.area.y + layout.preference_rows_y() + 4,
+        )
+    };
+    let click = |column, row| {
+        InputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+    };
+
+    tree.handle_event(&click(4, plugin_row));
+    let page = tree
+        .find::<SettingsPage>("settings")
+        .expect("settings page");
+    assert_eq!(page.plugin_selected, 2);
+    assert_eq!(page.focus, Focus::Plugins);
+
+    tree.handle_event(&click(4, preference_row));
+    let page = tree
+        .find::<SettingsPage>("settings")
+        .expect("settings page");
+    assert_eq!(page.pref_selected, 4);
+    assert_eq!(page.focus, Focus::Preferences);
 }

@@ -19,6 +19,17 @@ impl LeaderboardGroup {
             Self::Cost => "cost",
         }
     }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Usage => Self::Cost,
+            Self::Cost => Self::Usage,
+        }
+    }
+
+    pub(crate) fn previous(self) -> Self {
+        self.next()
+    }
 }
 
 /// The entity each row represents.
