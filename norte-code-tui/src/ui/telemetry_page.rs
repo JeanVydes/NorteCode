@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::collections::HashSet;
 use std::fmt::Write;
+use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position as RatatuiPosition;
@@ -20,11 +21,15 @@ use super::leaderboard_section::{LeaderboardClick, LeaderboardSection};
 use crate::session_stats::{SessionUsage, SharedUsage};
 use crate::shared_telemetry::SharedTelemetry;
 use crate::telemetry::{ChartInterval, short_label};
-use crate::telemetry_series::series;
+use crate::telemetry_series::{Series, series};
 
 /// Sessions and requests shown per page.
 const SESSION_PAGE: usize = 4;
 const REQUEST_PAGE: usize = 6;
+const CHART_SLOT: u16 = 18;
+const CHART_GAP: u16 = 2;
+const CHART_ROWS: u16 = CHART_SLOT * 3 + CHART_GAP * 2;
+const LINE_AXIS_WIDTH: u16 = 9;
 
 /// Which view Tab currently shows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
@@ -66,6 +71,20 @@ pub(crate) struct TelemetryPage {
     view: TelemetryView,
     /// Scroll offset in the tall stacked charts.
     chart_scroll: u16,
+    /// Visible height of the stacked chart viewport.
+    chart_viewport: u16,
+    /// Screen areas of the three chart bodies, for wheel hit-testing.
+    #[serde(skip)]
+    chart_areas: Vec<Rect>,
+    /// Full series behind the charts, sliced for the aligned time window.
+    #[serde(skip)]
+    chart_data: Series,
+    /// Short time labels shared by all three x axes.
+    #[serde(skip)]
+    bucket_labels: Arc<Vec<String>>,
+    /// Window last pushed into the two line charts.
+    #[serde(skip)]
+    line_window: Option<(usize, usize)>,
     /// Pages the request table was last rebuilt for.
     last_session_page: usize,
     last_request_page: usize,
@@ -92,6 +111,11 @@ impl TelemetryPage {
             detail_is_request: false,
             view: TelemetryView::Charts,
             chart_scroll: 0,
+            chart_viewport: 0,
+            chart_areas: Vec::new(),
+            chart_data: Series::default(),
+            bucket_labels: Arc::new(Vec::new()),
+            line_window: None,
             last_session_page: 0,
             last_request_page: 0,
             last_request_row: 0,
@@ -143,6 +167,24 @@ impl TelemetryPage {
     #[cfg(test)]
     pub(crate) fn leaderboard_area(&self) -> ratatui::layout::Rect {
         self.leaderboard.area()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chart_scroll(&self) -> u16 {
+        self.chart_scroll
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chart_scroll_back(&self) -> usize {
+        self.children
+            .first()
+            .and_then(|node| node.view.as_any_ref().downcast_ref::<CandleChart>())
+            .map_or(0, |chart| chart.state.scroll_back)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chart_area(&self, index: usize) -> Rect {
+        self.chart_areas.get(index).copied().unwrap_or_default()
     }
 
     /// Tab cycles charts, the two paginated lists, then the rankings.
@@ -217,34 +259,140 @@ impl TelemetryPage {
 
     fn rebuild_charts(&mut self) {
         let data = series(self.report.as_deref(), self.interval);
+        let interval = self.interval;
+        let labels = Arc::new(
+            data.buckets
+                .iter()
+                .map(|(key, _)| short_label(key, interval))
+                .collect(),
+        );
+        self.bucket_labels = Arc::clone(&labels);
+        self.chart_data = data;
+        self.line_window = None;
+        let cost = std::mem::take(&mut self.chart_data.cost);
         if let Some(chart) = self
             .children
             .first_mut()
             .and_then(|node| node.view.as_any().downcast_mut::<CandleChart>())
         {
-            let interval = self.interval;
-            let labels: Vec<String> = data
-                .buckets
-                .iter()
-                .map(|(key, _)| short_label(key, interval))
-                .collect();
             chart.set_x_label(move |index| labels.get(index).cloned().unwrap_or_default());
-            chart.set_series(data.cost);
+            chart.set_series(cost);
         }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn chart_window(&self) -> (usize, usize) {
+        let Some(chart) = self
+            .children
+            .first()
+            .and_then(|node| node.view.as_any_ref().downcast_ref::<CandleChart>())
+        else {
+            return (0, 0);
+        };
+        let total = self.bucket_labels.len();
+        if total == 0 {
+            return (0, 0);
+        }
+        let cell_width = (2.0 * chart.state.x_zoom).round().clamp(1.0, 16.0) as u16;
+        let plot_width = chart.state.area.width.saturating_sub(11).max(1);
+        let visible = usize::from(plot_width / cell_width).max(1);
+        let end = total.saturating_sub(chart.state.scroll_back).max(1);
+        (end.saturating_sub(visible), end)
+    }
+
+    fn sync_line_window(&mut self, window: (usize, usize)) {
+        if self.line_window == Some(window) {
+            return;
+        }
+        let (start, end) = window;
+        let tokens = self
+            .chart_data
+            .tokens
+            .get(start..end)
+            .unwrap_or_default()
+            .to_vec();
+        let cache = self
+            .chart_data
+            .cache
+            .get(start..end)
+            .unwrap_or_default()
+            .to_vec();
         if let Some(chart) = self
             .children
             .get_mut(1)
             .and_then(|node| node.view.as_any().downcast_mut::<LineChart>())
         {
-            chart.set_series(data.tokens);
+            chart.set_series(tokens);
         }
         if let Some(chart) = self
             .children
             .get_mut(2)
             .and_then(|node| node.view.as_any().downcast_mut::<LineChart>())
         {
-            chart.set_series(data.cache);
+            chart.set_series(cache);
         }
+        self.line_window = Some(window);
+    }
+
+    fn paint_time_labels(
+        &mut self,
+        page: &mut Buffer,
+        y: u16,
+        width: u16,
+        window: (usize, usize),
+        theme: &Theme,
+    ) {
+        let (start, end) = window;
+        if start == end {
+            return;
+        }
+        let plot_width = width.saturating_sub(LINE_AXIS_WIDTH).max(1);
+        let last = end.saturating_sub(start).saturating_sub(1);
+        let style = Style::default().fg(theme.muted);
+        for index in (start..end).step_by(10) {
+            let Some(label) = self.bucket_labels.get(index) else {
+                continue;
+            };
+            let relative = index.saturating_sub(start);
+            let column = relative
+                .checked_mul(usize::from(plot_width.saturating_sub(1)))
+                .and_then(|value| value.checked_div(last))
+                .map_or(0, |value| u16::try_from(value).unwrap_or(0));
+            page.set_stringn(column, y, label, 5, style);
+        }
+    }
+
+    fn scroll_chart_history(&mut self, delta: isize) {
+        let Some(chart) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<CandleChart>())
+        else {
+            return;
+        };
+        let max = isize::try_from(self.bucket_labels.len().saturating_sub(1)).unwrap_or(isize::MAX);
+        let current = isize::try_from(chart.state.scroll_back).unwrap_or(isize::MAX);
+        chart.state.scroll_back = usize::try_from((current + delta).clamp(0, max)).unwrap_or(0);
+    }
+
+    fn disable_chart_hit_test(&mut self) {
+        if let Some(chart) = self
+            .children
+            .first_mut()
+            .and_then(|node| node.view.as_any().downcast_mut::<CandleChart>())
+        {
+            chart.state.area = Rect::new(0, 0, 0, 0);
+        }
+    }
+
+    pub(crate) fn scroll_chart_view(&mut self, delta: isize) {
+        if self.view != TelemetryView::Charts {
+            return;
+        }
+        let max =
+            isize::try_from(CHART_ROWS.saturating_sub(self.chart_viewport)).unwrap_or(isize::MAX);
+        let current = isize::try_from(self.chart_scroll).unwrap_or(isize::MAX);
+        self.chart_scroll = u16::try_from((current + delta).clamp(0, max)).unwrap_or(0);
     }
 
     fn pager_page(&self, index: usize) -> usize {
@@ -523,46 +671,78 @@ impl TelemetryPage {
     }
 
     fn paint_charts(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
-        const SLOT: u16 = 18;
-        const GAP: u16 = 2;
         let titles = [
             "cost · cumulative usd",
             "tokens · in + out",
             "cache · hit rate %",
         ];
-        let count = u16::try_from(titles.len()).unwrap_or(u16::MAX);
-        let total = SLOT
-            .saturating_mul(count)
-            .saturating_add(GAP.saturating_mul(count.saturating_sub(1)));
-        let max_scroll = total.saturating_sub(area.height);
-        self.chart_scroll = self.chart_scroll.min(max_scroll);
-        let mut page = Buffer::empty(Rect::new(0, 0, area.width, total));
+        self.chart_viewport = area.height;
+        self.chart_scroll = self
+            .chart_scroll
+            .min(CHART_ROWS.saturating_sub(area.height));
+        self.chart_areas.clear();
+        let mut page = Buffer::empty(Rect::new(0, 0, area.width, CHART_ROWS));
         let bold = Style::default()
             .fg(theme.foreground)
             .bg(theme.background)
             .add_modifier(Modifier::BOLD);
-        for (index, title) in titles.iter().enumerate() {
-            let y = u16::try_from(index)
-                .unwrap_or(u16::MAX)
-                .saturating_mul(SLOT + GAP);
-            page.set_stringn(0, y, title, title.len(), bold);
-            if let Some(child) = self.children.get_mut(index) {
-                child.view.render(
-                    Rect {
-                        x: 0,
-                        y: y + 1,
-                        width: area.width,
-                        height: SLOT - 1,
-                    },
-                    &mut page,
-                    cx,
-                    theme,
-                );
+        let body_y = 1u16;
+        page.set_stringn(0, 0, titles[0], titles[0].len(), bold);
+        let body = Rect {
+            x: 0,
+            y: body_y,
+            width: area.width,
+            height: CHART_SLOT - 1,
+        };
+        if let Some(child) = self.children.first_mut() {
+            child.view.render(body, &mut page, cx, theme);
+            if let Some(chart) = child.view.as_any().downcast_mut::<CandleChart>() {
+                chart.state.area = Rect {
+                    x: area.x,
+                    y: area.y + body_y.saturating_sub(self.chart_scroll),
+                    width: area.width,
+                    height: CHART_SLOT - 1,
+                };
             }
+        }
+        self.chart_areas.push(Rect {
+            x: area.x,
+            y: area.y + body_y.saturating_sub(self.chart_scroll),
+            width: area.width,
+            height: CHART_SLOT - 1,
+        });
+        let window = self.chart_window();
+        self.sync_line_window(window);
+        for (index, title) in titles.iter().enumerate().skip(1) {
+            let y = u16::try_from(index).unwrap_or(u16::MAX) * (CHART_SLOT + CHART_GAP);
+            page.set_stringn(0, y, title, title.len(), bold);
+            let body_y = y + 1;
+            let body = Rect {
+                x: 0,
+                y: body_y,
+                width: area.width,
+                height: CHART_SLOT - 1,
+            };
+            if let Some(child) = self.children.get_mut(index) {
+                child.view.render(body, &mut page, cx, theme);
+            }
+            self.paint_time_labels(
+                &mut page,
+                body_y + CHART_SLOT - 2,
+                area.width,
+                window,
+                theme,
+            );
+            self.chart_areas.push(Rect {
+                x: area.x,
+                y: area.y + body_y.saturating_sub(self.chart_scroll),
+                width: area.width,
+                height: CHART_SLOT - 1,
+            });
         }
         for row in 0..area.height {
             let source = row.saturating_add(self.chart_scroll);
-            if source >= total {
+            if source >= CHART_ROWS {
                 break;
             }
             for column in 0..area.width {
@@ -733,19 +913,34 @@ impl TelemetryPage {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Option<Outcome> {
-        use crossterm::event::MouseEventKind;
+        use crossterm::event::{KeyModifiers, MouseEventKind};
         match self.view {
-            TelemetryView::Charts => match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.chart_scroll = self.chart_scroll.saturating_sub(3);
-                    Some(Outcome::Consumed)
+            TelemetryView::Charts => {
+                if !matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) {
+                    return None;
                 }
-                MouseEventKind::ScrollDown => {
-                    self.chart_scroll = self.chart_scroll.saturating_add(3);
-                    Some(Outcome::Consumed)
+                let chart = self.chart_areas.iter().position(|area| {
+                    mouse.column >= area.x
+                        && mouse.column < area.x.saturating_add(area.width)
+                        && mouse.row >= area.y
+                        && mouse.row < area.y.saturating_add(area.height)
+                });
+                let up = mouse.kind == MouseEventKind::ScrollUp;
+                let delta = if up { -3 } else { 3 };
+                if mouse.modifiers.contains(KeyModifiers::SHIFT) || chart.is_none() {
+                    self.disable_chart_hit_test();
+                    self.scroll_chart_view(delta);
+                    return Some(Outcome::Consumed);
                 }
-                _ => None,
-            },
+                if chart == Some(0) {
+                    return None;
+                }
+                self.scroll_chart_history(delta);
+                Some(Outcome::Consumed)
+            }
             TelemetryView::Leaderboards => match self.leaderboard.handle_mouse(mouse) {
                 LeaderboardClick::Tab => {
                     self.rebuild_leaderboard();
@@ -834,8 +1029,16 @@ impl View for TelemetryPage {
             usize::from(area.width.saturating_sub(2)),
             Style::default().fg(theme.muted),
         );
-        let hint = "Tab views | up/down group, left/right entity, j/k rows | [ ] interval";
-        if area.width > 56 {
+        let hint = match self.view {
+            TelemetryView::Charts => {
+                "wheel charts/history | shift+wheel stack | pgup/pgdn stack | [ ] interval"
+            }
+            TelemetryView::Leaderboards => {
+                "up/down group, left/right entity, j/k rows | [ ] interval"
+            }
+            TelemetryView::Sessions | TelemetryView::Requests => "j/k select | [ ] interval",
+        };
+        if area.width > u16::try_from(hint.len()).unwrap_or(u16::MAX) {
             let w = u16::try_from(hint.len()).unwrap_or(u16::MAX);
             buf.set_stringn(
                 area.x + area.width.saturating_sub(w + 1),
@@ -875,6 +1078,14 @@ impl View for TelemetryPage {
                 return outcome;
             }
             match key.code {
+                KeyCode::PageUp if self.view == TelemetryView::Charts => {
+                    self.scroll_chart_view(-6);
+                    return Outcome::Consumed;
+                }
+                KeyCode::PageDown if self.view == TelemetryView::Charts => {
+                    self.scroll_chart_view(6);
+                    return Outcome::Consumed;
+                }
                 KeyCode::Char('[') => {
                     self.cycle_interval(true);
                     return Outcome::Consumed;
