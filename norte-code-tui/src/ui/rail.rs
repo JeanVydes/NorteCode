@@ -63,6 +63,19 @@ impl RailPosition {
         }
     }
 
+    /// Read the label the settings page reports.
+    #[cfg(test)]
+    pub(crate) fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "hide" => Some(Self::Hide),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "top" => Some(Self::Top),
+            "bottom" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
     /// The next position in the cycle.
     pub(crate) const fn next(self) -> Self {
         match self {

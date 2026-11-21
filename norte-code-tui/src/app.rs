@@ -63,7 +63,7 @@ enum InputKind {
 ///
 /// # Errors
 /// Returns the error the loop reported.
-pub(super) fn run() -> io::Result<()> {
+pub(super) fn run() -> Result<(), crate::TuiError> {
     let mut session = TerminalSession::enter()?;
     crate::terminal::watch_exit_signals();
 
@@ -455,7 +455,7 @@ fn toggle_list_focus(tree: &mut terminalui::Tree, tab: Tab) {
                 page.toggle_focus();
             }
         }
-        _ => {}
+        Tab::Chat | Tab::Sessions | Tab::Models => {}
     }
 }
 
@@ -660,9 +660,9 @@ fn drain_plan_review(
     };
     if let (Some(commands), Some(session)) = (commands.as_ref(), model.active.clone()) {
         let answer = match &action {
-            ui::PlanReviewAction::Accept => "Approve".to_owned(),
-            ui::PlanReviewAction::Decline => "Reject".to_owned(),
-            ui::PlanReviewAction::Feedback(text) => text.clone(),
+            ui::PlanReviewAction::Accept => crate::answer::QuestionAnswer::approve(),
+            ui::PlanReviewAction::Decline => crate::answer::QuestionAnswer::reject(),
+            ui::PlanReviewAction::Feedback(text) => text.clone().into_answer(),
         };
         let _ = commands.try_send(UiCommand::AnswerQuestion {
             session,
@@ -721,12 +721,8 @@ fn sync_selectors(
         selector.select(model.preferences.send_mode.label());
     }
     if let Some(selector) = tree.find_mut::<crate::ui::Selector>("reasoning") {
-        let next = match selector.value() {
-            "low" => crate::ui_model::ReasoningLevel::Low,
-            "medium" => crate::ui_model::ReasoningLevel::Medium,
-            "high" => crate::ui_model::ReasoningLevel::High,
-            _ => crate::ui_model::ReasoningLevel::Auto,
-        };
+        let next = crate::ui_model::ReasoningLevel::from_label(selector.value())
+            .unwrap_or(crate::ui_model::ReasoningLevel::Auto);
         if next != model.preferences.reasoning {
             model.preferences.reasoning = next;
             if let (Some(cmd), Some(session)) = (commands.as_ref(), model.active.clone()) {
@@ -736,12 +732,8 @@ fn sync_selectors(
         }
     }
     if let Some(selector) = tree.find_mut::<crate::ui::Selector>("queue") {
-        model.preferences.send_mode = match selector.value() {
-            "queue" => crate::ui_model::SendMode::Queue,
-            "interrupt" => crate::ui_model::SendMode::Interrupt,
-            "reject" => crate::ui_model::SendMode::Reject,
-            _ => crate::ui_model::SendMode::Steer,
-        };
+        model.preferences.send_mode = crate::ui_model::SendMode::from_label(selector.value())
+            .unwrap_or(crate::ui_model::SendMode::Steer);
     }
 }
 
@@ -1177,7 +1169,12 @@ fn apply_attached(
     true
 }
 
-fn apply_detached(tree: &mut terminalui::Tree, model: &mut UiModel, reason: String) -> bool {
+fn apply_detached(
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    reason: &crate::client_error::ClientError,
+) -> bool {
+    let reason = reason.to_string();
     model.attachment = SessionAttachmentState::Failed {
         reason: reason.clone(),
     };
@@ -1237,7 +1234,7 @@ fn fold_upload_event(event: &ClientEvent, tree: &mut terminalui::Tree) -> bool {
             push_attachment_notice(
                 tree,
                 &AttachmentNotice::UploadFailed {
-                    reason: reason.clone(),
+                    reason: reason.to_string(),
                 },
             );
             true
@@ -1267,7 +1264,7 @@ fn drain_server_events(
                 changed = apply_attached(tree, model, &session) || changed;
             }
             Ok(ClientEvent::Detached { reason }) => {
-                changed = apply_detached(tree, model, reason) || changed;
+                changed = apply_detached(tree, model, &reason) || changed;
             }
             Ok(ClientEvent::Sessions(sessions)) => {
                 refresh_active_model(model, &sessions);
@@ -1304,7 +1301,7 @@ fn drain_server_events(
             Ok(ClientEvent::SendFailed { reason }) => {
                 if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
                     stream.push(ui::Item::Notice {
-                        text: reason,
+                        text: reason.to_string(),
                         tone: ui::Tone::Error,
                     });
                 }
@@ -1349,37 +1346,31 @@ fn drain_server_events(
     }
 }
 
-fn fold_job_event(
-    kind: &norte_code_wire::ServerEventKind,
+fn fold_job_started(job_id: &str, command: &str, tree: &mut terminalui::Tree, model: &mut UiModel) {
+    upsert_job(
+        model,
+        norte_code_wire::JobSummary {
+            job_id: job_id.to_owned(),
+            command: command.to_owned(),
+            ..Default::default()
+        },
+    );
+    notice(
+        tree,
+        crate::job_notice::started(job_id, command),
+        ui::Tone::Neutral,
+    );
+}
+
+fn fold_job_finished(
+    job: &norte_code_wire::JobInfo,
     tree: &mut terminalui::Tree,
     model: &mut UiModel,
 ) {
-    match kind {
-        norte_code_wire::ServerEventKind::JobStarted {
-            job_id, command, ..
-        } => {
-            upsert_job(
-                model,
-                norte_code_wire::JobSummary {
-                    job_id: job_id.clone(),
-                    command: command.clone(),
-                    ..Default::default()
-                },
-            );
-            notice(
-                tree,
-                crate::job_notice::started(job_id, command),
-                ui::Tone::Neutral,
-            );
-        }
-        norte_code_wire::ServerEventKind::JobFinished { job, .. } => {
-            upsert_job(model, job_summary(job));
-            let text = crate::job_notice::finished(job);
-            let tone = crate::job_notice::tone(job);
-            notice(tree, text, tone);
-        }
-        _ => {}
-    }
+    upsert_job(model, job_summary(job));
+    let text = crate::job_notice::finished(job);
+    let tone = crate::job_notice::tone(job);
+    notice(tree, text, tone);
 }
 
 fn upsert_job(model: &mut UiModel, job: norte_code_wire::JobSummary) {
@@ -1424,41 +1415,34 @@ fn set_compact_loading(tree: &mut terminalui::Tree, loading: bool) {
     }
 }
 
-fn fold_compaction_event(kind: &ServerEventKind, tree: &mut terminalui::Tree, model: &mut UiModel) {
-    match kind {
-        ServerEventKind::SessionStats {
-            context_used,
-            context_window,
-            ..
-        } => {
-            model.context = ContextUsage {
-                used: *context_used,
-                window: *context_window,
-            };
-        }
-        ServerEventKind::RequestReconstructed { usage, .. } => {
-            let spent = usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0);
-            if spent > 0 {
-                model.context.used = spent;
-            }
-        }
-        ServerEventKind::CompactionStarted { reason } => {
-            notice(tree, compact_notice::started(*reason), ui::Tone::Neutral);
-            set_compact_loading(tree, true);
-        }
-        ServerEventKind::CompactionFinished {
-            compacted,
-            summary,
-            error,
-            ..
-        } => {
-            let (text, tone) =
-                compact_notice::finished(*compacted, summary.as_deref(), error.as_deref());
-            notice(tree, text, tone);
-            set_compact_loading(tree, false);
-        }
-        _ => {}
+fn fold_session_stats(context_used: u64, context_window: Option<u64>, model: &mut UiModel) {
+    model.context = ContextUsage {
+        used: context_used,
+        window: context_window,
+    };
+}
+
+fn fold_request_usage(usage: &norte_code_wire::Usage, model: &mut UiModel) {
+    let spent = usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0);
+    if spent > 0 {
+        model.context.used = spent;
     }
+}
+
+fn fold_compaction_started(reason: norte_code_wire::CompactionReason, tree: &mut terminalui::Tree) {
+    notice(tree, compact_notice::started(reason), ui::Tone::Neutral);
+    set_compact_loading(tree, true);
+}
+
+fn fold_compaction_finished(
+    compacted: bool,
+    summary: Option<&str>,
+    error: Option<&str>,
+    tree: &mut terminalui::Tree,
+) {
+    let (text, tone) = compact_notice::finished(compacted, summary, error);
+    notice(tree, text, tone);
+    set_compact_loading(tree, false);
 }
 
 fn fold(
@@ -1471,96 +1455,238 @@ fn fold(
         return;
     }
     match &event.kind {
-        ServerEventKind::TurnStarted { .. } => {
-            model.turn = TurnState::Connecting;
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.start_thinking();
-            }
+        kind @ (ServerEventKind::TurnStarted { .. }
+        | ServerEventKind::InputAccepted { .. }
+        | ServerEventKind::TurnPhase { .. }
+        | ServerEventKind::QuestionAnswered { .. }
+        | ServerEventKind::TurnFinished { .. }
+        | ServerEventKind::TurnStopped { .. }) => {
+            fold_turn_event(kind, tree, model, commands);
         }
-        ServerEventKind::InputAccepted { turn_id, .. } => {
+        kind @ (ServerEventKind::ToolStarted { .. }
+        | ServerEventKind::ToolOutput { .. }
+        | ServerEventKind::ToolFinished { .. }
+        | ServerEventKind::Delta { .. }) => {
+            fold_tool_event(kind, tree, model, commands);
+        }
+        kind @ (ServerEventKind::PluginProgress { .. }
+        | ServerEventKind::PluginChanged { .. }
+        | ServerEventKind::PlanList { .. }
+        | ServerEventKind::JobList { .. }
+        | ServerEventKind::JobStarted { .. }
+        | ServerEventKind::JobFinished { .. }
+        | ServerEventKind::SessionStats { .. }
+        | ServerEventKind::RequestReconstructed { .. }
+        | ServerEventKind::CompactionStarted { .. }
+        | ServerEventKind::CompactionFinished { .. }) => {
+            fold_runtime_event(kind, tree, model);
+        }
+        ServerEventKind::Error { .. }
+        | ServerEventKind::BudgetExceeded { .. }
+        | ServerEventKind::BudgetWarning { .. }
+        | ServerEventKind::QuestionAsked { .. }
+        | ServerEventKind::ModelQueued { .. }
+        | ServerEventKind::ModelChanged { .. }
+        | ServerEventKind::RetryScheduled { .. }
+        | ServerEventKind::RetryStarted { .. }
+        | ServerEventKind::ReasoningDowngraded { .. }
+        | ServerEventKind::SessionCreated { .. }
+        | ServerEventKind::SessionList { .. }
+        | ServerEventKind::SessionDeleted
+        | ServerEventKind::SessionRenamed { .. }
+        | ServerEventKind::SessionForked { .. }
+        | ServerEventKind::ChildSessionStarted { .. }
+        | ServerEventKind::ChildSessionUpdated { .. }
+        | ServerEventKind::MediaPartCompleted { .. }
+        | ServerEventKind::Committed { .. }
+        | ServerEventKind::MessageReplayed { .. }
+        | ServerEventKind::SessionTodos { .. }
+        | ServerEventKind::ImportResult { .. }
+        | ServerEventKind::SessionExportReady { .. }
+        | ServerEventKind::ModelList { .. }
+        | ServerEventKind::ToolList { .. }
+        | ServerEventKind::PluginList { .. }
+        | ServerEventKind::McpList { .. }
+        | ServerEventKind::SkillList { .. }
+        | ServerEventKind::SkillsUpdated { .. }
+        | ServerEventKind::Telemetry { .. }
+        | ServerEventKind::CostUpdated { .. }
+        | ServerEventKind::CostNotReported { .. }
+        | ServerEventKind::BudgetChanged { .. }
+        | ServerEventKind::CatalogUpdated { .. }
+        | ServerEventKind::CatalogDetail { .. }
+        | ServerEventKind::SteerApplied { .. }
+        | ServerEventKind::JobProgressDelta { .. }
+        | ServerEventKind::JobsStopped { .. }
+        | ServerEventKind::DelegatorStateChanged { .. }
+        | ServerEventKind::ChildAwaitingInput { .. }
+        | ServerEventKind::HistoryPage { .. }
+        | ServerEventKind::HistoryRewound { .. }
+        | ServerEventKind::OutputPartStarted { .. }
+        | ServerEventKind::OutputPartFinished { .. } => {}
+    }
+}
+
+fn fold_turn_event(
+    kind: &ServerEventKind,
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+) {
+    if let ServerEventKind::TurnStarted { .. } = kind {
+        model.turn = TurnState::Connecting;
+        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+            stream.start_thinking();
+        }
+        return;
+    }
+    if let ServerEventKind::InputAccepted { turn_id, .. } = kind {
+        model.turn = TurnState::Connecting;
+        model.active_turn = Some(crate::ui_model::ActiveTurn {
+            id: turn_id.clone(),
+        });
+        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+            stream.start_thinking();
+        }
+        return;
+    }
+    if let ServerEventKind::TurnPhase { phase, .. } = kind {
+        model.turn = match phase {
+            norte_code_wire::TurnPhaseName::Queued
+            | norte_code_wire::TurnPhaseName::CallingProvider => TurnState::Connecting,
+            norte_code_wire::TurnPhaseName::ExecutingTool => TurnState::Streaming,
+            norte_code_wire::TurnPhaseName::AwaitingApproval => TurnState::AwaitingAnswer,
+        };
+        return;
+    }
+    if let ServerEventKind::QuestionAnswered { .. } = kind {
+        model.question = None;
+        if model.turn == TurnState::AwaitingAnswer {
             model.turn = TurnState::Connecting;
-            model.active_turn = Some(crate::ui_model::ActiveTurn {
-                id: turn_id.clone(),
+        }
+        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+            stream.start_thinking();
+            stream.push(ui::Item::Notice {
+                text: "question answered".to_string(),
+                tone: ui::Tone::Neutral,
             });
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.start_thinking();
-            }
         }
-        ServerEventKind::TurnPhase { phase, .. } => {
-            model.turn = match phase {
-                norte_code_wire::TurnPhaseName::AwaitingApproval => TurnState::AwaitingAnswer,
-                norte_code_wire::TurnPhaseName::ExecutingTool => TurnState::Streaming,
-                _ => TurnState::Connecting,
-            };
-        }
-        ServerEventKind::ToolStarted {
-            tool,
-            call_id,
-            arguments,
-            source,
-            ..
-        } => fold_tool_started(
+        return;
+    }
+    if let ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. } = kind {
+        finish_turn(tree, model, commands);
+    }
+}
+
+fn fold_tool_event(
+    kind: &ServerEventKind,
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+) {
+    if let ServerEventKind::ToolStarted {
+        tool,
+        call_id,
+        arguments,
+        source,
+        ..
+    } = kind
+    {
+        fold_tool_started(
             tool,
             call_id,
             arguments.as_ref(),
             source.as_deref(),
             tree,
             model,
-        ),
-        ServerEventKind::ToolOutput { call_id, text, .. } => {
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.append_console_line(call_id, text.clone());
-            }
+        );
+        return;
+    }
+    if let ServerEventKind::ToolOutput { call_id, text, .. } = kind {
+        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+            stream.append_console_line(call_id, text.clone());
         }
-        ServerEventKind::ToolFinished {
-            call_id,
-            tool,
-            is_error,
-            ..
-        } => fold_tool_finished(call_id, tool, *is_error, tree, commands),
-        ServerEventKind::Delta { delta, .. } => fold_delta(delta, tree, model),
-        ServerEventKind::PluginProgress {
-            operation,
-            step,
-            total,
-            stage,
-        } => {
-            model.plugin_job = Some(crate::ui_model::PluginJob {
-                operation: operation.clone(),
-                step: *step,
-                total: *total,
-                stage: stage.clone(),
-            });
-        }
-        ServerEventKind::PluginChanged { .. } => {
-            model.plugin_job = None;
-        }
-        ServerEventKind::PlanList { plans } => {
-            model.plans.clone_from(plans);
-        }
-        ServerEventKind::JobList { jobs } => {
-            model.jobs = jobs.iter().map(job_summary).collect();
-        }
-        ServerEventKind::QuestionAnswered { .. } => {
-            model.question = None;
-            if model.turn == TurnState::AwaitingAnswer {
-                model.turn = TurnState::Connecting;
-            }
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.start_thinking();
-                stream.push(ui::Item::Notice {
-                    text: "question answered".to_string(),
-                    tone: ui::Tone::Neutral,
-                });
-            }
-        }
-        ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. } => {
-            finish_turn(tree, model, commands);
-        }
-        _ => {
-            fold_job_event(&event.kind, tree, model);
-            fold_compaction_event(&event.kind, tree, model);
-        }
+        return;
+    }
+    if let ServerEventKind::ToolFinished {
+        call_id,
+        tool,
+        is_error,
+        ..
+    } = kind
+    {
+        fold_tool_finished(call_id, tool, *is_error, tree, commands);
+        return;
+    }
+    if let ServerEventKind::Delta { delta, .. } = kind {
+        fold_delta(delta, tree, model);
+    }
+}
+
+fn fold_runtime_event(kind: &ServerEventKind, tree: &mut terminalui::Tree, model: &mut UiModel) {
+    if let ServerEventKind::PluginProgress {
+        operation,
+        step,
+        total,
+        stage,
+    } = kind
+    {
+        model.plugin_job = Some(crate::ui_model::PluginJob {
+            operation: operation.clone(),
+            step: *step,
+            total: *total,
+            stage: stage.clone(),
+        });
+        return;
+    }
+    if let ServerEventKind::PluginChanged { .. } = kind {
+        model.plugin_job = None;
+        return;
+    }
+    if let ServerEventKind::PlanList { plans } = kind {
+        model.plans.clone_from(plans);
+        return;
+    }
+    if let ServerEventKind::JobList { jobs } = kind {
+        model.jobs = jobs.iter().map(job_summary).collect();
+        return;
+    }
+    if let ServerEventKind::JobStarted {
+        job_id, command, ..
+    } = kind
+    {
+        fold_job_started(job_id, command, tree, model);
+        return;
+    }
+    if let ServerEventKind::JobFinished { job, .. } = kind {
+        fold_job_finished(job, tree, model);
+        return;
+    }
+    if let ServerEventKind::SessionStats {
+        context_used,
+        context_window,
+        ..
+    } = kind
+    {
+        fold_session_stats(*context_used, *context_window, model);
+        return;
+    }
+    if let ServerEventKind::RequestReconstructed { usage, .. } = kind {
+        fold_request_usage(usage, model);
+        return;
+    }
+    if let ServerEventKind::CompactionStarted { reason } = kind {
+        fold_compaction_started(*reason, tree);
+        return;
+    }
+    if let ServerEventKind::CompactionFinished {
+        compacted,
+        summary,
+        error,
+        ..
+    } = kind
+    {
+        fold_compaction_finished(*compacted, summary.as_deref(), error.as_deref(), tree);
     }
 }
 
@@ -1598,7 +1724,7 @@ fn fold_history_event(
 fn fold_history_failure(
     tree: &mut terminalui::Tree,
     model: &crate::ui_model::UiModel,
-    reason: &str,
+    reason: &crate::client_error::ClientError,
 ) -> bool {
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
         stream.push(ui::Item::Notice {

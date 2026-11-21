@@ -97,3 +97,11 @@ fn the_layout_changes_the_row_count() {
     assert_eq!(diff.rows(DiffMode::Unified), 4);
     assert_eq!(diff.rows(DiffMode::Split), 3);
 }
+
+#[test]
+fn diff_labels_round_trip_through_the_enum() {
+    for mode in [DiffMode::Unified, DiffMode::Split] {
+        assert_eq!(DiffMode::from_label(mode.label()), Some(mode));
+    }
+    assert_eq!(DiffMode::from_label("side-by-side"), None);
+}

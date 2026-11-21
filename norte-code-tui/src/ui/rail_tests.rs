@@ -109,6 +109,20 @@ fn painted_text(buf: &Buffer, area: Rect) -> String {
 }
 
 #[test]
+fn rail_labels_round_trip_through_the_enum() {
+    for position in [
+        RailPosition::Hide,
+        RailPosition::Left,
+        RailPosition::Right,
+        RailPosition::Top,
+        RailPosition::Bottom,
+    ] {
+        assert_eq!(RailPosition::from_label(position.label()), Some(position));
+    }
+    assert_eq!(RailPosition::from_label("center"), None);
+}
+
+#[test]
 fn hiding_the_rail_removes_its_ink_but_not_its_focus_slot() {
     let mut model = UiModel::detached();
     model.preferences.rail_position = RailPosition::Hide;

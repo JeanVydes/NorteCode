@@ -20,6 +20,8 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
 use norte_code_protocol::keys::{environment_value, read_secret, save_secret, secrets_path};
 
+use super::key_prompt_error::KeyPromptError;
+
 thread_local! {
     /// Disk lookups are rare but happen on every catalog refresh, so keep
     /// the result until a key is saved or the secrets file moves.
@@ -93,7 +95,8 @@ pub(crate) struct KeyPrompt {
     state: KeyPromptState,
     buffer: String,
     /// The last save attempt's error, shown until the prompt closes.
-    error: Option<String>,
+    #[serde(skip)]
+    error: Option<KeyPromptError>,
     /// The intent that armed this prompt, cleared when saved.
     #[serde(skip)]
     intent: Option<KeyIntent>,
@@ -168,12 +171,12 @@ impl KeyPrompt {
     ///
     /// # Errors
     /// Returns a short human-readable reason when the key cannot be stored.
-    fn save(&mut self) -> Result<(), String> {
+    fn save(&mut self) -> Result<(), KeyPromptError> {
         let Some(provider) = self.provider().map(str::to_owned) else {
-            return Err("no provider".to_string());
+            return Err(KeyPromptError::NoProvider);
         };
         let Some(path) = secrets_path() else {
-            return Err("no secrets path".to_string());
+            return Err(KeyPromptError::NoSecretsPath);
         };
         save_secret(&path, &provider, &self.buffer)
             .map(|()| {
@@ -181,7 +184,7 @@ impl KeyPrompt {
                 self.saved = self.intent.take();
                 self.close();
             })
-            .map_err(|error| format!("{error}"))
+            .map_err(|error| KeyPromptError::Save(error.to_string()))
     }
 }
 

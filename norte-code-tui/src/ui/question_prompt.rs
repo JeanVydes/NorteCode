@@ -15,6 +15,7 @@ use serde::Serialize;
 use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius};
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
+use crate::answer::QuestionAnswer;
 use crate::ui_model::PendingQuestion;
 
 /// The interaction mode of the prompt.
@@ -47,7 +48,7 @@ pub(crate) struct QuestionPrompt {
     response: String,
     /// The committed answer waiting for the app to send.
     #[serde(skip)]
-    pending_answer: Option<(String, String)>,
+    pending_answer: Option<(String, QuestionAnswer)>,
 }
 
 impl QuestionPrompt {
@@ -79,7 +80,7 @@ impl QuestionPrompt {
     }
 
     /// Take the committed answer, if one is pending.
-    pub(crate) fn take_pending_answer(&mut self) -> Option<(String, String)> {
+    pub(crate) fn take_pending_answer(&mut self) -> Option<(String, QuestionAnswer)> {
         self.pending_answer.take()
     }
 
@@ -97,7 +98,7 @@ impl QuestionPrompt {
         let Some(question) = &self.question else {
             return;
         };
-        let answer = if question.multiple && !self.toggled.is_empty() {
+        let text = if question.multiple && !self.toggled.is_empty() {
             self.toggled
                 .iter()
                 .filter_map(|index| question.options.get(*index))
@@ -106,9 +107,10 @@ impl QuestionPrompt {
                 .join(", ")
         } else if let Some(option) = question.options.get(self.selected) {
             option.clone()
-        } else if !self.response.trim().is_empty() {
-            self.response.trim().to_owned()
         } else {
+            self.response.clone()
+        };
+        let Some(answer) = QuestionAnswer::new(text) else {
             return;
         };
         self.pending_answer = Some((question.question.clone(), answer));

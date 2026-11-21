@@ -1,7 +1,12 @@
 //! The ask-user overlay: state transitions and commit semantics.
 
+use crate::answer::QuestionAnswer;
 use crate::ui::question_prompt::{InputMode, QuestionPrompt};
 use crate::ui_model::PendingQuestion;
+
+fn answer(text: &str) -> QuestionAnswer {
+    QuestionAnswer::new(text).expect("answer")
+}
 
 fn question(options: Vec<&str>, multiple: bool) -> PendingQuestion {
     PendingQuestion {
@@ -20,7 +25,7 @@ fn commit_with_single_option_uses_the_selected_row() {
     prompt.commit();
     assert_eq!(
         prompt.take_pending_answer(),
-        Some(("q1".to_owned(), "uptime".to_owned()))
+        Some(("q1".to_owned(), answer("uptime")))
     );
     assert!(!prompt.is_open());
 }
@@ -44,7 +49,7 @@ fn free_text_commits_when_options_are_absent() {
     prompt.commit();
     assert_eq!(
         prompt.take_pending_answer(),
-        Some(("q1".to_owned(), "un sleep".to_owned()))
+        Some(("q1".to_owned(), answer("un sleep")))
     );
 }
 
@@ -58,7 +63,7 @@ fn multiple_choice_commits_toggled_options_comma_joined() {
     prompt.commit();
     assert_eq!(
         prompt.take_pending_answer(),
-        Some(("q1".to_owned(), "a, b".to_owned()))
+        Some(("q1".to_owned(), answer("a, b")))
     );
 }
 

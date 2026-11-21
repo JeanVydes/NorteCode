@@ -43,6 +43,16 @@ impl DiffMode {
         }
     }
 
+    /// Read the label the settings page reports.
+    #[cfg(test)]
+    pub(crate) fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "unified" => Some(Self::Unified),
+            "split" => Some(Self::Split),
+            _ => None,
+        }
+    }
+
     /// The next mode in the cycle.
     pub(crate) fn next(self) -> Self {
         match self {

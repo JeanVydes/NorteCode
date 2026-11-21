@@ -188,7 +188,7 @@ fn an_uploaded_image_gets_its_chip_and_wire_part() {
 fn a_failed_upload_leaves_no_chip() {
     let mut tree = composer_tree(Arc::new(FakeClipboard::default()));
     let event = ClientEvent::UploadFailed {
-        reason: "host refused the bytes".to_owned(),
+        reason: crate::client_error::ClientError::upload("host refused the bytes"),
     };
     assert!(fold_upload_event(&event, &mut tree));
     let composer = tree.find::<Composer>("composer").expect("composer");
@@ -510,7 +510,7 @@ fn accepting_a_plan_review_answers_the_pending_question() {
             question, answer, ..
         }) => {
             assert_eq!(question, "q_1");
-            assert_eq!(answer, "Approve");
+            assert_eq!(answer, crate::answer::QuestionAnswer::approve());
         }
         other => panic!("queued command: {other:?}"),
     }
@@ -553,7 +553,10 @@ fn feedback_on_a_plan_review_sends_the_written_text() {
             question, answer, ..
         }) => {
             assert_eq!(question, "q_1");
-            assert_eq!(answer, "no");
+            assert_eq!(
+                answer,
+                crate::answer::QuestionAnswer::new("no").expect("a typed answer")
+            );
         }
         other => panic!("queued command: {other:?}"),
     }

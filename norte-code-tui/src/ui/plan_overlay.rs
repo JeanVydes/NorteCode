@@ -128,10 +128,10 @@ impl PlanOverlay {
     }
 
     fn submit_feedback(&mut self) {
-        if self.response.trim().is_empty() {
+        let Some(feedback) = crate::review_feedback::ReviewFeedback::new(self.response.clone())
+        else {
             return;
-        }
-        let feedback = self.response.trim().to_owned();
+        };
         self.answer(PlanReviewAction::Feedback(feedback));
     }
 

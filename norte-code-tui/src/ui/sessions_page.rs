@@ -30,14 +30,14 @@ enum Mode {
     /// Typing the new title; carries the session.
     Rename {
         /// The session to rename.
-        session: String,
+        session: norte_code_wire::SessionKey,
         /// The title so far.
         title: String,
     },
     /// Confirming the removal; carries the session.
     ConfirmDelete {
         /// The session to delete.
-        session: String,
+        session: norte_code_wire::SessionKey,
     },
 }
 
@@ -244,7 +244,7 @@ impl SessionsPage {
                 let title = std::mem::take(title).trim().to_owned();
                 if !title.is_empty() {
                     self.pending.push(SessionsAction::Rename {
-                        session: norte_code_wire::SessionKey::new(session.clone()),
+                        session: session.clone(),
                         title,
                     });
                 }
@@ -266,9 +266,7 @@ impl SessionsPage {
             KeyCode::Esc => self.mode = Mode::Listing,
             KeyCode::Enter => {
                 if let Mode::ConfirmDelete { session } = std::mem::take(&mut self.mode) {
-                    self.pending.push(SessionsAction::Delete {
-                        session: norte_code_wire::SessionKey::new(session),
-                    });
+                    self.pending.push(SessionsAction::Delete { session });
                     self.mode = Mode::Listing;
                 }
             }
@@ -307,7 +305,7 @@ impl SessionsPage {
                         .clone()
                         .unwrap_or_else(|| session.session_id.clone());
                     self.mode = Mode::Rename {
-                        session: session.session_id.clone(),
+                        session: norte_code_wire::SessionKey::new(session.session_id.clone()),
                         title,
                     };
                 }
@@ -318,7 +316,7 @@ impl SessionsPage {
                         return;
                     }
                     self.mode = Mode::ConfirmDelete {
-                        session: session.session_id.clone(),
+                        session: norte_code_wire::SessionKey::new(session.session_id.clone()),
                     };
                 }
             }
@@ -431,9 +429,9 @@ impl View for SessionsPage {
                 let title = self
                     .sessions
                     .iter()
-                    .find(|candidate| candidate.session_id == *session)
+                    .find(|candidate| candidate.session_id == session.as_str())
                     .and_then(|session| session.title.clone())
-                    .unwrap_or_else(|| clip(session, 48));
+                    .unwrap_or_else(|| clip(session.as_str(), 48));
                 Self::paint_delete(list_area, buf, theme, &title);
                 false
             }

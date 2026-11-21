@@ -66,6 +66,17 @@ impl ReasoningLevel {
         }
     }
 
+    /// Read the label the selector reports.
+    pub(crate) fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "auto" => Some(Self::Auto),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+
     /// The next level in the cycle.
     pub(crate) const fn next(self) -> Self {
         match self {
@@ -98,6 +109,17 @@ impl SendMode {
             Self::Queue => "queue",
             Self::Interrupt => "interrupt",
             Self::Reject => "reject",
+        }
+    }
+
+    /// Read the label the selector reports.
+    pub(crate) fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "steer" => Some(Self::Steer),
+            "queue" => Some(Self::Queue),
+            "interrupt" => Some(Self::Interrupt),
+            "reject" => Some(Self::Reject),
+            _ => None,
         }
     }
 

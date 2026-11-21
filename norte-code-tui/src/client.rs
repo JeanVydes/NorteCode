@@ -16,7 +16,9 @@ use norte_code_wire::UserInputPart;
 use norte_code_wire::{SessionKey, SessionSummary, UploadReceipt};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
+use crate::answer::QuestionAnswer;
 use crate::attachment::{AttachmentSource, PreparedAttachment};
+use crate::client_error::ClientError;
 use crate::config::ClientConfig;
 use crate::shared_telemetry::SharedTelemetry;
 
@@ -31,7 +33,7 @@ pub(crate) enum ClientEvent {
     /// The connection is down; contains the reason.
     Detached {
         /// What went wrong, in words a person can act on.
-        reason: String,
+        reason: ClientError,
     },
     /// A server event arrived.
     Server(Box<norte_code_wire::ServerEvent>),
@@ -71,7 +73,7 @@ pub(crate) enum ClientEvent {
     /// A command failed; carry the reason for the transcript.
     SendFailed {
         /// What went wrong, in words a person can act on.
-        reason: String,
+        reason: ClientError,
     },
     /// The full history of the attached session, newest first.
     History(Vec<norte_code_wire::HistoryItem>),
@@ -83,7 +85,7 @@ pub(crate) enum ClientEvent {
     /// The session's history could not be fetched; carry the reason.
     HistoryFailed {
         /// The transport or server error.
-        reason: String,
+        reason: ClientError,
     },
     /// The host stored the bytes; the composer can add its chip.
     Uploaded {
@@ -95,7 +97,7 @@ pub(crate) enum ClientEvent {
     /// The bytes never reached the host.
     UploadFailed {
         /// What went wrong, in words a person can act on.
-        reason: String,
+        reason: ClientError,
     },
 }
 
@@ -154,7 +156,7 @@ pub(crate) enum UiCommand {
         /// The host's id for the question.
         question: String,
         /// The answer text.
-        answer: String,
+        answer: QuestionAnswer,
     },
     /// Attach to an existing session, leaving the current stream behind.
     OpenSession {
@@ -245,15 +247,11 @@ async fn cancel_turn(
         Ok(turn) => api
             .cancel_turn(target.as_str(), &turn)
             .await
-            .map_err(|error| error.to_string()),
-        Err(error) => Err(format!("the running turn has an unusable id: {error}")),
+            .map_err(ClientError::cancel),
+        Err(error) => Err(ClientError::invalid_turn(error)),
     };
     if let Err(reason) = result {
-        let _ = events
-            .send(ClientEvent::SendFailed {
-                reason: format!("cancel refused: {reason}"),
-            })
-            .await;
+        let _ = events.send(ClientEvent::SendFailed { reason }).await;
     }
 }
 
@@ -305,7 +303,7 @@ async fn rename_session(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::SendFailed {
-                    reason: format!("rename session failed · {error}"),
+                    reason: ClientError::rename(error),
                 })
                 .await;
         }
@@ -332,7 +330,7 @@ async fn delete_session(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::SendFailed {
-                    reason: format!("delete session failed · {error}"),
+                    reason: ClientError::delete(error),
                 })
                 .await;
         }
@@ -363,7 +361,7 @@ async fn run_plugin_op(api: &Arc<RestClient>, op: PluginOp, events: &Sender<Clie
         Err(error) => {
             let _ = events
                 .send(ClientEvent::SendFailed {
-                    reason: format!("plugin operation failed · {error}"),
+                    reason: ClientError::plugin(error),
                 })
                 .await;
         }
@@ -455,7 +453,7 @@ async fn create_session(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::SendFailed {
-                    reason: format!("could not create a session: {error}"),
+                    reason: ClientError::create_session(error),
                 })
                 .await;
             None
@@ -483,7 +481,7 @@ pub(crate) fn start(config: ClientConfig) -> (Sender<UiCommand>, Receiver<Client
             Ok(runtime) => runtime,
             Err(error) => {
                 let _ = events_tx.blocking_send(ClientEvent::Detached {
-                    reason: format!("could not start the runtime: {error}"),
+                    reason: ClientError::runtime(error),
                 });
                 return;
             }
@@ -508,7 +506,7 @@ async fn connection(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::Detached {
-                    reason: format!("could not build the raep client: {error}"),
+                    reason: ClientError::remote_client(error),
                 })
                 .await;
             return;
@@ -522,7 +520,7 @@ async fn connection(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::Detached {
-                    reason: format!("could not build the raep api: {error}"),
+                    reason: ClientError::rest_client(error),
                 })
                 .await;
             return;
@@ -533,7 +531,7 @@ async fn connection(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::Detached {
-                    reason: format!("could not list the sessions: {error}"),
+                    reason: ClientError::list_sessions(error),
                 })
                 .await;
             return;
@@ -544,7 +542,7 @@ async fn connection(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::Detached {
-                    reason: format!("could not create a session: {error}"),
+                    reason: ClientError::create_session(error),
                 })
                 .await;
             return;
@@ -581,7 +579,7 @@ async fn send_prompt(
     {
         let _ = events
             .send(ClientEvent::SendFailed {
-                reason: format!("message refused: {error}"),
+                reason: ClientError::send_prompt(error),
             })
             .await;
     }
@@ -601,7 +599,7 @@ async fn upload_attachment(
             Err(error) => {
                 let _ = events
                     .send(ClientEvent::UploadFailed {
-                        reason: format!("could not read {}: {error}", path.display()),
+                        reason: ClientError::read_attachment(path, error),
                     })
                     .await;
                 return;
@@ -611,10 +609,7 @@ async fn upload_attachment(
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ATTACHMENT_BYTES {
         let _ = events
             .send(ClientEvent::UploadFailed {
-                reason: format!(
-                    "attachment has {} bytes, limit is {MAX_ATTACHMENT_BYTES}",
-                    bytes.len()
-                ),
+                reason: ClientError::attachment_too_large(bytes.len(), MAX_ATTACHMENT_BYTES),
             })
             .await;
         return;
@@ -634,7 +629,7 @@ async fn upload_attachment(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::UploadFailed {
-                    reason: error.to_string(),
+                    reason: ClientError::upload(error),
                 })
                 .await;
         }
@@ -647,15 +642,15 @@ async fn answer_question(
     events: &Sender<ClientEvent>,
     target: &SessionKey,
     question: String,
-    answer: String,
+    answer: QuestionAnswer,
 ) {
     if let Err(error) = api
-        .answer_question(target.as_str(), &question, &answer)
+        .answer_question(target.as_str(), &question, answer.as_str())
         .await
     {
         let _ = events
             .send(ClientEvent::SendFailed {
-                reason: format!("answer refused: {error}"),
+                reason: ClientError::answer(error),
             })
             .await;
     }
@@ -670,7 +665,7 @@ async fn compact_session(
     if let Err(error) = api.compact(session.as_str()).await {
         let _ = events
             .send(ClientEvent::SendFailed {
-                reason: format!("compact refused: {error}"),
+                reason: ClientError::compact(error),
             })
             .await;
     }
@@ -711,7 +706,7 @@ async fn fork_session(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::SendFailed {
-                    reason: format!("fork failed: {error}"),
+                    reason: ClientError::fork(error),
                 })
                 .await;
         }
@@ -746,7 +741,7 @@ async fn rewind_session(
         Err(error) => {
             let _ = events
                 .send(ClientEvent::SendFailed {
-                    reason: format!("rewind failed: {error}"),
+                    reason: ClientError::rewind(error),
                 })
                 .await;
         }
@@ -778,7 +773,7 @@ async fn fetch_history(api: &Arc<RestClient>, session: &str, events: &Sender<Cli
         Err(error) => {
             let _ = events
                 .send(ClientEvent::HistoryFailed {
-                    reason: error.to_string(),
+                    reason: ClientError::history(error),
                 })
                 .await;
         }
@@ -847,7 +842,7 @@ async fn stream_loop(
                 if attempt >= GIVE_UP_ATTEMPTS && !announced {
                     let _ = events
                         .send(ClientEvent::Detached {
-                            reason: "the stream keeps closing; retrying in the background, check the raep server".into(),
+                            reason: ClientError::unstable_stream(),
                         })
                         .await;
                     announced = true;
@@ -858,9 +853,7 @@ async fn stream_loop(
                 if attempt >= GIVE_UP_ATTEMPTS && !announced {
                     let _ = events
                         .send(ClientEvent::Detached {
-                            reason: format!(
-                                "lost the stream ({error}); retrying in the background, check the raep server"
-                            ),
+                            reason: ClientError::lost_stream(error),
                         })
                         .await;
                     announced = true;

@@ -1,5 +1,7 @@
 //! The decision a reader can make on a live plan review.
 
+use crate::review_feedback::ReviewFeedback;
+
 /// The prefix the agent puts on a plan review question.
 pub(crate) const PLAN_REVIEW_PREFIX: &str = "NORTE_CODE_PLAN_REVIEW\n";
 
@@ -11,5 +13,5 @@ pub(crate) enum PlanReviewAction {
     /// Cancel the plan.
     Decline,
     /// Send feedback back to the model.
-    Feedback(String),
+    Feedback(ReviewFeedback),
 }

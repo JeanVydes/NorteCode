@@ -2,7 +2,7 @@
 
 use norte_code_wire::{AgentRef, ModelInfo};
 
-use super::UiModel;
+use super::{ReasoningLevel, SendMode, UiModel};
 use crate::context::ContextUsage;
 
 fn info(provider: &str, name: &str, max_context: Option<u64>) -> ModelInfo {
@@ -51,6 +51,28 @@ fn reported_stats_win_over_the_model_window() {
     });
     model.models = vec![info("nvidia", "big", Some(128_000))];
     assert_eq!(model.effective_context().window, Some(200));
+}
+
+#[test]
+fn selector_labels_round_trip_through_the_enums() {
+    for level in [
+        ReasoningLevel::Auto,
+        ReasoningLevel::Low,
+        ReasoningLevel::Medium,
+        ReasoningLevel::High,
+    ] {
+        assert_eq!(ReasoningLevel::from_label(level.label()), Some(level));
+    }
+    for mode in [
+        SendMode::Steer,
+        SendMode::Queue,
+        SendMode::Interrupt,
+        SendMode::Reject,
+    ] {
+        assert_eq!(SendMode::from_label(mode.label()), Some(mode));
+    }
+    assert_eq!(ReasoningLevel::from_label("unknown"), None);
+    assert_eq!(SendMode::from_label("unknown"), None);
 }
 
 #[test]

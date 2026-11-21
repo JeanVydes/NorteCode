@@ -5,10 +5,12 @@
 //! views, central focus management, and a strict raep state machine that
 //! never pretends to be attached when it is not.
 
+mod answer;
 mod app;
 mod attachment;
 mod chip;
 mod client;
+mod client_error;
 mod clipboard;
 mod compact_notice;
 mod config;
@@ -21,6 +23,7 @@ mod leaderboard;
 mod metrics;
 mod palette;
 mod process_stats;
+mod review_feedback;
 mod session_stats;
 mod shared_telemetry;
 mod shell;
@@ -28,13 +31,16 @@ mod telemetry;
 mod telemetry_series;
 mod terminal;
 mod theme;
+mod tui_error;
 mod ui;
 mod ui_model;
+
+pub use tui_error::TuiError;
 
 /// Turns the TUI on and serves until it exits, or reports why it cannot.
 ///
 /// # Errors
 /// Returns the error the loop reported to the caller.
-pub fn run_tui() -> Result<(), String> {
-    app::run().map_err(|error| error.to_string())
+pub fn run_tui() -> Result<(), TuiError> {
+    app::run()
 }

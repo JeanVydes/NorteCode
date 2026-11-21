@@ -15,6 +15,7 @@ mod header;
 mod header_tests;
 mod host_info;
 mod key_prompt;
+mod key_prompt_error;
 #[cfg(test)]
 #[path = "key_prompt_tests.rs"]
 mod key_prompt_tests;

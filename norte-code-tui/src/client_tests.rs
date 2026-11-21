@@ -23,6 +23,7 @@ async fn a_refused_send_reports_send_failed() {
     .await;
     assert!(matches!(
         receiver.recv().await,
-        Some(ClientEvent::SendFailed { reason }) if reason.contains("message refused")
+        Some(ClientEvent::SendFailed { reason })
+            if reason.to_string().contains("message refused")
     ));
 }

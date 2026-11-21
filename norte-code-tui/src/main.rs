@@ -4,6 +4,6 @@
 
 #![forbid(unsafe_code)]
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), norte_code_tui::TuiError> {
     norte_code_tui::run_tui()
 }
