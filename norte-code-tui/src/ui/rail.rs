@@ -20,6 +20,12 @@ use crate::context::{ContextUsage, compaction_threshold, human_count};
 use crate::ui_model::SessionAttachmentState;
 
 const RAIL_WIDTH: u16 = 26;
+const MAX_JOB_ROWS: usize = 3;
+const PREVIEW_PREFIX: &str = "preview_";
+
+fn preview_id(index: usize) -> String {
+    format!("{PREVIEW_PREFIX}{index}")
+}
 
 /// Where virtual rail rows land on screen.
 struct RailViewport {
@@ -91,6 +97,8 @@ pub(crate) struct Rail {
     plan_rows: Vec<(Rect, String)>,
     /// A plan the user clicked, waiting for the host to open it.
     pending_plan: Option<String>,
+    /// Whether the next render should bring the plans section into view.
+    reveal_plans: bool,
     /// How many virtual rows are scrolled out of view.
     scroll: u16,
     /// The last rendered frame, for mouse hit-testing.
@@ -116,13 +124,13 @@ impl Rail {
             plans: Vec::new(),
             plan_rows: Vec::new(),
             pending_plan: None,
+            reveal_plans: false,
             scroll: 0,
             area: Rect::new(0, 0, 0, 0),
             inner: Rect::new(0, 0, 0, 0),
             children: vec![
                 node("context_gauge", gauge),
                 node("compact", Button::new(ButtonVariant::Outline, "compact")),
-                node("preview", Button::new(ButtonVariant::Outline, "preview")),
             ],
         }
     }
@@ -142,23 +150,46 @@ impl Rail {
     }
 
     pub(crate) fn set_plans(&mut self, plans: Vec<norte_code_wire::PlanSummary>) {
-        self.set_preview_enabled(!plans.is_empty());
+        let revealed = self.plans.is_empty() && !plans.is_empty();
+        self.sync_plan_buttons(plans.len());
         self.plans = plans;
+        self.reveal_plans |= revealed;
     }
 
-    fn set_preview_enabled(&mut self, enabled: bool) {
-        if let Some(button) = self
-            .children
-            .get_mut(2)
-            .and_then(|node| node.view.as_any().downcast_mut::<Button>())
-        {
-            button.set_disabled(!enabled);
+    fn sync_plan_buttons(&mut self, count: usize) {
+        let expected = 2 + count;
+        self.children.truncate(expected);
+        while self.children.len() < expected {
+            let index = self.children.len() - 2;
+            self.children.push(node(
+                preview_id(index),
+                Button::new(ButtonVariant::Outline, "open"),
+            ));
         }
     }
 
-    /// Take a plan request from a click.
+    /// Take a plan request from a click or a row's preview button.
     pub(crate) fn take_plan_request(&mut self) -> Option<String> {
-        self.pending_plan.take()
+        let Self {
+            children,
+            plans,
+            pending_plan,
+            ..
+        } = self;
+        let previewed = children
+            .iter_mut()
+            .skip(2)
+            .enumerate()
+            .find_map(|(index, child)| {
+                child
+                    .view
+                    .as_any()
+                    .downcast_mut::<Button>()
+                    .is_some_and(Button::take_pressed)
+                    .then(|| plans.get(index).map(|plan| plan.id.clone()))
+                    .flatten()
+            });
+        previewed.or_else(|| pending_plan.take())
     }
 
     /// Enable or disable the compact button from the host's state.
@@ -190,7 +221,7 @@ impl Rail {
             };
         }
         height += 5;
-        height += section_rows(self.jobs.len());
+        height += section_rows(self.jobs.len().min(MAX_JOB_ROWS));
         height += section_rows(self.plans.len());
         height
     }
@@ -298,23 +329,11 @@ impl Rail {
         }
         let dim = Style::default().fg(theme.muted).bg(theme.background);
         buf.set_stringn(inner.x + 1, y, "PLANS", 6, dim.add_modifier(Modifier::BOLD));
-        let button_rect = Rect {
-            x: inner.x + inner.width.saturating_sub(10),
-            y,
-            width: 9,
-            height: 1,
-        };
-        if let Some(node) = self.children.get_mut(2) {
-            node.view.render(button_rect, buf, cx, theme);
-            if let Some(button) = node.view.as_any().downcast_mut::<Button>() {
-                button.state.area = Self::to_screen(button_rect, viewport);
-            }
-        }
         if self.plans.is_empty() {
             buf.set_stringn(inner.x + 1, y + 1, "none", 4, dim);
             return;
         }
-        for (row, plan) in (y + 1..).zip(self.plans.iter().take(3)) {
+        for (index, (row, plan)) in (y + 1..).zip(self.plans.iter()).enumerate() {
             if row >= inner.y + inner.height {
                 break;
             }
@@ -323,15 +342,27 @@ impl Rail {
                 inner.x + 1,
                 row,
                 &title,
-                usize::from(inner.width.saturating_sub(2)),
+                usize::from(inner.width.saturating_sub(8)),
                 Style::default().fg(theme.accent).bg(theme.background),
             );
+            let button_rect = Rect {
+                x: inner.x + inner.width.saturating_sub(7),
+                y: row,
+                width: 6,
+                height: 1,
+            };
+            if let Some(node) = self.children.get_mut(2 + index) {
+                node.view.render(button_rect, buf, cx, theme);
+                if let Some(button) = node.view.as_any().downcast_mut::<Button>() {
+                    button.state.area = Self::to_screen(button_rect, viewport);
+                }
+            }
             self.plan_rows.push((
                 Self::to_screen(
                     Rect {
                         x: inner.x,
                         y: row,
-                        width: inner.width,
+                        width: inner.width.saturating_sub(7),
                         height: 1,
                     },
                     viewport,
@@ -389,6 +420,10 @@ impl View for Rail {
 
         let content_height = self.content_height(inner.width);
         let visible_rows = inner.height.saturating_sub(2);
+        if self.reveal_plans {
+            self.scroll = content_height.saturating_sub(visible_rows);
+            self.reveal_plans = false;
+        }
         self.scroll = self.scroll.min(content_height.saturating_sub(visible_rows));
 
         let content = Rect {
@@ -490,7 +525,7 @@ fn paint_jobs(
         return y + 2;
     }
     let mut row = y + 1;
-    for job in jobs.iter().take(3) {
+    for job in jobs.iter().take(MAX_JOB_ROWS) {
         if row >= inner.y + inner.height {
             break;
         }
@@ -511,7 +546,7 @@ fn section_rows(count: usize) -> u16 {
     if count == 0 {
         2
     } else {
-        u16::try_from(count.min(3)).unwrap_or(3) + 1
+        u16::try_from(count).unwrap_or(u16::MAX).saturating_add(1)
     }
 }
 

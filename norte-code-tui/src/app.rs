@@ -321,15 +321,10 @@ fn poll_event(
 }
 
 fn drain_plan_requests(tree: &mut terminalui::Tree, model: &UiModel) {
-    let clicked = tree
+    let Some(id) = tree
         .find_mut::<ui::Rail>("rail")
-        .and_then(ui::Rail::take_plan_request);
-    let previewed = tree
-        .find_mut::<Button>("preview")
-        .is_some_and(Button::take_pressed)
-        .then(|| model.plans.first().map(|plan| plan.id.clone()))
-        .flatten();
-    let Some(id) = clicked.or(previewed) else {
+        .and_then(ui::Rail::take_plan_request)
+    else {
         return;
     };
     if let Some(plan) = model.plans.iter().find(|plan| plan.id == id).cloned()
@@ -797,11 +792,18 @@ fn drain_sessions_actions(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) {
+    if tree
+        .find_mut::<Button>("new_session")
+        .is_some_and(Button::take_pressed)
+    {
+        create_session(tree, commands.as_ref(), model);
+    }
     let Some(page) = tree.find_mut::<ui::SessionsPage>("sessions") else {
         return;
     };
     for action in page.take_pending() {
         match action {
+            ui::SessionsAction::Create => create_session(tree, commands.as_ref(), model),
             ui::SessionsAction::Attach { session } => {
                 if let Some(commands) = commands.as_ref() {
                     let _ = commands.try_send(UiCommand::OpenSession { session });
@@ -835,6 +837,18 @@ fn drain_sessions_actions(
             }
         }
     }
+}
+
+fn create_session(
+    tree: &mut terminalui::Tree,
+    commands: Option<&tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) {
+    if let Some(commands) = commands {
+        let _ = commands.try_send(UiCommand::CreateSession { title: None });
+    }
+    model.tab = Tab::Chat;
+    ui::sync_views(tree, model);
 }
 
 /// Ask the host to cancel the running turn; keeps the TUI up.

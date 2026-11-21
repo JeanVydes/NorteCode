@@ -55,7 +55,7 @@ fn the_compact_button_takes_a_focus_slot() {
 }
 
 #[test]
-fn scrolling_the_rail_reveals_plans_and_keeps_their_click_rows() {
+fn arriving_plans_are_visible_and_keep_their_click_rows() {
     let mut model = UiModel::detached();
     model.plans = vec![norte_code_wire::PlanSummary {
         id: "plan-1".to_owned(),
@@ -71,15 +71,9 @@ fn scrolling_the_rail_reveals_plans_and_keeps_their_click_rows() {
 
     let mut buf = Buffer::empty(area);
     tree.render(area, &mut buf, &theme);
-    assert!(!painted_text(&buf, area).contains("PLANS"));
-
-    for _ in 0..5 {
-        let _ = tree.handle_event(&mouse(MouseEventKind::ScrollDown, 10, 10));
-    }
-    let mut buf = Buffer::empty(area);
-    tree.render(area, &mut buf, &theme);
     let text = painted_text(&buf, area);
     assert!(text.contains("PLANS"), "{text}");
+    assert!(text.contains("A plan"), "{text}");
 
     let Some(row) = text.lines().position(|line| line.contains("A plan")) else {
         panic!("the plan row is not visible: {text}");
