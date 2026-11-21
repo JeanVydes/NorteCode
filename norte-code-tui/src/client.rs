@@ -122,6 +122,11 @@ pub(crate) enum UiCommand {
     },
     /// Refetch the session list.
     Refresh,
+    /// Create a fresh session and attach to it.
+    CreateSession {
+        /// The title the user gave, if any.
+        title: Option<String>,
+    },
     /// Set the session's model.
     SetModel {
         /// The session to change.
@@ -437,6 +442,24 @@ async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<Clien
     }
     if let Ok(quota) = quota {
         let _ = events.send(ClientEvent::Quota(quota)).await;
+    }
+}
+
+async fn create_session(
+    client: &Arc<RemoteClient>,
+    events: &Sender<ClientEvent>,
+    title: Option<String>,
+) -> Option<StreamOutcome> {
+    match client.create_session(title.as_deref()).await {
+        Ok(session) => Some(StreamOutcome::Switch(Box::new(session))),
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: format!("could not create a session: {error}"),
+                })
+                .await;
+            None
+        }
     }
 }
 
@@ -906,6 +929,9 @@ async fn apply_command(
             if let Ok(sessions) = client.list_sessions().await {
                 let _ = events.send(ClientEvent::Sessions(sessions)).await;
             }
+        }
+        UiCommand::CreateSession { title } => {
+            return create_session(client, events, title).await;
         }
         UiCommand::AnswerQuestion {
             session,

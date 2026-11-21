@@ -12,6 +12,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
+use terminalui::components::button::{Button, ButtonVariant};
 use terminalui::components::pagination::Pagination;
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
@@ -43,6 +44,8 @@ enum Mode {
 /// What the page is doing, as far as the host is concerned.
 #[derive(Serialize)]
 pub(crate) enum SessionsAction {
+    /// Create a fresh session.
+    Create,
     /// Attach to this session.
     Attach {
         /// The session to attach to.
@@ -106,6 +109,7 @@ impl SessionsPage {
             children: vec![
                 node("sessions_pager", Pagination::new(1)),
                 node("session_detail", DetailPanel::new()),
+                node("new_session", Button::new(ButtonVariant::Outline, "+ new")),
             ],
         }
     }
@@ -294,6 +298,7 @@ impl SessionsPage {
             }
             KeyCode::Home => self.selected = 0,
             KeyCode::End => self.selected = self.sessions.len().saturating_sub(1),
+            KeyCode::Char('n') => self.pending.push(SessionsAction::Create),
             KeyCode::Enter => self.attach(),
             KeyCode::Char('r') => {
                 if let Some(session) = self.selected_session() {
@@ -405,6 +410,18 @@ impl View for SessionsPage {
         };
 
         Self::paint_caption(list_area, buf, theme);
+        let button_rect = Rect {
+            x: list_area.x + list_area.width.saturating_sub(8),
+            y: list_area.y,
+            width: 7,
+            height: 1,
+        };
+        if let Some(child) = self.children.get_mut(2) {
+            child.view.render(button_rect, buf, cx, theme);
+            if let Some(button) = child.view.as_any().downcast_mut::<Button>() {
+                button.state.area = button_rect;
+            }
+        }
         let listing = match &self.mode {
             Mode::Rename { title, .. } => {
                 Self::paint_rename(list_area, buf, theme, title);
@@ -477,7 +494,7 @@ impl SessionsPage {
 
     fn paint_hint(area: Rect, buf: &mut Buffer, theme: &Theme) {
         let y = area.y + area.height.saturating_sub(2);
-        let hint = "⏎ attach · r rename · d delete";
+        let hint = "⏎ attach · n new · r rename · d delete";
         buf.set_stringn(
             area.x + 1,
             y,

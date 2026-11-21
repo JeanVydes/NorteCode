@@ -63,6 +63,14 @@ fn the_detail_panel_tracks_the_selected_session() {
 }
 
 #[test]
+fn new_key_asks_to_create_a_session() {
+    let mut page = page_with(vec![session("a", None)]);
+    page.handle_listing_key(&key('n'));
+    let actions = page.take_pending();
+    assert!(matches!(&actions[..], [SessionsAction::Create]));
+}
+
+#[test]
 fn enter_asks_to_attach_the_selected_session() {
     let mut page = page_with(vec![session("a", None), session("b", None)]);
     page.handle_listing_key(&enter());

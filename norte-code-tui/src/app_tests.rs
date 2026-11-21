@@ -7,7 +7,9 @@ use norte_code_wire::{SessionKey, UploadReceipt};
 use terminalui::{InputEvent, Theme, Tree, node};
 use tokio::sync::mpsc;
 
-use super::{drain_plan_requests, fold, fold_upload_event, handle_key};
+use super::{
+    drain_plan_requests, drain_sessions_actions, fold, fold_upload_event, handle_key, sync_chrome,
+};
 use crate::attachment::{AttachmentKind, AttachmentSource, PreparedAttachment};
 use crate::client::{ClientEvent, UiCommand};
 use crate::clipboard::{Clipboard, FakeClipboard};
@@ -244,37 +246,98 @@ fn a_started_job_appears_in_the_rail_model() {
 }
 
 #[test]
-fn the_preview_button_opens_the_newest_plan() {
+fn the_new_session_button_sends_the_command() {
     let mut model = UiModel::detached();
-    model.plans.push(norte_code_wire::PlanSummary {
-        id: "plan_1".to_owned(),
-        title: Some("A plan".to_owned()),
-        content: "body".to_owned(),
-        ..Default::default()
-    });
+    model.tab = crate::ui_model::Tab::Sessions;
     let mut tree = ui::build_tree(&model);
+    ui::sync_views(&mut tree, &model);
+    tree.find_mut::<ui::SessionsPage>("sessions")
+        .expect("sessions")
+        .set_data(Vec::new(), None, Arc::default());
     let theme = model.preferences.catalog.theme(&model.preferences.theme);
-    let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+    let area = ratatui::layout::Rect::new(0, 0, 100, 24);
     let mut buf = ratatui::buffer::Buffer::empty(area);
     tree.render(area, &mut buf, &theme);
+
+    press_button(&mut tree, "new_session");
+
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+    drain_sessions_actions(&mut tree, &mut commands, &mut model);
+    assert!(matches!(
+        commands_rx.try_recv(),
+        Ok(UiCommand::CreateSession { title: None })
+    ));
+}
+
+#[test]
+fn creating_a_session_switches_to_chat_and_sends_the_command() {
+    let mut model = UiModel::detached();
+    model.tab = crate::ui_model::Tab::Sessions;
+    let mut tree = ui::build_tree(&model);
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(commands_tx);
+    tree.find_mut::<ui::SessionsPage>("sessions")
+        .expect("sessions")
+        .set_data(Vec::new(), None, Arc::default());
+    ui::sync_views(&mut tree, &model);
+    let new_key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+    let _ = tree.handle_event(&InputEvent::Key(new_key));
+
+    drain_sessions_actions(&mut tree, &mut commands, &mut model);
+
+    assert!(matches!(
+        commands_rx.try_recv(),
+        Ok(UiCommand::CreateSession { title: None })
+    ));
+    assert_eq!(model.tab, crate::ui_model::Tab::Chat);
+}
+
+fn plan(id: &str) -> norte_code_wire::PlanSummary {
+    norte_code_wire::PlanSummary {
+        id: id.to_owned(),
+        title: Some(format!("Plan {id}")),
+        content: "body".to_owned(),
+        ..Default::default()
+    }
+}
+
+fn press_button(tree: &mut Tree, id: &str) {
     let button = tree
-        .find::<terminalui::components::button::Button>("preview")
-        .expect("preview");
-    let x = button.state.area.x;
-    let y = button.state.area.y;
+        .find::<terminalui::components::button::Button>(id)
+        .unwrap_or_else(|| panic!("button {id}"));
     let click = InputEvent::Mouse(crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        column: x,
-        row: y,
+        column: button.state.area.x,
+        row: button.state.area.y,
         modifiers: crossterm::event::KeyModifiers::NONE,
     });
     let _ = tree.handle_event(&click);
+}
 
+fn rendered_tree(model: &UiModel, height: u16) -> Tree {
+    let mut tree = ui::build_tree(model);
+    sync_chrome(&mut tree, model);
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let area = ratatui::layout::Rect::new(0, 0, 100, height);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    tree
+}
+
+#[test]
+fn each_preview_button_opens_its_own_plan() {
+    let mut model = UiModel::detached();
+    for index in 0..4 {
+        model.plans.push(plan(&format!("plan_{index}")));
+    }
+    let mut tree = rendered_tree(&model, 24);
+
+    press_button(&mut tree, "preview_3");
     drain_plan_requests(&mut tree, &model);
 
-    assert!(
-        tree.find::<ui::PlanOverlay>("plan_overlay")
-            .expect("plan overlay")
-            .is_open()
-    );
+    let overlay = tree
+        .find::<ui::PlanOverlay>("plan_overlay")
+        .expect("plan overlay");
+    assert_eq!(overlay.plan().map(|plan| plan.id.as_str()), Some("plan_3"));
 }

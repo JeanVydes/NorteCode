@@ -45,6 +45,12 @@ impl PlanOverlay {
         self.plan.is_some()
     }
 
+    /// The plan currently showing.
+    #[cfg(test)]
+    pub(crate) fn plan(&self) -> Option<&norte_code_wire::PlanSummary> {
+        self.plan.as_ref()
+    }
+
     /// Close the overlay.
     pub(crate) fn close(&mut self) {
         self.plan = None;
