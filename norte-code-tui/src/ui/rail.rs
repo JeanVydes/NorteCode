@@ -74,6 +74,14 @@ pub(crate) struct Rail {
     pub(crate) model: Option<String>,
     /// The context the session last reported.
     context: ContextUsage,
+    /// Background jobs of the attached session.
+    jobs: Vec<norte_code_wire::JobSummary>,
+    /// Plans of the attached session.
+    plans: Vec<norte_code_wire::PlanSummary>,
+    /// Clickable plan rows, recorded during render.
+    plan_rows: Vec<(Rect, String)>,
+    /// A plan the user clicked, waiting for the host to open it.
+    pending_plan: Option<String>,
     children: Vec<Node>,
 }
 
@@ -90,6 +98,10 @@ impl Rail {
             provider: None,
             model: None,
             context: ContextUsage::default(),
+            jobs: Vec::new(),
+            plans: Vec::new(),
+            plan_rows: Vec::new(),
+            pending_plan: None,
             children: vec![
                 node("context_gauge", gauge),
                 node("compact", Button::new(ButtonVariant::Ghost, "compact")),
@@ -105,6 +117,19 @@ impl Rail {
     /// Replace the context the gauge reports.
     pub(crate) fn set_context(&mut self, context: ContextUsage) {
         self.context = context;
+    }
+
+    pub(crate) fn set_jobs(&mut self, jobs: Vec<norte_code_wire::JobSummary>) {
+        self.jobs = jobs;
+    }
+
+    pub(crate) fn set_plans(&mut self, plans: Vec<norte_code_wire::PlanSummary>) {
+        self.plans = plans;
+    }
+
+    /// Take a plan request from a click.
+    pub(crate) fn take_plan_request(&mut self) -> Option<String> {
+        self.pending_plan.take()
     }
 
     /// Enable or disable the compact button from the host's state.
@@ -125,7 +150,7 @@ impl Rail {
         buf: &mut Buffer,
         cx: &mut Context,
         theme: &Theme,
-    ) {
+    ) -> u16 {
         let usage = self.context;
         let start = y + 1;
         let bottom = inner.y + inner.height;
@@ -141,7 +166,7 @@ impl Rail {
             if focusable {
                 let _ = cx.is_focused();
             }
-            return;
+            return bottom;
         }
         let dim = Style::default().fg(theme.muted).bg(theme.background);
         let color = if usage.over_limit() {
@@ -204,6 +229,37 @@ impl Rail {
         if let Some(node) = self.children.get_mut(1) {
             node.view.render(button_rect, buf, cx, theme);
         }
+        start + 4
+    }
+    fn paint_plans(&mut self, buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme) {
+        self.plan_rows.clear();
+        if y + 2 >= inner.y + inner.height || self.plans.is_empty() {
+            return;
+        }
+        let dim = Style::default().fg(theme.muted).bg(theme.background);
+        buf.set_stringn(inner.x + 1, y, "PLANS", 6, dim.add_modifier(Modifier::BOLD));
+        for (row, plan) in (y + 1..).zip(self.plans.iter().take(3)) {
+            if row >= inner.y + inner.height {
+                break;
+            }
+            let title = plan.title.clone().unwrap_or_else(|| plan.id.clone());
+            buf.set_stringn(
+                inner.x + 1,
+                row,
+                &title,
+                usize::from(inner.width.saturating_sub(2)),
+                Style::default().fg(theme.accent).bg(theme.background),
+            );
+            self.plan_rows.push((
+                Rect {
+                    x: inner.x,
+                    y: row,
+                    width: inner.width,
+                    height: 1,
+                },
+                plan.id.clone(),
+            ));
+        }
     }
 }
 
@@ -263,12 +319,55 @@ impl View for Rail {
             );
             y = paint_connection(buf, inner, y, &self.attachment, theme);
         }
-        self.paint_context(inner, y, buf, cx, theme);
+        y = self.paint_context(inner, y, buf, cx, theme);
+        y = paint_jobs(buf, inner, y, &self.jobs, theme);
+        self.paint_plans(buf, inner, y, theme);
     }
 
-    fn handle_event(&mut self, _event: &InputEvent, _cx: &mut Context) -> Outcome {
+    fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
+        if let InputEvent::Mouse(mouse) = event
+            && mouse.kind
+                == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+        {
+            for (rect, id) in &self.plan_rows {
+                if rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    self.pending_plan = Some(id.clone());
+                    return Outcome::Consumed;
+                }
+            }
+        }
         Outcome::Ignored
     }
+}
+
+fn paint_jobs(
+    buf: &mut Buffer,
+    inner: Rect,
+    y: u16,
+    jobs: &[norte_code_wire::JobSummary],
+    theme: &Theme,
+) -> u16 {
+    if y + 2 >= inner.y + inner.height || jobs.is_empty() {
+        return y;
+    }
+    let dim = Style::default().fg(theme.muted).bg(theme.background);
+    buf.set_stringn(inner.x + 1, y, "JOBS", 5, dim.add_modifier(Modifier::BOLD));
+    let mut row = y + 1;
+    for job in jobs.iter().take(3) {
+        if row >= inner.y + inner.height {
+            break;
+        }
+        let text = format!("{} {}", job.status.label(), clipped(&job.command, 18));
+        buf.set_stringn(
+            inner.x + 1,
+            row,
+            &text,
+            usize::from(inner.width.saturating_sub(2)),
+            Style::default().fg(theme.foreground).bg(theme.background),
+        );
+        row += 1;
+    }
+    row + 1
 }
 
 fn clipped(text: &str, max: usize) -> String {

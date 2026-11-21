@@ -226,31 +226,27 @@ pub(crate) enum Tab {
     Sessions,
     /// The model catalogue.
     Models,
-    /// The plans.
-    Plans,
-    /// The jobs.
-    Jobs,
     /// The telemetry page.
     Telemetry,
     /// The settings page: host, agents, plugins and preferences.
     Settings,
-    /// The costs page.
-    Costs,
 }
 
 impl Tab {
+    /// Whether this tab has two lists that Tab switches between.
+    pub(crate) const fn is_list_tab(self) -> bool {
+        matches!(self, Self::Telemetry | Self::Settings)
+    }
+
     /// Cycle to the next tab.
     #[must_use]
     pub(crate) const fn next(self) -> Self {
         match self {
             Self::Chat => Self::Sessions,
             Self::Sessions => Self::Models,
-            Self::Models => Self::Plans,
-            Self::Plans => Self::Jobs,
-            Self::Jobs => Self::Telemetry,
+            Self::Models => Self::Telemetry,
             Self::Telemetry => Self::Settings,
-            Self::Settings => Self::Costs,
-            Self::Costs => Self::Chat,
+            Self::Settings => Self::Chat,
         }
     }
 
@@ -258,14 +254,11 @@ impl Tab {
     #[must_use]
     pub(crate) const fn previous(self) -> Self {
         match self {
-            Self::Chat => Self::Costs,
+            Self::Chat => Self::Settings,
             Self::Sessions => Self::Chat,
             Self::Models => Self::Sessions,
-            Self::Plans => Self::Models,
-            Self::Jobs => Self::Plans,
-            Self::Telemetry => Self::Jobs,
+            Self::Telemetry => Self::Models,
             Self::Settings => Self::Telemetry,
-            Self::Costs => Self::Settings,
         }
     }
 
@@ -275,11 +268,8 @@ impl Tab {
             Self::Chat => "Chat",
             Self::Sessions => "Sessions",
             Self::Models => "Models",
-            Self::Plans => "Plans",
-            Self::Jobs => "Jobs",
             Self::Telemetry => "Telemetry",
             Self::Settings => "Settings",
-            Self::Costs => "Costs",
         }
     }
 
@@ -289,11 +279,8 @@ impl Tab {
             Self::Chat => "Chat",
             Self::Sessions => "Sess",
             Self::Models => "Models",
-            Self::Plans => "Plans",
-            Self::Jobs => "Jobs",
             Self::Telemetry => "Tele",
             Self::Settings => "Config",
-            Self::Costs => "Cost",
         }
     }
 
@@ -303,11 +290,8 @@ impl Tab {
             '1' => Some(Self::Chat),
             '2' => Some(Self::Sessions),
             '3' => Some(Self::Models),
-            '4' => Some(Self::Plans),
-            '5' => Some(Self::Jobs),
-            '6' => Some(Self::Telemetry),
-            '7' => Some(Self::Settings),
-            '8' => Some(Self::Costs),
+            '4' => Some(Self::Telemetry),
+            '5' => Some(Self::Settings),
             _ => None,
         }
     }

@@ -1,5 +1,6 @@
 //! The view tree: header, rail, stream, composer, status strip, pages.
 
+mod app_frame;
 mod chat_layout;
 mod composer;
 mod config_page;
@@ -9,13 +10,12 @@ mod detail_panel;
 mod focus_tests;
 mod header;
 mod host_info;
-mod inspector;
 mod key_prompt;
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod layout_tests;
 mod models_page;
-mod pages;
+mod plan_overlay;
 mod plugins_page;
 mod question_prompt;
 mod rail;
@@ -32,7 +32,6 @@ mod telemetry_page;
 mod telemetry_page_tests;
 mod transcript;
 
-use ratatui::layout::Constraint;
 use terminalui::Pane;
 
 pub(crate) use chat_layout::ChatLayout;
@@ -42,6 +41,7 @@ pub(crate) use header::Header;
 
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
+pub(crate) use plan_overlay::PlanOverlay;
 pub(crate) use plugins_page::PluginsAction;
 pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::{Rail, RailPosition};
@@ -53,7 +53,7 @@ pub(crate) use transcript::{Item, MessageAction, Tone, ToolState, Transcript};
 
 use crate::ui_model::{Tab, UiModel};
 
-use terminalui::{Stack, Text, TextStyle, Tree, node};
+use terminalui::{Text, TextStyle, Tree, node};
 
 use terminalui::components::statusbar::{StatusBar, StatusBarStyle};
 
@@ -62,11 +62,8 @@ fn tab_index(tab: Tab) -> usize {
         Tab::Chat => 0,
         Tab::Sessions => 1,
         Tab::Models => 2,
-        Tab::Plans => 3,
-        Tab::Jobs => 4,
-        Tab::Telemetry => 5,
-        Tab::Settings => 6,
-        Tab::Costs => 7,
+        Tab::Telemetry => 3,
+        Tab::Settings => 4,
     }
 }
 
@@ -127,24 +124,15 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
             chat,
             node("sessions", sessions_page::SessionsPage::new()),
             node("models", models_page::ModelsPage::new()),
-            node("plans", pages::plans(model)),
-            node("jobs", pages::jobs(model)),
             node("telemetry", TelemetryPage::new()),
             node("settings", settings_page::SettingsPage::new()),
-            node("costs", pages::costs(model)),
         ]),
     );
 
     let frame = node(
         "frame",
-        Stack::vertical()
-            .constraints(vec![
-                Constraint::Length(1),
-                Constraint::Fill(1),
-                Constraint::Length(6),
-                Constraint::Length(1),
-            ])
-            .children(vec![
+        app_frame::AppFrame::new(
+            vec![
                 node(
                     "header",
                     header::Header::new(
@@ -155,7 +143,9 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
                 middle,
                 node("composer", composer::Composer::new(&theme)),
                 status_bar(model, &theme),
-            ]),
+            ],
+            model.tab == Tab::Chat,
+        ),
     );
 
     let root = node(
@@ -164,6 +154,7 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
             frame,
             node("key_prompt", key_prompt::KeyPrompt::new()),
             node("question_prompt", question_prompt::QuestionPrompt::new()),
+            node("plan_overlay", plan_overlay::PlanOverlay::default()),
         ]),
     );
 
@@ -183,6 +174,9 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     if let Some(pane) = tree.find_mut::<Pane>("middle") {
         pane.set_visible(tab_index(model.tab));
     }
+    if let Some(frame) = tree.find_mut::<app_frame::AppFrame>("frame") {
+        frame.set_show_composer(model.tab == Tab::Chat);
+    }
     if let Some(composer) = tree.find_mut::<Composer>("composer") {
         composer.set_visible(model.tab == Tab::Chat);
     }
@@ -193,8 +187,13 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
         .find::<key_prompt::KeyPrompt>("key_prompt")
         .is_some_and(key_prompt::KeyPrompt::is_open);
     let question_open = model.question.is_some();
+    let plan_open = tree
+        .find::<plan_overlay::PlanOverlay>("plan_overlay")
+        .is_some_and(plan_overlay::PlanOverlay::is_open);
     if let Some(root) = tree.find_mut::<Pane>("root") {
-        root.set_visible(if question_open {
+        root.set_visible(if plan_open {
+            3
+        } else if question_open {
             2
         } else {
             usize::from(prompt_open)
@@ -272,22 +271,13 @@ fn update_config(tree: &mut Tree, model: &UiModel) {
     }
 }
 
-/// Refresh the inspectors from the latest model snapshot; called after data arrives.
+/// Refresh the views from the latest model snapshot; called after data arrives.
 pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
     update_sessions(tree, model);
     update_models(tree, model);
-    if let Some(inspector) = tree.find_mut::<inspector::Inspector>("plans") {
-        *inspector = pages::plans(model);
-    }
-    if let Some(inspector) = tree.find_mut::<inspector::Inspector>("jobs") {
-        *inspector = pages::jobs(model);
-    }
     if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
         page.set_report(model.telemetry.clone());
         page.set_sessions(model.sessions.clone());
     }
     update_config(tree, model);
-    if let Some(inspector) = tree.find_mut::<inspector::Inspector>("costs") {
-        *inspector = pages::costs(model);
-    }
 }
