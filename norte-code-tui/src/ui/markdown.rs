@@ -272,9 +272,12 @@ impl<'a> Renderer<'a> {
     }
 
     fn finish_line(&mut self) {
-        if !self.line.is_empty() {
-            self.lines.push(Line::from(std::mem::take(&mut self.line)));
+        if self.line.is_empty() {
+            return;
         }
+        let wrapped = wrap_spans(&self.line, self.width);
+        self.line.clear();
+        self.lines.extend(wrapped.into_iter().map(Line::from));
     }
 
     fn newline(&mut self) {
@@ -501,28 +504,98 @@ fn grid_row(
 }
 
 fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
-    let mut lines = vec![Vec::new()];
-    let mut line_width = 0usize;
-    for span in spans {
-        for character in span.content.chars() {
-            if character == '\n' {
-                lines.push(Vec::new());
-                line_width = 0;
-                continue;
+    let width = width.max(1);
+    let characters: Vec<(char, Style)> = spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(|character| (character, span.style))
+        })
+        .collect();
+    let mut lines = Vec::new();
+    let mut current: Vec<(char, Style)> = Vec::new();
+    let mut current_width = 0usize;
+    let mut pending_space = false;
+    let mut index = 0;
+
+    while index < characters.len() {
+        let (character, _) = characters[index];
+        if character == '\n' {
+            lines.push(styled_line(&current));
+            current.clear();
+            current_width = 0;
+            pending_space = false;
+            index += 1;
+            continue;
+        }
+        if character.is_whitespace() {
+            pending_space |= !current.is_empty();
+            index += 1;
+            continue;
+        }
+
+        let word_start = index;
+        while index < characters.len() && !characters[index].0.is_whitespace() {
+            index += 1;
+        }
+        let word = &characters[word_start..index];
+        let word_width: usize = word
+            .iter()
+            .map(|(character, _)| UnicodeWidthChar::width(*character).unwrap_or_default())
+            .sum();
+        let separator = usize::from(pending_space && !current.is_empty());
+        if !current.is_empty() && current_width + separator + word_width > width {
+            lines.push(styled_line(&current));
+            current.clear();
+            current_width = 0;
+            pending_space = false;
+        }
+        if word_width > width {
+            for (character, style) in word {
+                let character_width = UnicodeWidthChar::width(*character).unwrap_or_default();
+                if current_width > 0 && current_width + character_width > width {
+                    lines.push(styled_line(&current));
+                    current.clear();
+                    current_width = 0;
+                }
+                current.push((*character, *style));
+                current_width += character_width;
             }
-            let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
-            if line_width > 0 && line_width.saturating_add(character_width) > width {
-                lines.push(Vec::new());
-                line_width = 0;
+        } else {
+            if pending_space && !current.is_empty() {
+                current.push((' ', Style::default()));
+                current_width += 1;
             }
-            lines
-                .last_mut()
-                .expect("a wrapping line exists")
-                .push(Span::styled(character.to_string(), span.style));
-            line_width += character_width;
+            current.extend_from_slice(word);
+            current_width += word_width;
+        }
+        pending_space = false;
+    }
+    lines.push(styled_line(&current));
+    lines
+}
+
+fn styled_line(characters: &[(char, Style)]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut text = String::new();
+    let mut style = Style::default();
+    for (character, character_style) in characters {
+        if text.is_empty() {
+            style = *character_style;
+        }
+        if *character_style == style {
+            text.push(*character);
+        } else {
+            spans.push(Span::styled(std::mem::take(&mut text), style));
+            style = *character_style;
+            text.push(*character);
         }
     }
-    lines
+    if !text.is_empty() {
+        spans.push(Span::styled(text, style));
+    }
+    spans
 }
 
 fn cell_width(spans: &[Span<'static>]) -> usize {

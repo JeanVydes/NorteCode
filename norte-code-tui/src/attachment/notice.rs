@@ -59,27 +59,18 @@ impl AttachmentNotice {
     /// Build the reader-facing text.
     pub(crate) fn text(&self) -> String {
         match self {
-            Self::InvalidMime { value } => format!("invalid media type `{value}`, no chip created"),
+            Self::InvalidMime { value } => format!("invalid media type `{value}`"),
             Self::UnknownMime { path } => {
-                format!("unknown media type for {}, no chip created", path.display())
+                format!("unknown media type for {}", path.display())
             }
-            Self::UnsupportedMime { mime } => {
-                format!(
-                    "unsupported media type `{}`, no chip created",
-                    mime.as_str()
-                )
-            }
-            Self::UploadsUnavailable => {
-                "the host does not accept uploads, no chip created".to_owned()
-            }
-            Self::ModelUnknown => "active model is unknown, no chip created".to_owned(),
+            Self::UnsupportedMime { mime } => format!("unsupported media type `{}`", mime.as_str()),
+            Self::UploadsUnavailable => "the host does not accept uploads".to_owned(),
+            Self::ModelUnknown => "active model is unknown".to_owned(),
             Self::ModalityRejected { kind, model } => {
-                format!("model {model} does not accept {kind} input, no chip created")
+                format!("model {model} does not accept {kind} input")
             }
-            Self::UploadFailed { reason } => format!("upload failed: {reason}, no chip created"),
-            Self::ClipboardUnavailable { reason } => {
-                format!("clipboard unavailable: {reason}, no chip created")
-            }
+            Self::UploadFailed { reason } => format!("upload failed: {reason}"),
+            Self::ClipboardUnavailable { reason } => format!("clipboard unavailable: {reason}"),
         }
     }
 
