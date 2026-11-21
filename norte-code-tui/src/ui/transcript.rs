@@ -13,6 +13,7 @@ use crossterm::event::{KeyCode, KeyEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
+use unicode_width::UnicodeWidthStr;
 
 use crate::diff::LineKind;
 use serde::Serialize;
@@ -244,6 +245,12 @@ pub(crate) struct Transcript {
     /// How edit diffs are drawn.
     #[serde(skip)]
     diff_mode: crate::diff::DiffMode,
+    /// Rendered Markdown for message items, indexed like `items`.
+    #[serde(skip)]
+    docs: Vec<Option<super::markdown::Markdown>>,
+    /// The palette the cached documents were rendered with.
+    #[serde(skip)]
+    doc_theme: Option<Theme>,
 }
 
 /// What the message menu was asked to do.
@@ -316,6 +323,8 @@ impl Transcript {
             focused_item: None,
             message_actions: Vec::new(),
             diff_mode: crate::diff::DiffMode::Unified,
+            docs: Vec::new(),
+            doc_theme: None,
             follow_tail: true,
         }
     }
@@ -567,12 +576,17 @@ impl Transcript {
         });
     }
 
-    fn item_height(item: &Item, width: usize, diff_mode: crate::diff::DiffMode) -> u16 {
+    fn item_height(
+        item: &Item,
+        width: usize,
+        diff_mode: crate::diff::DiffMode,
+        doc_lines: Option<usize>,
+    ) -> u16 {
         match item {
-            Item::User { text, .. }
-            | Item::Assistant { text, .. }
-            | Item::Notice { text, .. }
-            | Item::Retry { text, .. } => {
+            Item::User { .. } | Item::Assistant { .. } => {
+                u16::try_from(doc_lines.unwrap_or(1)).unwrap_or(u16::MAX) + BLOCK_GAP
+            }
+            Item::Notice { text, .. } | Item::Retry { text, .. } => {
                 u16::try_from(wrap(text, width).len()).unwrap_or(u16::MAX) + BLOCK_GAP
             }
             Item::Reasoning { text, expanded } => {
@@ -592,21 +606,45 @@ impl Transcript {
         }
     }
 
-    fn compute_heights(&mut self, width: u16) {
-        if !self.dirty && self.heights_width == width {
+    fn compute_heights(&mut self, width: u16, theme: Theme) {
+        if !self.dirty && self.heights_width == width && self.doc_theme == Some(theme) {
             return;
         }
-        let width = usize::from(width);
+        let cells = usize::from(width);
+        self.docs = self
+            .items
+            .iter()
+            .map(|item| match item {
+                Item::User { text, .. } => Some(super::markdown::Markdown::render(
+                    text,
+                    u16::try_from(cells.saturating_sub(1)).unwrap_or(u16::MAX),
+                    &theme,
+                )),
+                Item::Assistant { text, .. } => {
+                    Some(super::markdown::Markdown::render(text, width, &theme))
+                }
+                _ => None,
+            })
+            .collect();
         self.heights = self
             .items
             .iter()
-            .map(|item| Self::item_height(item, width, self.diff_mode))
+            .enumerate()
+            .map(|(index, item)| {
+                let lines = self
+                    .docs
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(|doc| doc.lines.len());
+                Self::item_height(item, cells, self.diff_mode, lines)
+            })
             .collect();
         self.content_height = self
             .heights
             .iter()
             .fold(0u16, |total, height| total.saturating_add(*height));
-        self.heights_width = u16::try_from(width).unwrap_or(u16::MAX);
+        self.heights_width = width;
+        self.doc_theme = Some(theme);
         self.dirty = false;
         let max = self.max_offset();
         if self.follow_tail {
@@ -624,7 +662,8 @@ impl Transcript {
 
     /// Flip the expansion of the reasoning block at `row`, when that row is one.
     pub(crate) fn toggle_reasoning_at(&mut self, row: u16) -> bool {
-        self.compute_heights(self.heights_width.max(1));
+        let theme = self.doc_theme.unwrap_or_default();
+        self.compute_heights(self.heights_width.max(1), theme);
         let mut top = 0u16;
         for (index, height) in self.heights.iter().enumerate() {
             let end = top.saturating_add(*height);
@@ -959,6 +998,10 @@ impl Transcript {
                 if !inside {
                     return Outcome::Ignored;
                 }
+                if let Some(url) = self.link_at_screen(mouse.row, mouse.column) {
+                    super::markdown::open_link(url);
+                    return Outcome::Consumed;
+                }
                 let row = mouse
                     .row
                     .saturating_sub(self.origin_y)
@@ -1045,6 +1088,31 @@ impl Transcript {
                     Some(Item::User { .. } | Item::Assistant { .. })
                 )
             })
+    }
+
+    /// The link under a screen cell, when a message has one there.
+    fn link_at_screen(&self, screen_row: u16, column: u16) -> Option<&str> {
+        let content_row = self
+            .first_visible
+            .checked_add(screen_row.checked_sub(self.area.y)?)?;
+        let item = self
+            .row_items()
+            .get(usize::from(content_row))
+            .copied()
+            .flatten()?;
+        let top = self
+            .heights
+            .iter()
+            .take(item)
+            .fold(0u16, |total, height| total.saturating_add(*height));
+        let line = usize::from(content_row.saturating_sub(top));
+        let doc = self.docs.get(item)?.as_ref()?;
+        let text_x = match self.items.get(item) {
+            Some(Item::User { .. }) => self.area.x + 2,
+            _ => self.area.x + 1,
+        };
+        let local = usize::from(column.saturating_sub(text_x));
+        doc.link_at(line, local)
     }
 
     /// Open the menu for a clicked message.
@@ -1204,9 +1272,10 @@ impl View for Transcript {
             width: area.width.saturating_sub(1),
             ..area
         };
-        self.compute_heights(content.width);
+        self.compute_heights(content.width, *theme);
 
         let bottom = area.y + area.height;
+        let docs = std::mem::take(&mut self.docs);
         let skip = self.first_visible;
         let mut row: u16 = 0;
 
@@ -1225,17 +1294,23 @@ impl View for Transcript {
             };
             let clip = bottom;
             match item {
-                Item::User { text, .. } => {
+                Item::User { .. } => {
                     if self.focused_item == Some(index) {
                         buf.set_style(rect, Style::default().bg(theme.secondary));
                     }
-                    paint_user(buf, rect, text, clip, theme);
+                    paint_user(
+                        buf,
+                        rect,
+                        docs.get(index).and_then(Option::as_ref),
+                        clip,
+                        theme,
+                    );
                 }
-                Item::Assistant { text, .. } => {
+                Item::Assistant { .. } => {
                     if self.focused_item == Some(index) {
                         buf.set_style(rect, Style::default().bg(theme.secondary));
                     }
-                    paint_assistant(buf, rect, text, clip, theme);
+                    paint_assistant(buf, rect, docs.get(index).and_then(Option::as_ref), clip);
                 }
                 Item::Tool { .. } => {
                     Self::paint_tool_item(item, rect, buf, cx, clip, self.diff_mode, theme);
@@ -1248,6 +1323,7 @@ impl View for Transcript {
                 }
             }
         }
+        self.docs = docs;
 
         if let Some(thinking) = self.thinking {
             paint_thinking(buf, content, thinking, theme);
@@ -1327,13 +1403,20 @@ impl View for Transcript {
     }
 }
 
-fn paint_user(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &Theme) {
-    let lines = wrap(text, usize::from(area.width));
-    for (row, line) in lines.iter().enumerate() {
-        let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
-        if y >= clip {
-            break;
-        }
+fn paint_user(
+    buf: &mut Buffer,
+    area: Rect,
+    doc: Option<&super::markdown::Markdown>,
+    clip: u16,
+    theme: &Theme,
+) {
+    let text = Rect {
+        x: area.x + 1,
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    paint_doc(buf, text, doc, clip);
+    for y in area.y..(area.y + area.height).min(clip) {
         buf.set_stringn(
             area.x,
             y,
@@ -1343,45 +1426,41 @@ fn paint_user(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &Theme
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         );
-        buf.set_stringn(
-            area.x + 2,
-            y,
-            line,
-            line.chars().count(),
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::BOLD),
-        );
     }
 }
 
-fn paint_assistant(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &Theme) {
-    let lines = wrap(text, usize::from(area.width));
-    for (row, line) in lines.iter().enumerate() {
+fn paint_assistant(
+    buf: &mut Buffer,
+    area: Rect,
+    doc: Option<&super::markdown::Markdown>,
+    clip: u16,
+) {
+    paint_doc(buf, area, doc, clip);
+}
+
+fn paint_doc(buf: &mut Buffer, area: Rect, doc: Option<&super::markdown::Markdown>, clip: u16) {
+    let Some(doc) = doc else {
+        return;
+    };
+    for (row, line) in doc.lines.iter().enumerate() {
         let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
-        if y >= clip {
+        if y >= clip || y >= area.y.saturating_add(area.height) {
             break;
         }
-        paint_inline_code(buf, area.x, y, line, theme);
-    }
-}
-
-fn paint_inline_code(buf: &mut Buffer, x: u16, y: u16, line: &str, theme: &Theme) {
-    let normal = Style::default().fg(theme.foreground);
-    let code = Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-    let mut in_code = false;
-    let mut col = x;
-    for segment in line.split('`') {
-        if segment.is_empty() {
-            in_code = !in_code;
-            continue;
+        let mut column = 0u16;
+        for span in &line.spans {
+            if column >= area.width {
+                break;
+            }
+            buf.set_stringn(
+                area.x + column,
+                y,
+                span.content.as_ref(),
+                usize::from(area.width.saturating_sub(column)),
+                span.style,
+            );
+            column = column.saturating_add(u16::try_from(span.content.width()).unwrap_or(u16::MAX));
         }
-        let style = if in_code { code } else { normal };
-        buf.set_stringn(col, y, segment, segment.chars().count(), style);
-        col += u16::try_from(display_width(segment)).unwrap_or(u16::MAX);
-        in_code = !in_code;
     }
 }
 

@@ -5,7 +5,7 @@
 //! Views never call back into the client; the app mediates between them.
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::style::Style;
@@ -24,7 +24,21 @@ use crate::ui_model::{SessionAttachmentState, Tab, TurnState, UiModel};
 
 use norte_code_wire::ServerEventKind;
 
-const POLL_MS: u64 = 16;
+/// Idle waits block this long, so an untouched TUI does not spin a core.
+const IDLE_POLL_MS: u64 = 250;
+/// Shorter waits keep a streaming turn responsive.
+const ACTIVE_POLL_MS: u64 = 80;
+
+/// What one input poll produced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PollOutcome {
+    /// The poll timed out with no input.
+    Idle,
+    /// Input was handled, so the frame needs repainting.
+    Event,
+    /// The user asked to quit.
+    Quit,
+}
 
 /// Entry point. `run` renders the north star until the user quits.
 ///
@@ -67,6 +81,8 @@ pub(super) fn run() -> io::Result<()> {
 
     let mut tree = ui::build_tree(&model);
     let mut views_dirty = true;
+    let mut redraw = true;
+    let mut last_tick = Instant::now();
 
     loop {
         if crate::terminal::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
@@ -74,6 +90,7 @@ pub(super) fn run() -> io::Result<()> {
         }
         if drain_server_events(&mut events, &mut commands, &mut tree, &mut model) {
             views_dirty = true;
+            redraw = true;
         }
         if views_dirty {
             ui::refresh_views(&mut tree, &model);
@@ -82,46 +99,71 @@ pub(super) fn run() -> io::Result<()> {
         }
         sync_chrome(&mut tree, &model);
 
-        let theme = model.preferences.catalog.theme(&model.preferences.theme);
-        session.terminal().draw(|frame| {
-            let area = frame.area();
-            frame
-                .buffer_mut()
-                .set_style(area, Style::default().bg(theme.background));
-            tree.render(area, frame.buffer_mut(), &theme);
-        })?;
+        let animating = animating(&model);
+        if redraw || animating {
+            let theme = model.preferences.catalog.theme(&model.preferences.theme);
+            session.terminal().draw(|frame| {
+                let area = frame.area();
+                frame
+                    .buffer_mut()
+                    .set_style(area, Style::default().bg(theme.background));
+                tree.render(area, frame.buffer_mut(), &theme);
+            })?;
+            redraw = false;
+        }
 
-        if poll_event(
+        let now = Instant::now();
+        tree.tick(now.duration_since(last_tick));
+        last_tick = now;
+
+        let timeout = Duration::from_millis(if animating {
+            ACTIVE_POLL_MS
+        } else {
+            IDLE_POLL_MS
+        });
+        match poll_event(
             &mut tree,
             &mut commands,
             &mut events,
             &mut model,
             config.as_ref(),
+            timeout,
         )? {
-            break;
+            PollOutcome::Quit => break,
+            PollOutcome::Event => redraw = true,
+            PollOutcome::Idle => {}
         }
-
-        tree.tick(Duration::from_millis(POLL_MS));
     }
 
     session.leave();
     Ok(())
 }
 
-/// How input events are folded into the model; `true` when the loop quits.
+/// Whether anything on screen moves on its own.
+fn animating(model: &UiModel) -> bool {
+    model.turn != TurnState::Idle
+}
+
+/// How input events are folded into the model.
 fn poll_event(
     tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
     model: &mut UiModel,
     config: Option<&ClientConfig>,
-) -> io::Result<bool> {
-    if !event::poll(Duration::from_millis(POLL_MS))? {
-        return Ok(false);
+    timeout: Duration,
+) -> io::Result<PollOutcome> {
+    if !event::poll(timeout)? {
+        return Ok(PollOutcome::Idle);
     }
     match event::read()? {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            Ok(handle_key(tree, key, commands, events, model, config))
+            let quit = handle_key(tree, key, commands, events, model, config);
+            Ok(if quit {
+                PollOutcome::Quit
+            } else {
+                PollOutcome::Event
+            })
         }
         Event::Mouse(mouse) => {
             let input = terminalui::InputEvent::from(Event::Mouse(mouse));
@@ -138,14 +180,14 @@ fn poll_event(
             }
             drain_sessions_actions(tree, commands, model);
             ui::sync_views(tree, model);
-            Ok(false)
+            Ok(PollOutcome::Event)
         }
         other => {
             let input = terminalui::InputEvent::from(other);
             let _ = tree.handle_event(&input);
             sync_selectors(tree, commands, model);
             ui::sync_views(tree, model);
-            Ok(false)
+            Ok(PollOutcome::Event)
         }
     }
 }
@@ -207,8 +249,10 @@ fn ctrl_c(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) -> bool {
+    // Cancel the server turn on the way out, but always leave the TUI: raw
+    // mode turns Ctrl+C into a key event, so waiting for SIGINT strands it.
     if model.turn != TurnState::Idle {
-        return cancel_active_turn(tree, commands, model);
+        let _ = cancel_active_turn(tree, commands, model);
     }
     true
 }

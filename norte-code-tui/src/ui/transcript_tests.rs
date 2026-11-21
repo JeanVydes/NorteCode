@@ -446,7 +446,7 @@ fn painted_flags_mark_notice_rows_as_not_copyable() {
     transcript.area = Rect::new(0, 0, 20, 6);
     transcript.first_visible = 0;
     transcript.view_height = 6;
-    transcript.compute_heights(20);
+    transcript.compute_heights(20, terminalui::Theme::default());
     transcript.first_visible = 0;
     transcript.view_height = 6;
     let buffer = Buffer::empty(Rect::new(0, 0, 20, 6));

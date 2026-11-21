@@ -5,6 +5,7 @@
 
 use std::any::Any;
 
+use crossterm::event::MouseEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -19,6 +20,14 @@ use crate::context::{ContextUsage, compaction_threshold, human_count};
 use crate::ui_model::SessionAttachmentState;
 
 const RAIL_WIDTH: u16 = 26;
+
+/// Where virtual rail rows land on screen.
+struct RailViewport {
+    /// The rail's inner rectangle.
+    inner: Rect,
+    /// Rows scrolled out of view.
+    scroll: u16,
+}
 
 /// Where the session rail sits relative to the conversation.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -82,6 +91,11 @@ pub(crate) struct Rail {
     plan_rows: Vec<(Rect, String)>,
     /// A plan the user clicked, waiting for the host to open it.
     pending_plan: Option<String>,
+    /// How many virtual rows are scrolled out of view.
+    scroll: u16,
+    /// The last rendered frame, for mouse hit-testing.
+    area: Rect,
+    inner: Rect,
     children: Vec<Node>,
 }
 
@@ -102,6 +116,9 @@ impl Rail {
             plans: Vec::new(),
             plan_rows: Vec::new(),
             pending_plan: None,
+            scroll: 0,
+            area: Rect::new(0, 0, 0, 0),
+            inner: Rect::new(0, 0, 0, 0),
             children: vec![
                 node("context_gauge", gauge),
                 node("compact", Button::new(ButtonVariant::Outline, "compact")),
@@ -143,6 +160,37 @@ impl Rail {
         }
     }
 
+    /// Rows the whole rail would need without clipping.
+    fn content_height(&self, width: u16) -> u16 {
+        let usable = usize::from(width.saturating_sub(2));
+        let mut height = 0u16;
+        if width >= 10 {
+            height += match &self.session {
+                Some(session) if session.chars().count() > usable => 3,
+                Some(_) => 2,
+                None => 3,
+            };
+            height += 3;
+            height += if matches!(self.attachment, SessionAttachmentState::Failed { .. }) {
+                4
+            } else {
+                3
+            };
+        }
+        height += 5;
+        height += section_rows(self.jobs.len());
+        height += section_rows(self.plans.len());
+        height
+    }
+
+    fn to_screen(rect: Rect, viewport: &RailViewport) -> Rect {
+        Rect {
+            x: viewport.inner.x + rect.x,
+            y: viewport.inner.y + 1 + rect.y.saturating_sub(viewport.scroll),
+            ..rect
+        }
+    }
+
     fn paint_context(
         &mut self,
         inner: Rect,
@@ -150,24 +198,10 @@ impl Rail {
         buf: &mut Buffer,
         cx: &mut Context,
         theme: &Theme,
+        viewport: &RailViewport,
     ) -> u16 {
         let usage = self.context;
         let start = y + 1;
-        let bottom = inner.y + inner.height;
-        let room = start + 3 < bottom;
-        if !room {
-            // No space to draw, but the tree still dispatches focus to the
-            // button; advance the slot here too so both walks agree.
-            let focusable = self
-                .children
-                .get(1)
-                .and_then(|node| node.view.as_any_ref().downcast_ref::<Button>())
-                .is_some_and(|button| !button.state.disabled && !button.state.loading);
-            if focusable {
-                let _ = cx.is_focused();
-            }
-            return bottom;
-        }
         let dim = Style::default().fg(theme.muted).bg(theme.background);
         let color = if usage.over_limit() {
             theme.warning
@@ -225,15 +259,28 @@ impl Rail {
                 gauge.value = usage.fraction();
             }
             node.view.render(gauge_rect, buf, cx, theme);
+            if let Some(gauge) = node.view.as_any().downcast_mut::<Gauge>() {
+                gauge.state.area = Self::to_screen(gauge_rect, viewport);
+            }
         }
         if let Some(node) = self.children.get_mut(1) {
             node.view.render(button_rect, buf, cx, theme);
+            if let Some(button) = node.view.as_any().downcast_mut::<Button>() {
+                button.state.area = Self::to_screen(button_rect, viewport);
+            }
         }
         start + 4
     }
-    fn paint_plans(&mut self, buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme) {
+    fn paint_plans(
+        &mut self,
+        buf: &mut Buffer,
+        inner: Rect,
+        y: u16,
+        theme: &Theme,
+        viewport: &RailViewport,
+    ) {
         self.plan_rows.clear();
-        if y + 2 >= inner.y + inner.height {
+        if y + 1 >= inner.y + inner.height {
             return;
         }
         let dim = Style::default().fg(theme.muted).bg(theme.background);
@@ -255,12 +302,15 @@ impl Rail {
                 Style::default().fg(theme.accent).bg(theme.background),
             );
             self.plan_rows.push((
-                Rect {
-                    x: inner.x,
-                    y: row,
-                    width: inner.width,
-                    height: 1,
-                },
+                Self::to_screen(
+                    Rect {
+                        x: inner.x,
+                        y: row,
+                        width: inner.width,
+                        height: 1,
+                    },
+                    viewport,
+                ),
                 plan.id.clone(),
             ));
         }
@@ -309,38 +359,92 @@ impl View for Rail {
             fill_gradient: None,
         };
         let inner = draw_box(buf, area, &chrome, theme);
-        let mut y = inner.y + 1;
+        self.area = area;
+        self.inner = inner;
+
+        let content_height = self.content_height(inner.width);
+        let visible_rows = inner.height.saturating_sub(2);
+        self.scroll = self.scroll.min(content_height.saturating_sub(visible_rows));
+
+        let content = Rect {
+            x: 0,
+            y: 0,
+            width: inner.width,
+            height: content_height.max(1),
+        };
+        let mut scratch = Buffer::empty(content);
+        scratch.set_style(content, Style::default().bg(theme.background));
+        let mut y = 0u16;
 
         if inner.width >= 10 {
-            y = paint_session(buf, inner, y, self.session.as_deref(), theme);
+            y = paint_session(&mut scratch, content, y, self.session.as_deref(), theme);
             y = paint_model(
-                buf,
-                inner,
+                &mut scratch,
+                content,
                 y,
                 self.model.as_deref(),
                 self.provider.as_deref(),
                 theme,
             );
-            y = paint_connection(buf, inner, y, &self.attachment, theme);
+            y = paint_connection(&mut scratch, content, y, &self.attachment, theme);
         }
-        y = self.paint_context(inner, y, buf, cx, theme);
-        y = paint_jobs(buf, inner, y, &self.jobs, theme);
-        self.paint_plans(buf, inner, y, theme);
-    }
+        let viewport = RailViewport {
+            inner,
+            scroll: self.scroll,
+        };
+        y = self.paint_context(content, y, &mut scratch, cx, theme, &viewport);
+        y = paint_jobs(&mut scratch, content, y, &self.jobs, theme);
+        self.paint_plans(&mut scratch, content, y, theme, &viewport);
 
-    fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
-        if let InputEvent::Mouse(mouse) = event
-            && mouse.kind
-                == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
-        {
-            for (rect, id) in &self.plan_rows {
-                if rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
-                    self.pending_plan = Some(id.clone());
-                    return Outcome::Consumed;
+        for row in 0..visible_rows {
+            let source = row.saturating_add(self.scroll);
+            for column in 0..inner.width {
+                let Some(cell) = scratch.cell(ratatui::layout::Position::new(column, source))
+                else {
+                    continue;
+                };
+                if let Some(target) = buf.cell_mut(ratatui::layout::Position::new(
+                    inner.x + column,
+                    inner.y + 1 + row,
+                )) {
+                    *target = cell.clone();
                 }
             }
         }
-        Outcome::Ignored
+    }
+
+    fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
+        let InputEvent::Mouse(mouse) = event else {
+            return Outcome::Ignored;
+        };
+        let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+        if !self.area.contains(point) {
+            return Outcome::Ignored;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll = self.scroll.saturating_sub(3);
+                Outcome::Consumed
+            }
+            MouseEventKind::ScrollDown => {
+                let viewport = self.inner.height.saturating_sub(2);
+                let max = self
+                    .content_height(self.inner.width)
+                    .saturating_sub(viewport);
+                self.scroll = self.scroll.saturating_add(3).min(max);
+                Outcome::Consumed
+            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                for (rect, id) in &self.plan_rows {
+                    if rect.contains(point) {
+                        self.pending_plan = Some(id.clone());
+                        return Outcome::Consumed;
+                    }
+                }
+                Outcome::Ignored
+            }
+            _ => Outcome::Ignored,
+        }
     }
 }
 
@@ -351,7 +455,7 @@ fn paint_jobs(
     jobs: &[norte_code_wire::JobSummary],
     theme: &Theme,
 ) -> u16 {
-    if y + 2 >= inner.y + inner.height {
+    if y + 1 >= inner.y + inner.height {
         return y;
     }
     let dim = Style::default().fg(theme.muted).bg(theme.background);
@@ -376,6 +480,14 @@ fn paint_jobs(
         row += 1;
     }
     row + 1
+}
+
+fn section_rows(count: usize) -> u16 {
+    if count == 0 {
+        2
+    } else {
+        u16::try_from(count.min(3)).unwrap_or(3) + 1
+    }
 }
 
 fn clipped(text: &str, max: usize) -> String {

@@ -35,42 +35,22 @@ static RESTORED: AtomicBool = AtomicBool::new(false);
 /// with the kitty keyboard flags on, and every later keystroke arrives as
 /// escape noise.
 pub(crate) fn watch_exit_signals() {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
     std::thread::spawn(move || {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        else {
-            return;
-        };
-        runtime.block_on(async {
-            let Ok(mut interrupt) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-            else {
+        let mut signals = match Signals::new([SIGHUP, SIGINT, SIGQUIT, SIGTERM]) {
+            Ok(signals) => signals,
+            Err(error) => {
+                eprintln!("norte-code: warning: cannot watch exit signals: {error}");
+                restore_terminal();
+                SHUTDOWN.store(true, Ordering::Relaxed);
                 return;
-            };
-            let Ok(mut terminate) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            else {
-                return;
-            };
-            let Ok(mut hangup) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-            else {
-                return;
-            };
-            let Ok(mut quit) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())
-            else {
-                return;
-            };
-            tokio::select! {
-                _ = interrupt.recv() => {}
-                _ = terminate.recv() => {}
-                _ = hangup.recv() => {}
-                _ = quit.recv() => {}
             }
-            restore_terminal();
-            SHUTDOWN.store(true, Ordering::Relaxed);
-        });
+        };
+        let _ = signals.forever().next();
+        restore_terminal();
+        SHUTDOWN.store(true, Ordering::Relaxed);
     });
 }
 

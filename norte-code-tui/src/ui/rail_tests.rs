@@ -1,9 +1,10 @@
 //! The rail renders its context gauge and compact button.
 
+use crossterm::event::{Event, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use super::build_tree;
+use super::{Rail, build_tree};
 use crate::context::ContextUsage;
 use crate::ui::RailPosition;
 use crate::ui_model::UiModel;
@@ -51,6 +52,66 @@ fn the_compact_button_takes_a_focus_slot() {
     let model = UiModel::detached();
     let tree = build_tree(&model);
     assert!(tree.focusable_ids().contains(&"compact"));
+}
+
+#[test]
+fn scrolling_the_rail_reveals_plans_and_keeps_their_click_rows() {
+    let mut model = UiModel::detached();
+    model.plans = vec![norte_code_wire::PlanSummary {
+        id: "plan-1".to_owned(),
+        title: Some("A plan".to_owned()),
+        ..Default::default()
+    }];
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    tree.find_mut::<Rail>("rail")
+        .expect("rail in tree")
+        .set_plans(model.plans.clone());
+    let area = Rect::new(0, 0, 100, 20);
+
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    assert!(!painted_text(&buf, area).contains("PLANS"));
+
+    for _ in 0..5 {
+        let _ = tree.handle_event(&mouse(MouseEventKind::ScrollDown, 10, 10));
+    }
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let text = painted_text(&buf, area);
+    assert!(text.contains("PLANS"), "{text}");
+
+    let Some(row) = text.lines().position(|line| line.contains("A plan")) else {
+        panic!("the plan row is not visible: {text}");
+    };
+    let row = u16::try_from(row).expect("the plan row fits the terminal");
+    let _ = tree.handle_event(&mouse(
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row,
+    ));
+    let rail = tree.find_mut::<Rail>("rail").expect("rail in tree");
+    assert_eq!(rail.take_plan_request().as_deref(), Some("plan-1"));
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> terminalui::InputEvent {
+    terminalui::InputEvent::from(Event::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    }))
+}
+
+fn painted_text(buf: &Buffer, area: Rect) -> String {
+    (area.y..area.y + area.height)
+        .map(|y| {
+            (area.x..area.x + 28)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]

@@ -19,10 +19,12 @@ path = "src/main.rs"
 
 [dependencies]
 terminalui = { git = "https://github.com/JeanVydes/terminalui.git", rev = "bc8d63a09edf326dfc79e35e2cf335b63d8ba008" }
+pulldown-cmark = "0.13"
 ratatui = { version = "0.29", features = ["serde"] }
 crossterm = { version = "0.29", features = ["bracketed-paste"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+signal-hook = { workspace = true }
 thiserror = { workspace = true }
 futures-util = { workspace = true }
 unicode-width = "0.2"

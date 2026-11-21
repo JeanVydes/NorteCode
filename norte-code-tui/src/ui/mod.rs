@@ -14,6 +14,7 @@ mod key_prompt;
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod layout_tests;
+mod markdown;
 mod models_page;
 mod plan_overlay;
 mod plugins_page;
