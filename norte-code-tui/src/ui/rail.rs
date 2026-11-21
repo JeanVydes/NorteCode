@@ -20,7 +20,6 @@ use crate::context::{ContextUsage, compaction_threshold, human_count};
 use crate::ui_model::SessionAttachmentState;
 
 const RAIL_WIDTH: u16 = 26;
-const MAX_JOB_ROWS: usize = 3;
 const PREVIEW_PREFIX: &str = "preview_";
 
 fn preview_id(index: usize) -> String {
@@ -89,8 +88,6 @@ pub(crate) struct Rail {
     pub(crate) model: Option<String>,
     /// The context the session last reported.
     context: ContextUsage,
-    /// Background jobs of the attached session.
-    jobs: Vec<norte_code_wire::JobSummary>,
     /// Plans of the attached session.
     plans: Vec<norte_code_wire::PlanSummary>,
     /// Clickable plan rows, recorded during render.
@@ -120,7 +117,6 @@ impl Rail {
             provider: None,
             model: None,
             context: ContextUsage::default(),
-            jobs: Vec::new(),
             plans: Vec::new(),
             plan_rows: Vec::new(),
             pending_plan: None,
@@ -143,10 +139,6 @@ impl Rail {
     /// Replace the context the gauge reports.
     pub(crate) fn set_context(&mut self, context: ContextUsage) {
         self.context = context;
-    }
-
-    pub(crate) fn set_jobs(&mut self, jobs: Vec<norte_code_wire::JobSummary>) {
-        self.jobs = jobs;
     }
 
     pub(crate) fn set_plans(&mut self, plans: Vec<norte_code_wire::PlanSummary>) {
@@ -222,7 +214,6 @@ impl Rail {
             };
         }
         height += 5;
-        height += section_rows(self.jobs.len().min(MAX_JOB_ROWS));
         height += section_rows(self.plans.len());
         height
     }
@@ -454,7 +445,6 @@ impl View for Rail {
             scroll: self.scroll,
         };
         y = self.paint_context(content, y, &mut scratch, cx, theme, &viewport);
-        y = paint_jobs(&mut scratch, content, y, &self.jobs, theme);
         self.paint_plans(&mut scratch, content, y, theme, &viewport, cx);
 
         for row in 0..visible_rows {
@@ -507,40 +497,6 @@ impl View for Rail {
             _ => Outcome::Ignored,
         }
     }
-}
-
-fn paint_jobs(
-    buf: &mut Buffer,
-    inner: Rect,
-    y: u16,
-    jobs: &[norte_code_wire::JobSummary],
-    theme: &Theme,
-) -> u16 {
-    if y + 1 >= inner.y + inner.height {
-        return y;
-    }
-    let dim = Style::default().fg(theme.muted).bg(theme.background);
-    buf.set_stringn(inner.x + 1, y, "JOBS", 5, dim.add_modifier(Modifier::BOLD));
-    if jobs.is_empty() {
-        buf.set_stringn(inner.x + 1, y + 1, "none", 4, dim);
-        return y + 2;
-    }
-    let mut row = y + 1;
-    for job in jobs.iter().take(MAX_JOB_ROWS) {
-        if row >= inner.y + inner.height {
-            break;
-        }
-        let text = format!("{} {}", job.status.label(), clipped(&job.command, 18));
-        buf.set_stringn(
-            inner.x + 1,
-            row,
-            &text,
-            usize::from(inner.width.saturating_sub(2)),
-            Style::default().fg(theme.foreground).bg(theme.background),
-        );
-        row += 1;
-    }
-    row + 1
 }
 
 fn section_rows(count: usize) -> u16 {

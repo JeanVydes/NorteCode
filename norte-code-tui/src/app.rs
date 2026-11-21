@@ -1886,7 +1886,6 @@ fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
         rail.model = model.active_model.as_ref().map(|model| model.id.clone());
         rail.provider.clone_from(&model.active_provider);
         rail.set_context(model.effective_context());
-        rail.set_jobs(model.jobs.clone());
         rail.set_plans(model.plans.clone());
         rail.set_compact_enabled(model.active.is_some());
     }
