@@ -8,7 +8,10 @@ use terminalui::{InputEvent, Theme, Tree, node};
 use tokio::sync::mpsc;
 
 use super::{
-    drain_plan_requests, drain_sessions_actions, fold, fold_upload_event, handle_key, sync_chrome,
+    chrome::sync_chrome,
+    drain::drain_sessions_actions,
+    event_fold::{fold, fold_upload_event},
+    input::{drain_plan_requests, handle_key},
 };
 use crate::attachment::{AttachmentKind, AttachmentSource, PreparedAttachment};
 use crate::client::{ClientEvent, UiCommand};

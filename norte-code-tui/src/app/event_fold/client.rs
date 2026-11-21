@@ -1,0 +1,266 @@
+//! Client events: connection state, catalogue data, and channel draining.
+
+use std::sync::Arc;
+
+use crate::attachment::AttachmentNotice;
+use crate::client::{ClientEvent, UiCommand};
+use crate::ui;
+use crate::ui_model::{SessionAttachmentState, TurnState, UiModel};
+
+use super::super::DrainOutcome;
+use super::super::input::apply_key_intent;
+use super::history::{fold_history_event, fold_history_failure};
+use super::{fold, push_attachment_notice};
+
+/// Track the host-reported model of the attached session from a list refresh.
+fn refresh_active_model(model: &mut UiModel, sessions: &[norte_code_wire::SessionSummary]) {
+    if let Some(active) = model.active.as_ref()
+        && let Some(found) = sessions
+            .iter()
+            .find(|candidate| candidate.session_id == active.as_str())
+    {
+        model.active_model = found.model.clone();
+        model.active_provider = found.provider.clone();
+    }
+}
+
+fn apply_attached(
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    session: &norte_code_wire::SessionSummary,
+) -> bool {
+    let title = session
+        .title
+        .clone()
+        .unwrap_or_else(|| session.session_id.clone());
+    let changed_session = model
+        .active
+        .as_ref()
+        .is_none_or(|active| active.as_str() != session.session_id);
+    model.attachment = SessionAttachmentState::Attached;
+    model.active_model.clone_from(&session.model);
+    model.active_provider.clone_from(&session.provider);
+    model.active = Some(norte_code_wire::SessionKey::new(session.session_id.clone()));
+    model.attached_title = Some(title.clone());
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream")
+        && changed_session
+    {
+        // Never show another session's content under this label.
+        stream.clear_all();
+    }
+    true
+}
+
+fn apply_detached(
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    reason: &crate::client_error::ClientError,
+) -> bool {
+    let reason = reason.to_string();
+    model.attachment = SessionAttachmentState::Failed {
+        reason: reason.clone(),
+    };
+    model.turn = TurnState::Idle;
+    if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+        stream.stop_thinking();
+        stream.push(ui::Item::Notice {
+            text: reason,
+            tone: ui::Tone::Error,
+        });
+    }
+    true
+}
+
+fn fold_catalog_event(event: &ClientEvent, model: &mut UiModel) -> bool {
+    match event {
+        ClientEvent::Models(models) => model.models.clone_from(models),
+        ClientEvent::Plans(plans) => model.plans.clone_from(plans),
+        ClientEvent::Jobs(jobs) => model.jobs.clone_from(jobs),
+        ClientEvent::Telemetry(report) => {
+            model.telemetry_usage = crate::session_stats::shared_by_session(&report.records);
+            model.telemetry = Some(Arc::clone(report));
+        }
+        ClientEvent::CostSession(cost) | ClientEvent::CostGlobal(cost) => {
+            model.cost = Some(cost.clone());
+        }
+        ClientEvent::Plugins(plugins) => model.plugins.clone_from(plugins),
+        ClientEvent::Catalog(catalog) => model.catalog = Some(catalog.clone()),
+        ClientEvent::Agents(agents) => model.agents.clone_from(agents),
+        _ => return false,
+    }
+    true
+}
+
+fn fold_host_event(event: &ClientEvent, model: &mut UiModel) {
+    match event {
+        ClientEvent::ServerInfo(info) => model.server_info = Some(info.clone()),
+        ClientEvent::Liveness(live) => model.liveness = Some(live.clone()),
+        ClientEvent::Readiness(ready) => model.readiness = Some(ready.clone()),
+        ClientEvent::Quota(quota) => model.quota = Some(quota.clone()),
+        _ => {}
+    }
+}
+
+pub(in crate::app) fn fold_upload_event(event: &ClientEvent, tree: &mut terminalui::Tree) -> bool {
+    match event {
+        ClientEvent::Uploaded {
+            attachment,
+            receipt,
+        } => {
+            if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
+                composer.insert_upload(attachment.cursor, attachment.kind, receipt.clone());
+            }
+            true
+        }
+        ClientEvent::UploadFailed { reason } => {
+            push_attachment_notice(
+                tree,
+                &AttachmentNotice::UploadFailed {
+                    reason: reason.to_string(),
+                },
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+fn fold_secret_event(
+    event: &ClientEvent,
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) -> bool {
+    match event {
+        ClientEvent::SecretSaved { provider } => {
+            let intent = tree
+                .find_mut::<ui::KeyPrompt>("key_prompt")
+                .and_then(|prompt| {
+                    let matches = prompt.provider() == Some(provider.as_str());
+                    matches.then(|| prompt.saved()).flatten()
+                });
+            if let Some(intent) = intent {
+                apply_key_intent(tree, commands, model, intent);
+            }
+            if let Some(commands) = commands.as_ref() {
+                let _ = commands.try_send(UiCommand::RefreshViews);
+            }
+            true
+        }
+        ClientEvent::SecretSaveFailed { reason } => {
+            if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt") {
+                prompt.fail(reason.to_string());
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+pub(in crate::app) fn drain_server_events(
+    events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+) -> DrainOutcome {
+    let Some(receiver) = events else {
+        return DrainOutcome::default();
+    };
+    let mut changed = false;
+    let mut count = 0usize;
+    loop {
+        let next_event = receiver.try_recv();
+        if next_event.is_ok() {
+            count += 1;
+        }
+        match next_event {
+            Ok(ClientEvent::Attached { session }) => {
+                changed = apply_attached(tree, model, &session) || changed;
+            }
+            Ok(ClientEvent::Detached { reason }) => {
+                changed = apply_detached(tree, model, &reason) || changed;
+            }
+            Ok(ClientEvent::Sessions(sessions)) => {
+                refresh_active_model(model, &sessions);
+                model.sessions = sessions;
+                changed = true;
+            }
+            Ok(
+                event @ (ClientEvent::Models(_)
+                | ClientEvent::Plans(_)
+                | ClientEvent::Jobs(_)
+                | ClientEvent::Telemetry(_)
+                | ClientEvent::CostSession(_)
+                | ClientEvent::CostGlobal(_)
+                | ClientEvent::Plugins(_)
+                | ClientEvent::Catalog(_)
+                | ClientEvent::Agents(_)),
+            ) => {
+                changed = fold_catalog_event(&event, model) || changed;
+            }
+            Ok(
+                event @ (ClientEvent::ServerInfo(_)
+                | ClientEvent::Liveness(_)
+                | ClientEvent::Readiness(_)
+                | ClientEvent::Quota(_)),
+            ) => {
+                fold_host_event(&event, model);
+                changed = true;
+            }
+            Ok(ClientEvent::Forked { session }) => {
+                if let Some(commands) = commands.as_ref() {
+                    let _ = commands.try_send(UiCommand::OpenSession { session });
+                }
+            }
+            Ok(ClientEvent::SendFailed { reason }) => {
+                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                    stream.push(ui::Item::Notice {
+                        text: reason.to_string(),
+                        tone: ui::Tone::Error,
+                    });
+                }
+                changed = true;
+            }
+            Ok(event @ (ClientEvent::Uploaded { .. } | ClientEvent::UploadFailed { .. })) => {
+                changed = fold_upload_event(&event, tree) || changed;
+            }
+            Ok(
+                event @ (ClientEvent::SecretSaved { .. } | ClientEvent::SecretSaveFailed { .. }),
+            ) => {
+                changed = fold_secret_event(&event, tree, commands, model) || changed;
+            }
+            Ok(ClientEvent::Notice { text }) => {
+                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                    stream.push(ui::Item::Notice {
+                        text,
+                        tone: ui::Tone::Neutral,
+                    });
+                }
+                changed = true;
+            }
+            Ok(ClientEvent::History(items)) => {
+                changed = fold_history_event(tree, model, items) || changed;
+            }
+            Ok(ClientEvent::HistoryFailed { reason }) => {
+                changed = fold_history_failure(tree, model, &reason) || changed;
+            }
+            Ok(ClientEvent::Server(event)) => {
+                fold(&event, tree, model, commands);
+                changed = true;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                return DrainOutcome {
+                    changed,
+                    events: count,
+                };
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                *events = None;
+                return DrainOutcome {
+                    changed,
+                    events: count,
+                };
+            }
+        }
+    }
+}
