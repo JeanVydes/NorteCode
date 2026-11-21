@@ -3,21 +3,21 @@
 /// Sections in their display order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SettingsSection {
-    Preferences,
     Host,
-    Agents,
     Plugins,
+    Preferences,
+    Agents,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [Self; 4] = [Self::Preferences, Self::Host, Self::Agents, Self::Plugins];
+    pub(crate) const ALL: [Self; 4] = [Self::Host, Self::Plugins, Self::Preferences, Self::Agents];
 
     fn index(self) -> usize {
         match self {
-            Self::Preferences => 0,
-            Self::Host => 1,
-            Self::Agents => 2,
-            Self::Plugins => 3,
+            Self::Host => 0,
+            Self::Plugins => 1,
+            Self::Preferences => 2,
+            Self::Agents => 3,
         }
     }
 }
@@ -53,20 +53,20 @@ impl SettingsLayout {
         agents: usize,
         preferences: usize,
     ) -> Self {
-        let heights = [
-            1_u16.saturating_add(rows(preferences)),
-            1_u16
+        let heights = SettingsSection::ALL.map(|section| match section {
+            SettingsSection::Host => 1_u16
                 .saturating_add(Self::PANEL_BORDER)
                 .saturating_add(Self::TABLE_HEADER)
                 .saturating_add(rows(hosts)),
-            1_u16
+            SettingsSection::Plugins => 1_u16
+                .saturating_add(Self::TABLE_HEADER)
+                .saturating_add(rows(plugins)),
+            SettingsSection::Preferences => 1_u16.saturating_add(rows(preferences)),
+            SettingsSection::Agents => 1_u16
                 .saturating_add(Self::PANEL_BORDER)
                 .saturating_add(Self::TABLE_HEADER)
                 .saturating_add(rows(agents)),
-            1_u16
-                .saturating_add(Self::TABLE_HEADER)
-                .saturating_add(rows(plugins)),
-        ];
+        });
         let mut sections = [SectionRect { y: 0, height: 0 }; 4];
         let mut y = 0;
         for (section, height) in SettingsSection::ALL.into_iter().zip(heights) {
@@ -82,8 +82,10 @@ impl SettingsLayout {
         let value_x = Self::MARGIN.saturating_add(label_width).saturating_add(2);
         Self {
             sections,
-            pref_rows_y: sections[0].y.saturating_add(1),
-            plugin_rows_y: sections[3]
+            pref_rows_y: sections[SettingsSection::Preferences.index()]
+                .y
+                .saturating_add(1),
+            plugin_rows_y: sections[SettingsSection::Plugins.index()]
                 .y
                 .saturating_add(1)
                 .saturating_add(Self::TABLE_HEADER),
@@ -107,6 +109,10 @@ impl SettingsLayout {
 
     pub(crate) fn value_x(&self) -> u16 {
         self.value_x
+    }
+
+    pub(crate) fn preference_rows_y(&self) -> u16 {
+        self.pref_rows_y
     }
 
     pub(crate) fn plugin_rows_y(&self) -> u16 {

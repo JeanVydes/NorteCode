@@ -1,4 +1,4 @@
-//! The settings tab: preferences, host, agents and plugins in one scrollable view.
+//! The settings tab: host, plugins, preferences and agents in one scrollable view.
 
 use std::any::Any;
 
@@ -7,6 +7,7 @@ use ratatui::layout::{Position as RatatuiPosition, Rect};
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
 use terminalui::components::panel::Panel;
+use terminalui::components::scroll::{Scroll, ScrollbarStyle, render_scrollbar};
 use terminalui::components::table::{Table, TableCell, TableRow};
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
@@ -25,8 +26,8 @@ const PLUGIN_CHILD: usize = 2;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 enum Focus {
     #[default]
-    Preferences,
     Plugins,
+    Preferences,
 }
 
 /// A prompt the user is filling in for a plugin operation.
@@ -171,6 +172,7 @@ impl SettingsPage {
             Focus::Preferences => Focus::Plugins,
             Focus::Plugins => Focus::Preferences,
         };
+        self.ensure_selected_visible();
     }
 
     /// Take plugin requests.
@@ -199,6 +201,26 @@ impl SettingsPage {
             .total_height()
             .saturating_sub(self.area.height);
         self.scroll = self.scroll.min(max);
+    }
+
+    fn ensure_selected_visible(&mut self) {
+        let layout = self.layout();
+        let first_row = match self.focus {
+            Focus::Preferences => layout.preference_rows_y(),
+            Focus::Plugins => layout.plugin_rows_y(),
+        };
+        let selected = match self.focus {
+            Focus::Preferences => self.pref_selected,
+            Focus::Plugins => self.plugin_selected,
+        };
+        let row = first_row.saturating_add(u16::try_from(selected).unwrap_or(u16::MAX));
+        let bottom = self.scroll.saturating_add(self.area.height);
+        if row < self.scroll {
+            self.scroll = row;
+        } else if row >= bottom {
+            self.scroll = row.saturating_sub(self.area.height.saturating_sub(1));
+        }
+        self.clamp_scroll();
     }
 
     fn plugin_rows(&self) -> Vec<Node> {
@@ -240,6 +262,7 @@ impl SettingsPage {
         let last = isize::try_from(self.plugins.len() - 1).unwrap_or(0);
         self.plugin_selected = usize::try_from((current + delta).clamp(0, last)).unwrap_or(0);
         self.focus = Focus::Plugins;
+        self.ensure_selected_visible();
     }
 
     fn move_pref(&mut self, delta: isize) {
@@ -247,6 +270,7 @@ impl SettingsPage {
         let last = isize::try_from(Setting::ALL.len() - 1).unwrap_or(0);
         self.pref_selected = usize::try_from((current + delta).clamp(0, last)).unwrap_or(0);
         self.focus = Focus::Preferences;
+        self.ensure_selected_visible();
     }
 
     fn activate(&mut self) {
@@ -625,6 +649,13 @@ impl SettingsPage {
                 Outcome::Consumed
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                let scrollbar_x = self
+                    .area
+                    .x
+                    .saturating_add(self.area.width.saturating_sub(1));
+                if mouse.column >= scrollbar_x {
+                    return Outcome::Consumed;
+                }
                 let row = self.scroll + mouse.row.saturating_sub(self.area.y);
                 let layout = self.layout();
                 if let Some(index) = layout.preference_row(row) {
@@ -701,6 +732,17 @@ impl SettingsPage {
                 self.scroll = (self.scroll + self.area.height).min(max);
                 Outcome::Consumed
             }
+            KeyCode::Home => {
+                self.scroll = 0;
+                Outcome::Consumed
+            }
+            KeyCode::End => {
+                self.scroll = self
+                    .layout()
+                    .total_height()
+                    .saturating_sub(self.area.height);
+                Outcome::Consumed
+            }
             _ => Outcome::Ignored,
         }
     }
@@ -751,6 +793,19 @@ impl View for SettingsPage {
             }
         }
 
+        if total > area.height {
+            let scroll_style = ScrollbarStyle {
+                track_color: Some(theme.background),
+                ..ScrollbarStyle::default()
+            };
+            let scroll = Scroll {
+                offset: usize::from(self.scroll),
+                viewport: usize::from(area.height),
+                total: usize::from(total),
+            };
+            render_scrollbar(buf, area, &scroll_style, theme, &scroll);
+        }
+
         if self.job.is_some() || self.prompt != Prompt::None {
             self.paint_overlay(area, buf, theme);
         }
@@ -766,3 +821,7 @@ impl View for SettingsPage {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "settings_page_tests.rs"]
+mod tests;
