@@ -41,6 +41,8 @@ pub(crate) struct SettingsPage {
     #[serde(skip)]
     plugins: Vec<norte_code_client::PluginSummary>,
     #[serde(skip)]
+    agents: Vec<norte_code_wire::AgentSummary>,
+    #[serde(skip)]
     prefs: ConfigData,
     /// The selected row in each list.
     plugin_selected: usize,
@@ -80,6 +82,7 @@ impl SettingsPage {
         Self {
             host: Vec::new(),
             plugins: Vec::new(),
+            agents: Vec::new(),
             prefs: ConfigData {
                 theme: String::new(),
                 thinking: String::new(),
@@ -127,6 +130,7 @@ impl SettingsPage {
     pub(crate) fn set_data(&mut self, model: &UiModel, prefs: ConfigData) {
         self.host = host_info::fields(model);
         self.plugins.clone_from(&model.plugins);
+        self.agents.clone_from(&model.agents);
         self.job.clone_from(&model.plugin_job);
         self.prefs = prefs;
         self.plugin_selected = self
@@ -157,17 +161,18 @@ impl SettingsPage {
         extra.saturating_add(u16::try_from(len).unwrap_or(u16::MAX))
     }
 
-    fn section_heights(&self) -> (u16, u16, u16) {
+    fn section_heights(&self) -> (u16, u16, u16, u16) {
         (
             Self::rows(self.host.len(), 2),
             Self::rows(self.plugins.len(), 2),
             Self::rows(Setting::ALL.len(), 2),
+            Self::rows(self.agents.len(), 3),
         )
     }
 
     fn total_height(&self) -> u16 {
-        let (host, plugins, prefs) = self.section_heights();
-        host + plugins + prefs + 6
+        let (host, plugins, prefs, agents) = self.section_heights();
+        host + plugins + prefs + agents + 8
     }
 
     fn clamp_scroll(&mut self) {
@@ -443,7 +448,7 @@ impl SettingsPage {
                 theme,
             );
         }
-        let (host, _, _) = self.section_heights();
+        let (host, _, _, _) = self.section_heights();
         y += host;
 
         page.set_stringn(
@@ -477,15 +482,83 @@ impl SettingsPage {
                 theme,
             );
         }
-        let (_, plugins, _) = self.section_heights();
+        let (_, plugins, _, _) = self.section_heights();
         y += plugins.saturating_sub(1) + 1;
 
         self.prefs_y = y + 1;
         self.paint_preferences(page, area, y, bold, normal, theme);
+        y += Self::rows(Setting::ALL.len(), 2);
+        self.paint_agents(page, area, y, cx, theme);
     }
 }
 
 impl SettingsPage {
+    fn paint_agents(
+        &mut self,
+        page: &mut Buffer,
+        area: Rect,
+        y: u16,
+        cx: &mut Context,
+        theme: &Theme,
+    ) {
+        let rows: Vec<Node> = self
+            .agents
+            .iter()
+            .map(|agent| {
+                let provider = agent
+                    .provider
+                    .as_ref()
+                    .map_or_else(|| "–".to_owned(), |p| p.id.clone());
+                let model = agent
+                    .model
+                    .as_ref()
+                    .map_or_else(|| "–".to_owned(), |m| m.id.clone());
+                let version = if agent.version.is_empty() {
+                    "–".to_owned()
+                } else {
+                    agent.version.clone()
+                };
+                let capabilities = agent.capabilities.as_ref().map_or_else(
+                    || "–".to_owned(),
+                    |caps| format!("in {} / out {}", caps.input.len(), caps.output.len()),
+                );
+                node(
+                    format!("agent-{}", agent.id),
+                    TableRow::body(vec![
+                        node("agent", TableCell::text(agent.id.clone()).with_weight(4)),
+                        node("provider", TableCell::text(provider).with_weight(3)),
+                        node("model", TableCell::text(model).with_weight(6)),
+                        node(
+                            "info",
+                            TableCell::text(format!("v{version} · {capabilities}")).with_weight(3),
+                        ),
+                    ]),
+                )
+            })
+            .collect();
+        if let Some(panel) = self.children.get_mut(2) {
+            if let Some(table) = panel
+                .view
+                .children_mut()
+                .first_mut()
+                .and_then(|node| node.view.as_any().downcast_mut::<Table>())
+            {
+                table.set_rows(rows);
+            }
+            panel.view.render(
+                Rect {
+                    x: 0,
+                    y,
+                    width: area.width,
+                    height: Self::rows(self.agents.len(), 3),
+                },
+                page,
+                cx,
+                theme,
+            );
+        }
+    }
+
     fn paint_preferences(
         &self,
         page: &mut Buffer,

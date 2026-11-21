@@ -104,7 +104,7 @@ impl Rail {
             pending_plan: None,
             children: vec![
                 node("context_gauge", gauge),
-                node("compact", Button::new(ButtonVariant::Ghost, "compact")),
+                node("compact", Button::new(ButtonVariant::Outline, "compact")),
             ],
         }
     }
@@ -233,11 +233,15 @@ impl Rail {
     }
     fn paint_plans(&mut self, buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme) {
         self.plan_rows.clear();
-        if y + 2 >= inner.y + inner.height || self.plans.is_empty() {
+        if y + 2 >= inner.y + inner.height {
             return;
         }
         let dim = Style::default().fg(theme.muted).bg(theme.background);
         buf.set_stringn(inner.x + 1, y, "PLANS", 6, dim.add_modifier(Modifier::BOLD));
+        if self.plans.is_empty() {
+            buf.set_stringn(inner.x + 1, y + 1, "none", 4, dim);
+            return;
+        }
         for (row, plan) in (y + 1..).zip(self.plans.iter().take(3)) {
             if row >= inner.y + inner.height {
                 break;
@@ -347,11 +351,15 @@ fn paint_jobs(
     jobs: &[norte_code_wire::JobSummary],
     theme: &Theme,
 ) -> u16 {
-    if y + 2 >= inner.y + inner.height || jobs.is_empty() {
+    if y + 2 >= inner.y + inner.height {
         return y;
     }
     let dim = Style::default().fg(theme.muted).bg(theme.background);
     buf.set_stringn(inner.x + 1, y, "JOBS", 5, dim.add_modifier(Modifier::BOLD));
+    if jobs.is_empty() {
+        buf.set_stringn(inner.x + 1, y + 1, "none", 4, dim);
+        return y + 2;
+    }
     let mut row = y + 1;
     for job in jobs.iter().take(3) {
         if row >= inner.y + inner.height {

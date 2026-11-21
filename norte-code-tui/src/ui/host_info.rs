@@ -54,9 +54,6 @@ pub(crate) fn fields(model: &UiModel) -> Vec<Field> {
     if let Some(quota) = &model.quota {
         quota_fields(&mut fields, quota);
     }
-    for agent in &model.agents {
-        agent_fields(&mut fields, agent);
-    }
     fields
 }
 
@@ -135,20 +132,5 @@ fn quota_fields(fields: &mut Vec<Field>, quota: &norte_code_wire::QuotaReport) {
                 dimension.used, dimension.limit, dimension.remaining
             ),
         ));
-    }
-}
-
-fn agent_fields(fields: &mut Vec<Field>, agent: &norte_code_wire::AgentSummary) {
-    let version = if agent.version.is_empty() {
-        String::new()
-    } else {
-        format!(" v{}", agent.version)
-    };
-    fields.push(Field::new("agent", format!("{}{}", agent.id, version)));
-    if let Some(provider) = &agent.provider {
-        fields.push(Field::new("  provider", &provider.id));
-    }
-    if let Some(agent_model) = &agent.model {
-        fields.push(Field::new("  model", &agent_model.id));
     }
 }
