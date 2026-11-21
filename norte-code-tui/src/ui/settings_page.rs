@@ -785,6 +785,7 @@ impl View for SettingsPage {
         let total = self.layout().total_height().max(area.height);
         let virtual_area = Rect::new(0, 0, area.width, total);
         let mut page = Buffer::empty(virtual_area);
+        page.set_style(virtual_area, Style::default().bg(theme.background));
         self.paint_sections(&mut page, virtual_area, cx, theme);
 
         for row in 0..area.height {

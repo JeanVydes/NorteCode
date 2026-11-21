@@ -13,6 +13,7 @@ use super::TelemetryPage;
 use super::telemetry_page::MAX_RECORD_WINDOW;
 use crate::leaderboard::{LeaderboardGroup, LeaderboardSubject};
 use crate::session_stats::SharedUsage;
+use crate::theme::{ThemeChoice, ThemeKind};
 use crate::ui::detail_panel::DetailPanel;
 use crate::ui::{build_tree, refresh_views, sync_views};
 use crate::ui_model::{Tab, UiModel};
@@ -162,6 +163,7 @@ fn wheel(column: u16, row: u16, modifiers: KeyModifiers) -> InputEvent {
 fn chart_tree() -> (Tree, UiModel, Theme) {
     let mut model = UiModel::detached();
     model.tab = Tab::Telemetry;
+    model.preferences.theme = ThemeChoice::BuiltIn(ThemeKind::ByeRetina);
     model.telemetry = Some(Arc::new(report()));
     let theme = model.preferences.catalog.theme(&model.preferences.theme);
     let mut tree = build_tree(&model);
@@ -360,6 +362,21 @@ fn the_stacked_charts_draw_a_scrollbar_when_they_overflow() {
 
     let rail = page(&tree).chart_rail().expect("stack scrollbar");
     assert_eq!(buf[(rail.x, rail.y + rail.top)].symbol(), "█");
+}
+
+#[test]
+fn chart_gaps_use_the_selected_theme_background() {
+    let (mut tree, _, theme) = chart_tree();
+    let area = Rect::new(0, 0, 100, 50);
+    let mut buf = Buffer::empty(area);
+
+    tree.render(area, &mut buf, &theme);
+
+    let first = page(&tree).chart_area(0);
+    assert_eq!(
+        buf[(first.x + 10, first.y + first.height)].bg,
+        theme.background
+    );
 }
 
 #[test]

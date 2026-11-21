@@ -293,6 +293,8 @@ impl TelemetryPage {
         } else {
             self.chart_page.resize(page_area);
         }
+        self.chart_page
+            .set_style(page_area, Style::default().bg(theme.background));
         let window = self.chart_window(area.width);
         self.sync_line_window(window);
         for (index, title) in CHART_TITLES.iter().enumerate() {

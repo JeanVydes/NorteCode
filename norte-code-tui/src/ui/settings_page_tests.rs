@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use terminalui::{InputEvent, Theme, Tree};
 
 use super::{Focus, SettingsPage};
+use crate::theme::{ThemeChoice, ThemeKind};
 use crate::ui::{build_tree, refresh_views, sync_views};
 use crate::ui_model::{Tab, UiModel};
 
@@ -87,6 +88,7 @@ fn page_down_moves_the_settings_content() {
 fn settings_tree() -> (Tree, UiModel, Theme) {
     let mut model = UiModel::detached();
     model.tab = Tab::Settings;
+    model.preferences.theme = ThemeChoice::BuiltIn(ThemeKind::ByeRetina);
     model.plugins = (0..3)
         .map(|index| PluginSummary {
             name: format!("plugin-{index}"),
@@ -142,4 +144,26 @@ fn clicks_select_plugins_and_preferences() {
         .expect("settings page");
     assert_eq!(page.pref_selected, 4);
     assert_eq!(page.focus, Focus::Preferences);
+}
+
+#[test]
+fn settings_fill_unpainted_cells_with_the_selected_theme() {
+    let (mut tree, _, theme) = settings_tree();
+    let area = Rect::new(0, 0, 80, 40);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let page = tree
+        .find::<SettingsPage>("settings")
+        .expect("settings page");
+    let layout = page.layout();
+
+    let preference_gap = buf[(
+        page.area.x + layout.value_x() - 1,
+        page.area.y + layout.preference_rows_y() + 1,
+    )]
+        .bg;
+    let plugin_padding = buf[(page.area.x + 70, page.area.y + layout.plugin_rows_y() + 1)].bg;
+
+    assert_eq!(preference_gap, theme.background);
+    assert_eq!(plugin_padding, theme.background);
 }
