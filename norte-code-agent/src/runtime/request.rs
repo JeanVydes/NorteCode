@@ -46,7 +46,7 @@ fn context_safe_output(
     let prompt_bytes = serde_json::to_vec(&(messages, tools)).unwrap_or_default();
     let estimated_prompt = (prompt_bytes.len() as u64).div_ceil(4);
     let available = max_context.saturating_sub(estimated_prompt + CONTEXT_SAFETY_MARGIN);
-    Some(requested.min(available))
+    Some(requested.min(available).max(1))
 }
 
 /// The interrupted message every cancellation path commits: an empty
