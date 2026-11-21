@@ -300,7 +300,7 @@ fn withheld(disabled: &[String], name: &str) -> bool {
 }
 
 /// One plain-text message restored from a portable RAEP history.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct ImportedHistoryItem {
     /// The original RAEP role. Portable imports preserve `user` and
     /// `assistant` rather than promoting untrusted tool or system content.

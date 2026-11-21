@@ -28,8 +28,13 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+use crate::host::turn_handles::TurnKey;
 use crate::payloads::payload;
 use crate::{HostError, NorteCodeRaepHost};
+
+mod seen_frames;
+
+use seen_frames::SeenFrames;
 
 /// A health/live payload.
 #[derive(Debug, serde::Serialize)]
@@ -1069,6 +1074,7 @@ impl Drop for StreamAttachmentGuard {
                     0,
                 );
                 frame.session_id = session_id.clone();
+                host.close_stream_turns(&session_id);
                 if let Err(error) = host.handle_as(frame, Some(&principal)).await {
                     tracing::warn!(session = %session_id, %error, "failed to detach closed SSE session");
                 }
@@ -1184,12 +1190,9 @@ async fn events(
             principal,
             session_id: stream_session_id.clone(),
         });
-    let seen = Arc::new(std::sync::Mutex::new(
-        initial
-            .iter()
-            .map(|frame| frame.id.clone())
-            .collect::<std::collections::HashSet<_>>(),
-    ));
+    let seen = Arc::new(std::sync::Mutex::new(SeenFrames::from_initial(
+        initial.iter().map(|frame| frame.id.clone()),
+    )));
     let prelude = futures_util::stream::iter([
         Ok::<Event, Infallible>(Event::default().retry(std::time::Duration::from_secs(2))),
         Ok::<Event, Infallible>(Event::default().comment("keepalive")),
@@ -1324,12 +1327,17 @@ async fn commands(
     };
     if starts_a_turn {
         let host_for_turn = Arc::clone(&host);
+        let host_for_cleanup = Arc::clone(&host);
         let principal_for_turn = principal.clone();
-        tokio::spawn(async move {
+        let key = TurnKey::new(request_session_id.clone(), request_id.clone());
+        let cleanup_key = key.clone();
+        let handle = tokio::spawn(async move {
             let _ = host_for_turn
                 .handle_as(frame, Some(&principal_for_turn))
                 .await;
+            host_for_cleanup.finish_tracked_turn(&cleanup_key);
         });
+        host.track_turn(key, handle);
         return (
             StatusCode::ACCEPTED,
             Json(payload(CommandResponsePayload {

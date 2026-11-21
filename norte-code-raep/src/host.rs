@@ -15,8 +15,21 @@ use tokio::sync::{Mutex, Semaphore, broadcast};
 use crate::payloads::payload;
 use norte_code_wire::{JobStatus, ServiceDataKind};
 
+const DEFAULT_REPLAY_CAPACITY: usize = 2_000;
+const DEFAULT_MAX_CONNECTIONS: usize = 64;
+
+fn env_limit(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
 mod agents;
 mod artifacts;
+mod bounded_map;
+mod bundle_store;
 pub(crate) mod capabilities;
 mod config_accessors;
 mod emit;
@@ -31,6 +44,7 @@ pub(crate) mod replay;
 mod sessions;
 pub(crate) mod stores;
 mod turn_book;
+pub(crate) mod turn_handles;
 mod turns;
 pub(crate) mod uploads;
 
@@ -1019,7 +1033,7 @@ impl Default for HostConfig {
         Self {
             agent_id: "norte-code".to_owned(),
             server_version: env!("CARGO_PKG_VERSION").to_owned(),
-            replay_capacity: 10_000,
+            replay_capacity: env_limit("NORTE_CODE_REPLAY_CAPACITY", DEFAULT_REPLAY_CAPACITY),
             // A host embedded without a database (tests, tooling) must not
             // write into the source tree. The server binary points this at
             // the database's directory.
@@ -1039,7 +1053,7 @@ impl Default for HostConfig {
             max_artifact_bytes: 16 * 1024 * 1024,
             max_export_bytes: 64 * 1024 * 1024,
             export_ttl_s: 3600,
-            max_connections: 256,
+            max_connections: env_limit("NORTE_CODE_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS),
             command_timeout_ms: 120_000,
         }
     }
@@ -1091,6 +1105,7 @@ pub struct NorteCodeRaepHost {
     artifact_store: Option<Arc<dyn ArtifactStore>>,
     upload_index: Option<Arc<dyn UploadIndex>>,
     connections: Arc<Semaphore>,
+    turn_handles: Arc<turn_handles::TurnHandles>,
 }
 
 pub(crate) fn summarize_plugin_updates(
@@ -1167,6 +1182,7 @@ impl NorteCodeRaepHost {
             artifact_store: None,
             upload_index: None,
             connections: Arc::new(Semaphore::new(max_connections)),
+            turn_handles: Arc::new(turn_handles::TurnHandles::default()),
         })
     }
 
@@ -1223,6 +1239,35 @@ impl NorteCodeRaepHost {
     /// Returns a receiver for live frames emitted by any attached connection.
     pub fn subscribe(&self) -> broadcast::Receiver<Envelope<Value>> {
         self.events.subscribe()
+    }
+
+    pub(crate) fn track_turn(
+        &self,
+        key: turn_handles::TurnKey,
+        handle: tokio::task::JoinHandle<()>,
+    ) {
+        self.turn_handles.insert(key, handle);
+    }
+
+    pub(crate) fn finish_tracked_turn(&self, key: &turn_handles::TurnKey) {
+        self.turn_handles.finish(key);
+    }
+
+    pub(crate) fn close_stream_turns(&self, session: &str) {
+        self.service
+            .cancel_turn_and_watch(&norte_code_wire::SessionKey::new(session.to_owned()));
+        let handles = Arc::clone(&self.turn_handles);
+        let session = session.to_owned();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                for handle in handles.drain_session(&session) {
+                    if !handle.is_finished() {
+                        handle.abort();
+                    }
+                }
+            });
+        }
     }
 
     /// Spawns the drain from the service's delegation events into this

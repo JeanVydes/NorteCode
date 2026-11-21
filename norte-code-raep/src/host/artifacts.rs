@@ -19,6 +19,21 @@ use super::stores::*;
 use super::*;
 
 use super::NorteCodeRaepHost;
+use super::exports::purge_expired_exports;
+
+fn purge_expired_imports(state: &mut super::stores::HostState) {
+    let now = now_millis();
+    let expired: Vec<_> = state
+        .imports
+        .iter()
+        .filter(|(_, import)| import.expires_at <= now)
+        .map(|(_, import)| import.path.clone())
+        .collect();
+    for path in expired {
+        bundle_store::remove(&path);
+    }
+    state.imports.retain(|_, import| import.expires_at > now);
+}
 
 impl NorteCodeRaepHost {
     /// Stores an uploaded artifact.
@@ -231,28 +246,25 @@ impl NorteCodeRaepHost {
         id: &str,
         principal: &str,
     ) -> Result<(Vec<u8>, i64), HostError> {
-        let mut state = self.state.lock().await;
-        if state
-            .exports
-            .get(id)
-            .is_some_and(|export| export.expires_at <= now_millis())
-        {
-            state.exports.remove(id);
-        }
-        let export = state
-            .exports
-            .get(id)
-            .ok_or_else(|| HostError::Artifact("export not found or expired".to_owned()))?;
-        if export
-            .owner
-            .as_deref()
-            .is_some_and(|owner| owner != principal)
-        {
-            return Err(HostError::Artifact(
-                "export not found or expired".to_owned(),
-            ));
-        }
-        Ok((export.bytes.clone(), export.expires_at))
+        let (path, expires_at) = {
+            let mut state = self.state.lock().await;
+            purge_expired_exports(&mut state);
+            let export = state
+                .exports
+                .get(id)
+                .ok_or_else(|| HostError::Artifact("export not found or expired".to_owned()))?;
+            if export
+                .owner
+                .as_deref()
+                .is_some_and(|owner| owner != principal)
+            {
+                return Err(HostError::Artifact(
+                    "export not found or expired".to_owned(),
+                ));
+            }
+            (export.path.clone(), export.expires_at)
+        };
+        Ok((bundle_store::read_bytes(&path)?, expires_at))
     }
     /// Validates a portable bundle and stores a one-hour import preview.
     ///
@@ -318,12 +330,19 @@ impl NorteCodeRaepHost {
             && (version.is_empty() || version == self.config.server_version);
         let expires_at = now_millis().saturating_add(60 * 60 * 1000);
         let import_id = format!("imp_{}", uuid::Uuid::new_v4().simple());
+        let path = bundle_store::write_json(
+            &self.config.replay_dir.join("imports"),
+            &StoredImportPayload {
+                manifest: manifest.clone(),
+                history: items,
+                title,
+            },
+        )?;
         {
             let mut state = self.state.lock().await;
-            state
-                .imports
-                .retain(|_, import| import.expires_at > now_millis());
+            purge_expired_imports(&mut state);
             if state.imports.len() >= 4 {
+                bundle_store::remove(&path);
                 return Err(HostError::InvalidFrame(
                     "IMPORT_STORE_FULL: active preview limit reached".to_owned(),
                 ));
@@ -331,9 +350,7 @@ impl NorteCodeRaepHost {
             state.imports.insert(
                 import_id.clone(),
                 StoredImport {
-                    manifest: manifest.clone(),
-                    history: items,
-                    title,
+                    path,
                     owner: principal.to_owned(),
                     expires_at,
                 },
@@ -373,24 +390,19 @@ impl NorteCodeRaepHost {
                 "encrypted imports are not supported".to_owned(),
             ));
         }
-        let imported = {
+        let path = {
             let mut state = self.state.lock().await;
-            if state
-                .imports
-                .get(import_id)
-                .is_some_and(|import| import.expires_at <= now_millis())
-            {
-                state.imports.remove(import_id);
-            }
-            let imported = state
+            purge_expired_imports(&mut state);
+            let import = state
                 .imports
                 .get(import_id)
                 .ok_or_else(|| HostError::InvalidFrame("IMPORT_NOT_FOUND".to_owned()))?;
-            if imported.owner != principal {
+            if import.owner != principal {
                 return Err(HostError::InvalidFrame("IMPORT_NOT_FOUND".to_owned()));
             }
-            imported.clone()
+            import.path.clone()
         };
+        let imported: StoredImportPayload = bundle_store::read_json(&path)?;
         let source = &imported.manifest.sessions[0];
         let usage_total = request
             .carry_usage
@@ -427,6 +439,7 @@ impl NorteCodeRaepHost {
             }
             state.imports.remove(import_id);
         }
+        bundle_store::remove(&path);
         let imported_from = payload(ImportedFromPayload {
             exporter: &imported.manifest.exporter,
             session_id: &source.session_id,

@@ -7,6 +7,7 @@
 //! engine-event counters beside it, which is useful when a provider never
 //! reports usage.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -26,6 +27,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::provider::ModelSpec;
+
+const MAX_TELEMETRY_RECORDS: usize = 2_000;
 
 /// The vendor extension that names an upstream provider, when a host pins one.
 const ROUTE_EXTENSION: &str = "openai.chat:provider";
@@ -68,33 +71,28 @@ impl EngineCounters {
 /// Shared request records and engine counters.
 #[derive(Debug, Default)]
 pub struct Telemetry {
-    records: Mutex<Vec<RequestRecord>>,
+    records: Mutex<VecDeque<RequestRecord>>,
     counters: EngineCounters,
 }
 
 impl Telemetry {
-    /// Records one request.
+    /// Records one request, forgetting the oldest one when the ring is full.
     pub fn push(&self, record: RequestRecord) {
-        self.records
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(record);
+        let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+        if records.len() == MAX_TELEMETRY_RECORDS {
+            records.pop_front();
+        }
+        records.push_back(record);
     }
 
     /// Takes every completed request for a Norte session, oldest first.
     #[must_use]
     pub fn take(&self, north: norte::SessionId) -> Vec<RequestRecord> {
         let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut taken = Vec::new();
-        let mut kept = Vec::with_capacity(records.len());
-        for record in records.drain(..) {
-            if record.north_session == north.to_string() {
-                taken.push(record);
-            } else {
-                kept.push(record);
-            }
-        }
-        *records = kept;
+        let (taken, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *records)
+            .into_iter()
+            .partition(|record| record.north_session == north.to_string());
+        *records = kept.into();
         taken
     }
 
