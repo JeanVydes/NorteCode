@@ -132,6 +132,7 @@ fn poll_event(
             drain_models_actions(tree, commands, model);
             drain_plugins_actions(tree, commands);
             drain_message_actions(tree, commands, model);
+            drain_plan_requests(tree, model);
             if drain_config_actions(tree, model) {
                 ui::refresh_views(tree, model);
             }
@@ -146,6 +147,20 @@ fn poll_event(
             ui::sync_views(tree, model);
             Ok(false)
         }
+    }
+}
+
+fn drain_plan_requests(tree: &mut terminalui::Tree, model: &UiModel) {
+    let Some(id) = tree
+        .find_mut::<ui::Rail>("rail")
+        .and_then(ui::Rail::take_plan_request)
+    else {
+        return;
+    };
+    if let Some(plan) = model.plans.iter().find(|plan| plan.id == id).cloned()
+        && let Some(overlay) = tree.find_mut::<ui::PlanOverlay>("plan_overlay")
+    {
+        overlay.open(plan);
     }
 }
 
@@ -236,9 +251,7 @@ fn handle_key(
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             return ctrl_c(tree, commands, model);
         }
-        (KeyModifiers::NONE, KeyCode::Tab)
-            if matches!(model.tab, Tab::Telemetry | Tab::Settings) =>
-        {
+        (KeyModifiers::NONE, KeyCode::Tab) if model.tab.is_list_tab() => {
             toggle_list_focus(tree, model.tab);
             pass_to_tree = false;
         }
@@ -330,6 +343,7 @@ fn handle_key(
     drain_sessions_actions(tree, commands, model);
     drain_plugins_actions(tree, commands);
     drain_message_actions(tree, commands, model);
+    drain_plan_requests(tree, model);
     if drain_config_actions(tree, model) {
         ui::refresh_views(tree, model);
     }
@@ -1410,6 +1424,8 @@ fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
         rail.model = model.active_model.as_ref().map(|model| model.id.clone());
         rail.provider.clone_from(&model.active_provider);
         rail.set_context(model.effective_context());
+        rail.set_jobs(model.jobs.clone());
+        rail.set_plans(model.plans.clone());
         rail.set_compact_enabled(model.active.is_some());
     }
 }

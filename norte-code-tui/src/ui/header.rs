@@ -12,15 +12,12 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 use crate::ui_model::{Tab, TurnState};
 
 /// Every tab, in display order. Rendered in the strip.
-const TABS: [Tab; 8] = [
+const TABS: [Tab; 5] = [
     Tab::Chat,
     Tab::Sessions,
     Tab::Models,
-    Tab::Plans,
-    Tab::Jobs,
     Tab::Telemetry,
     Tab::Settings,
-    Tab::Costs,
 ];
 
 /// One-row header rendered above everything.

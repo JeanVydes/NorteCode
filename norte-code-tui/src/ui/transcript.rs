@@ -259,7 +259,9 @@ pub(crate) enum MessageAction {
 struct MessageMenu {
     /// The item the menu belongs to.
     item: usize,
-    /// Screen row of the menu's top.
+    /// Screen column where the click happened.
+    column: u16,
+    /// Screen row where the click happened.
     row: u16,
 }
 
@@ -941,15 +943,16 @@ impl Transcript {
                     .saturating_sub(self.origin_y)
                     .saturating_add(self.first_visible);
                 if self.message_at(self.content_row(local_row)).is_some() {
-                    self.open_menu(local_row);
+                    self.open_menu(mouse.column, local_row);
                     return Outcome::Consumed;
                 }
                 self.menu = None;
                 let _ = self.toggle_reasoning_at(row);
-                self.selection = Some(Selection {
-                    anchor: pos,
-                    cur: pos,
-                });
+                Outcome::Consumed
+            }
+            MouseEventKind::Down(MouseButton::Right) => self.start_selection(inside, pos),
+            MouseEventKind::Up(MouseButton::Left | MouseButton::Right) if self.dragging_thumb => {
+                self.dragging_thumb = false;
                 Outcome::Consumed
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_thumb => {
@@ -958,21 +961,14 @@ impl Transcript {
                 }
                 Outcome::Consumed
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
+            MouseEventKind::Drag(MouseButton::Left | MouseButton::Right) => {
                 let Some(selection) = &mut self.selection else {
                     return Outcome::Ignored;
                 };
                 selection.cur = pos;
                 Outcome::Consumed
             }
-            MouseEventKind::Up(MouseButton::Left) if self.dragging_thumb => {
-                self.dragging_thumb = false;
-                Outcome::Consumed
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                self.finish_selection();
-                Outcome::Consumed
-            }
+            MouseEventKind::Up(MouseButton::Left | MouseButton::Right) => self.finish_selection(),
             _ => Outcome::Ignored,
         }
     }
@@ -982,14 +978,22 @@ impl Transcript {
             return;
         };
         let rect = Rect {
-            x: self.area.x,
-            y: menu.row,
+            x: menu.column,
+            y: menu.row + 1,
             width: 26,
             height: 2,
         };
-        buf.set_style(rect, Style::default().bg(theme.secondary));
+        // Cover the text under the menu so the buttons stay readable.
+        for y in rect.y..rect.y + rect.height {
+            for x in rect.x..rect.x + rect.width {
+                if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
+                    cell.set_symbol(" ");
+                    cell.set_style(Style::default().bg(theme.secondary));
+                }
+            }
+        }
         for index in 0..3 {
-            let button = self.menu_button_rect(menu, index);
+            let button = Self::menu_button_rect(menu, index);
             let label = ["fork", "copy", "rewind"][index];
             buf.set_stringn(
                 button.x,
@@ -1029,20 +1033,33 @@ impl Transcript {
     }
 
     /// Open the menu for a clicked message.
-    fn open_menu(&mut self, screen_row: u16) {
+    fn open_menu(&mut self, column: u16, screen_row: u16) {
         let row = self.content_row(screen_row);
         self.menu = self.message_at(row).map(|item| MessageMenu {
             item,
+            column,
             row: screen_row + self.area.y,
         });
     }
 
-    fn finish_selection(&mut self) {
+    fn start_selection(&mut self, inside: bool, pos: Pos) -> Outcome {
+        if !inside {
+            return Outcome::Ignored;
+        }
+        self.menu = None;
+        self.selection = Some(Selection {
+            anchor: pos,
+            cur: pos,
+        });
+        Outcome::Consumed
+    }
+
+    fn finish_selection(&mut self) -> Outcome {
         let Some(selection) = self.selection.take() else {
-            return;
+            return Outcome::Consumed;
         };
         if selection.anchor == selection.cur {
-            return;
+            return Outcome::Consumed;
         }
         match self.selection_text(selection) {
             Some(text) => {
@@ -1060,6 +1077,7 @@ impl Transcript {
                 });
             }
         }
+        Outcome::Consumed
     }
 
     fn click_menu(&mut self, column: u16, row: u16) -> bool {
@@ -1067,10 +1085,7 @@ impl Transcript {
             return false;
         };
         for index in 0..3 {
-            if self
-                .menu_button_rect(menu, index)
-                .contains(Position::new(column, row))
-            {
+            if Self::menu_button_rect(menu, index).contains(Position::new(column, row)) {
                 self.activate_menu(index);
                 return true;
             }
@@ -1079,9 +1094,9 @@ impl Transcript {
         false
     }
 
-    fn menu_button_rect(&self, menu: MessageMenu, index: usize) -> Rect {
+    fn menu_button_rect(menu: MessageMenu, index: usize) -> Rect {
         Rect {
-            x: self.area.x + 1 + u16::try_from(index).unwrap_or(0) * 8,
+            x: menu.column + u16::try_from(index).unwrap_or(0) * 8,
             y: menu.row + 1,
             width: 8,
             height: 1,
@@ -1500,6 +1515,8 @@ fn paint_diff_unified(
             width,
             sign,
             &line.text,
+            offset + 1,
+            theme,
             Style::default().fg(color).bg(theme.secondary),
         );
     }
@@ -1527,6 +1544,8 @@ fn paint_diff_split(
                 width,
                 " ",
                 &line.text,
+                index + 1,
+                theme,
                 Style::default().fg(theme.muted).bg(theme.secondary),
             );
             y += 1;
@@ -1557,6 +1576,8 @@ fn paint_diff_split(
                     half,
                     "−",
                     &line.text,
+                    index + 1,
+                    theme,
                     Style::default().fg(theme.destructive).bg(theme.secondary),
                 );
             }
@@ -1568,6 +1589,8 @@ fn paint_diff_split(
                     width.saturating_sub(half + 1),
                     "+",
                     &line.text,
+                    index + 1,
+                    theme,
                     Style::default().fg(theme.success).bg(theme.secondary),
                 );
             }
@@ -1584,6 +1607,7 @@ fn sign_and_color(kind: LineKind, theme: &Theme) -> (&'static str, ratatui::styl
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_diff_line(
     buf: &mut Buffer,
     x: u16,
@@ -1591,10 +1615,27 @@ fn paint_diff_line(
     width: u16,
     sign: &str,
     line: &str,
+    number: usize,
+    theme: &Theme,
     style: Style,
 ) {
-    buf.set_stringn(x, y, sign, 1, style);
-    buf.set_stringn(x + 2, y, line, usize::from(width.saturating_sub(2)), style);
+    let gutter = 4u16;
+    let number_text = format!("{number:>3}");
+    buf.set_stringn(
+        x,
+        y,
+        &number_text,
+        gutter as usize,
+        Style::default().fg(theme.muted).bg(theme.secondary),
+    );
+    buf.set_stringn(x + gutter, y, sign, 1, style);
+    buf.set_stringn(
+        x + gutter + 2,
+        y,
+        line,
+        usize::from(width.saturating_sub(gutter + 2)),
+        style,
+    );
 }
 
 fn paint_notice(buf: &mut Buffer, area: Rect, text: &str, tone: Tone, clip: u16, theme: &Theme) {

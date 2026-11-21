@@ -89,7 +89,7 @@ fn clicking_a_message_opens_the_menu_and_queues_actions() {
     transcript.heights = vec![2];
     transcript.first_visible = 0;
 
-    transcript.open_menu(0);
+    transcript.open_menu(30, 0);
     assert!(transcript.menu.is_some());
 
     transcript.activate_menu(0);
@@ -98,7 +98,7 @@ fn clicking_a_message_opens_the_menu_and_queues_actions() {
         vec![super::MessageAction::Fork { turn: Some(3) }]
     );
 
-    transcript.open_menu(0);
+    transcript.open_menu(30, 0);
     transcript.activate_menu(2);
     assert_eq!(
         transcript.take_message_actions(),

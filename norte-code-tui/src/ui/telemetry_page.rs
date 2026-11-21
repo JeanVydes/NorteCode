@@ -4,6 +4,7 @@ use std::any::Any;
 use std::fmt::Write;
 
 use ratatui::buffer::Buffer;
+use ratatui::layout::Position as RatatuiPosition;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
@@ -54,6 +55,8 @@ pub(crate) struct TelemetryPage {
     pub(crate) detail_is_request: bool,
     /// Which view is on screen.
     view: TelemetryView,
+    /// Scroll offset in the tall stacked charts.
+    chart_scroll: u16,
     /// Pages the request table was last rebuilt for.
     last_session_page: usize,
     last_request_page: usize,
@@ -76,6 +79,7 @@ impl TelemetryPage {
             selected_session: 0,
             detail_is_request: false,
             view: TelemetryView::Charts,
+            chart_scroll: 0,
             last_session_page: 0,
             last_request_page: 0,
             last_request_row: 0,
@@ -418,37 +422,51 @@ impl TelemetryPage {
     }
 
     fn paint_charts(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
+        const SLOT: u16 = 16;
         let titles = [
             "cost · cumulative usd",
             "tokens · in + out",
             "cache · hit rate %",
         ];
-        let width = area.width / 3;
+        let total = SLOT.saturating_mul(u16::try_from(titles.len()).unwrap_or(u16::MAX));
+        let max_scroll = total.saturating_sub(area.height);
+        self.chart_scroll = self.chart_scroll.min(max_scroll);
+        let mut page = Buffer::empty(Rect::new(0, 0, area.width, total));
+        let bold = Style::default()
+            .fg(theme.foreground)
+            .bg(theme.background)
+            .add_modifier(Modifier::BOLD);
         for (index, title) in titles.iter().enumerate() {
-            let step = u16::try_from(index).unwrap_or(0);
-            let x = area.x.saturating_add(width.saturating_mul(step));
-            let w = if index == 2 {
-                area.width.saturating_sub(width * 2)
-            } else {
-                width
-            };
-            buf.set_stringn(
-                x + 1,
-                area.y,
-                title,
-                title.len(),
-                Style::default()
-                    .fg(theme.foreground)
-                    .add_modifier(Modifier::BOLD),
-            );
-            let plot = Rect {
-                x,
-                y: area.y + 1,
-                width: w,
-                height: area.height.saturating_sub(1),
-            };
+            let y = u16::try_from(index)
+                .unwrap_or(u16::MAX)
+                .saturating_mul(SLOT);
+            page.set_stringn(0, y, title, title.len(), bold);
             if let Some(child) = self.children.get_mut(index) {
-                child.view.render(plot, buf, cx, theme);
+                child.view.render(
+                    Rect {
+                        x: 0,
+                        y: y + 1,
+                        width: area.width,
+                        height: SLOT - 1,
+                    },
+                    &mut page,
+                    cx,
+                    theme,
+                );
+            }
+        }
+        for row in 0..area.height {
+            let source = row.saturating_add(self.chart_scroll);
+            if source >= total {
+                break;
+            }
+            for column in 0..area.width {
+                if let (Some(cell), Some(source_cell)) = (
+                    buf.cell_mut(RatatuiPosition::new(area.x + column, area.y + row)),
+                    page.cell(RatatuiPosition::new(column, source)),
+                ) {
+                    *cell = source_cell.clone();
+                }
             }
         }
     }
@@ -655,6 +673,22 @@ impl View for TelemetryPage {
 
     fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
         use crossterm::event::KeyCode;
+        if let InputEvent::Mouse(mouse) = event
+            && self.view == TelemetryView::Charts
+        {
+            use crossterm::event::MouseEventKind;
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.chart_scroll = self.chart_scroll.saturating_sub(3);
+                    return Outcome::Consumed;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.chart_scroll = self.chart_scroll.saturating_add(3);
+                    return Outcome::Consumed;
+                }
+                _ => {}
+            }
+        }
         if let InputEvent::Key(key) = event
             && key.kind == crossterm::event::KeyEventKind::Press
         {
