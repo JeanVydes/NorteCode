@@ -49,6 +49,24 @@ fn source_adds_surrounding_context() {
 }
 
 #[test]
+fn a_very_large_edit_is_truncated() {
+    let search = "old\n".repeat(500);
+    let replace = "new\n".repeat(500);
+    let arguments = args(serde_json::json!({
+        "old_string": search,
+        "new_string": replace
+    }));
+
+    let diff = Diff::from_call(None, &arguments).expect("diff");
+
+    assert_eq!(diff.lines.len(), 400);
+    assert_eq!(
+        diff.lines.last().expect("marker").text,
+        "... diff truncated"
+    );
+}
+
+#[test]
 fn no_edit_payload_means_no_diff() {
     let arguments = args(serde_json::json!({ "path": "x" }));
     assert_eq!(Diff::from_call(None, &arguments), None);

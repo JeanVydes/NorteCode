@@ -203,8 +203,10 @@ pub(crate) struct UiModel {
     pub(crate) plans: Vec<norte_code_wire::PlanSummary>,
     /// Background jobs of the attached session.
     pub(crate) jobs: Vec<norte_code_wire::JobSummary>,
-    /// Telemetry of the attached session.
-    pub(crate) telemetry: Option<norte_code_wire::TelemetryReport>,
+    /// Fleet telemetry shared with the views.
+    pub(crate) telemetry: Option<crate::shared_telemetry::SharedTelemetry>,
+    /// Session rollups computed once for each telemetry report.
+    pub(crate) telemetry_usage: crate::session_stats::SharedUsage,
     /// Installed plugins.
     pub(crate) plugins: Vec<norte_code_client::PluginSummary>,
     /// The model the host reports for the attached session, when known.
@@ -227,8 +229,6 @@ pub(crate) struct UiModel {
     pub(crate) quota: Option<norte_code_wire::QuotaReport>,
     /// The configured service URL, shown as the host address.
     pub(crate) service_url: String,
-    /// The telemetry for the attached session.
-    pub(crate) telemetry_session: Option<norte_code_wire::TelemetryReport>,
     /// How full the session's context window is.
     pub(crate) context: ContextUsage,
     /// The fleet-wide cost total, when the providers report one.
@@ -396,6 +396,7 @@ impl UiModel {
             plans: Vec::new(),
             jobs: Vec::new(),
             telemetry: None,
+            telemetry_usage: crate::session_stats::SharedUsage::default(),
             plugins: Vec::new(),
             catalog: None,
             agents: Vec::new(),
@@ -404,7 +405,6 @@ impl UiModel {
             readiness: None,
             quota: None,
             service_url: String::new(),
-            telemetry_session: None,
             context: ContextUsage::default(),
             cost: None,
             active_model: None,

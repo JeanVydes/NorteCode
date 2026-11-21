@@ -73,7 +73,7 @@ pub(crate) struct SessionsPage {
     active: Option<String>,
     /// Fleet telemetry rolled up by session, for the rows and detail panel.
     #[serde(skip)]
-    usage: std::collections::BTreeMap<String, crate::session_stats::SessionUsage>,
+    usage: crate::session_stats::SharedUsage,
     /// The selected row.
     selected: usize,
     /// The first visible row.
@@ -97,7 +97,7 @@ impl SessionsPage {
         Self {
             sessions: Vec::new(),
             active: None,
-            usage: std::collections::BTreeMap::new(),
+            usage: crate::session_stats::SharedUsage::default(),
             selected: 0,
             offset: 0,
             mode: Mode::Listing,
@@ -115,11 +115,11 @@ impl SessionsPage {
         &mut self,
         sessions: Vec<norte_code_wire::SessionSummary>,
         active: Option<String>,
-        records: &[norte_code_wire::TelemetryRecord],
+        usage: crate::session_stats::SharedUsage,
     ) {
         self.sessions = sessions;
         self.active = active;
-        self.usage = crate::session_stats::by_session(records);
+        self.usage = usage;
         self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
         self.clamp_view();
     }

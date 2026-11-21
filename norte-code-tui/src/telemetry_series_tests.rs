@@ -2,7 +2,7 @@
 
 use norte_code_wire::{TelemetryRecord, TelemetryReport};
 
-use super::{ChartInterval, series};
+use super::{ChartInterval, MAX_CHART_BUCKETS, series};
 
 fn record(stamp: &str, cost: f64, input: u64, output: u64, read: u64) -> TelemetryRecord {
     TelemetryRecord {
@@ -67,6 +67,26 @@ fn an_unparseable_stamp_is_skipped() {
     let result = series(Some(&data), ChartInterval::Minute);
     assert_eq!(result.buckets.len(), 0);
     assert_eq!(result.cost.len(), 0);
+}
+
+#[test]
+fn the_series_keeps_only_the_buckets_the_chart_can_draw() {
+    let records = (0..MAX_CHART_BUCKETS + 10)
+        .map(|minute| {
+            record(
+                &format!("2026-11-19T{:02}:{:02}:01Z", minute / 60, minute % 60),
+                1.0,
+                1,
+                1,
+                0,
+            )
+        })
+        .collect();
+    let result = series(Some(&report(records)), ChartInterval::Minute);
+
+    assert_eq!(result.buckets.len(), MAX_CHART_BUCKETS);
+    assert_eq!(result.cost.len(), MAX_CHART_BUCKETS);
+    assert_eq!(result.buckets[0].0, "2026-11-19T00:10");
 }
 
 #[test]

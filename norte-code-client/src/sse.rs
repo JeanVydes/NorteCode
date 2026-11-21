@@ -4,6 +4,26 @@ use norte_code_wire::{ErrorCode, SessionKey};
 
 use crate::decode::{DecodedEvent, decode_frame};
 
+/// The largest SSE byte buffer one stream keeps between flushes.
+pub(crate) const MAX_SSE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+/// Drop whole completed blocks before letting a stalled stream grow without end.
+pub(crate) fn cap_sse_buffer(buffer: &mut Vec<u8>) {
+    let overflow = buffer.len().saturating_sub(MAX_SSE_BUFFER_BYTES);
+    if overflow == 0 {
+        return;
+    }
+    let boundary = buffer[..overflow]
+        .windows(2)
+        .rposition(|window| window == b"\n\n")
+        .map_or(overflow, |index| index + 2);
+    buffer.drain(..boundary);
+    if buffer.len() > MAX_SSE_BUFFER_BYTES {
+        let excess = buffer.len() - MAX_SSE_BUFFER_BYTES;
+        buffer.drain(..excess);
+    }
+}
+
 #[cfg(feature = "native")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SeqStep {
@@ -115,6 +135,7 @@ struct SseFrame {
 }
 
 fn take_sse_frames(buffer: &mut Vec<u8>) -> Vec<SseFrame> {
+    cap_sse_buffer(buffer);
     let mut events = Vec::new();
     while let Some((end, delimiter)) = next_boundary(buffer) {
         let block: Vec<u8> = buffer.drain(..end).collect();

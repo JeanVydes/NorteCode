@@ -412,6 +412,21 @@ fn drains_sse_blocks_in_order_and_reaches_past_the_terminal() {
 }
 
 #[test]
+fn an_oversized_sse_buffer_is_capped_without_losing_the_tail() {
+    let mut buffer = Vec::new();
+    for index in 0..300_000 {
+        buffer.extend_from_slice(format!("data: {{\"n\":{index}}}\n\n").as_bytes());
+    }
+    let tail = "data: {\"n\":299999}\n\n".to_owned();
+    assert!(buffer.len() > MAX_SSE_BUFFER_BYTES);
+
+    cap_sse_buffer(&mut buffer);
+
+    assert!(buffer.len() <= MAX_SSE_BUFFER_BYTES);
+    assert!(buffer.ends_with(tail.as_bytes()));
+}
+
+#[test]
 fn counts_unrecognized_raep_frames_before_checking_known_event_sequences() {
     let mut buffer = Vec::from(
         "data: {\"version\":\"1.0\",\"id\":\"frame-1\",\"seq\":1,\"session_id\":\"s\",\"timestamp\":0,\"type\":\"TOKEN_DELTA\",\"payload\":{\"channel\":\"text\",\"delta\":\"a\",\"index\":0}}\n\n\

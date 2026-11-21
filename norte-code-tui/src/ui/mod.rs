@@ -226,17 +226,10 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     }
 }
 
-fn update_sessions(tree: &mut Tree, model: &UiModel) {
+fn update_sessions(tree: &mut Tree, model: &UiModel, usage: crate::session_stats::SharedUsage) {
     let active = model.active.as_ref().map(|key| key.as_str().to_string());
     if let Some(page) = tree.find_mut::<sessions_page::SessionsPage>("sessions") {
-        page.set_data(
-            model.sessions.clone(),
-            active,
-            model
-                .telemetry
-                .as_ref()
-                .map_or(&[][..], |report| report.records.as_slice()),
-        );
+        page.set_data(model.sessions.clone(), active, usage);
     }
 }
 
@@ -289,10 +282,15 @@ fn update_config(tree: &mut Tree, model: &UiModel) {
 
 /// Refresh the views from the latest model snapshot; called after data arrives.
 pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
-    update_sessions(tree, model);
+    let usage = crate::session_stats::SharedUsage::clone(&model.telemetry_usage);
+    update_sessions(
+        tree,
+        model,
+        crate::session_stats::SharedUsage::clone(&usage),
+    );
     update_models(tree, model);
     if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
-        page.set_report(model.telemetry.clone());
+        page.set_report(model.telemetry.clone(), usage);
         page.set_sessions(model.sessions.clone());
     }
     update_config(tree, model);

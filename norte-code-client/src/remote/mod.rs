@@ -4,6 +4,7 @@ mod jobs;
 #[cfg(test)]
 mod mock_host;
 mod session;
+mod session_cache;
 mod stream;
 mod turns;
 
@@ -11,13 +12,17 @@ use norte_code_wire::{ClientRequest, ServerEvent};
 use raep_types::{ClientInfo, Envelope, FrameType, SessionAttach, StandardFrameType, TurnId};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::decode::{percent_encode, session_from_request, timestamp_millis};
 use crate::error::ClientError;
 use crate::frame::CommandResponseBody;
 use crate::host_error::HostError;
+
+pub(crate) use session_cache::SessionCache;
+
+const MAX_JOBS_PER_SESSION: usize = 100;
 
 /// HTTP client for the `NorteCode` RAEP command endpoint.
 ///
@@ -31,12 +36,12 @@ pub struct RemoteClient {
     agent_id: String,
     default_session: Option<String>,
     attached_sessions: Arc<Mutex<HashSet<String>>>,
-    session_agents: Mutex<HashMap<String, String>>,
-    session_seq: Arc<Mutex<HashMap<String, u64>>>,
-    session_info: Mutex<HashMap<String, norte_code_wire::SessionInfo>>,
-    session_reasoning: Mutex<HashMap<String, norte_code_wire::Reasoning>>,
-    session_stats: Mutex<HashMap<String, RemoteSessionStats>>,
-    session_jobs: Mutex<HashMap<String, Vec<norte_code_wire::JobInfo>>>,
+    session_agents: Mutex<SessionCache<String>>,
+    session_seq: Arc<Mutex<SessionCache<u64>>>,
+    session_info: Mutex<SessionCache<norte_code_wire::SessionInfo>>,
+    session_reasoning: Mutex<SessionCache<norte_code_wire::Reasoning>>,
+    session_stats: Mutex<SessionCache<RemoteSessionStats>>,
+    session_jobs: Mutex<SessionCache<Vec<norte_code_wire::JobInfo>>>,
     /// What this client can render and which optional features it negotiates
     /// on `SessionAttach`.
     capabilities: raep_types::ClientCapabilities,
@@ -91,12 +96,12 @@ impl RemoteClient {
             agent_id: "norte-code".to_owned(),
             default_session,
             attached_sessions: Arc::new(Mutex::new(HashSet::new())),
-            session_agents: Mutex::new(HashMap::new()),
-            session_seq: Arc::new(Mutex::new(HashMap::new())),
-            session_info: Mutex::new(HashMap::new()),
-            session_reasoning: Mutex::new(HashMap::new()),
-            session_stats: Mutex::new(HashMap::new()),
-            session_jobs: Mutex::new(HashMap::new()),
+            session_agents: Mutex::new(SessionCache::new()),
+            session_seq: Arc::new(Mutex::new(SessionCache::new())),
+            session_info: Mutex::new(SessionCache::new()),
+            session_reasoning: Mutex::new(SessionCache::new()),
+            session_stats: Mutex::new(SessionCache::new()),
+            session_jobs: Mutex::new(SessionCache::new()),
             capabilities: Self::default_client_capabilities(),
         })
     }
@@ -282,9 +287,11 @@ impl RemoteClient {
             .session_seq
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        seqs.entry(session.to_owned())
-            .and_modify(|current| *current = (*current).max(seq))
-            .or_insert(seq);
+        let next = seqs
+            .get(session)
+            .copied()
+            .map_or(seq, |current| current.max(seq));
+        seqs.insert(session, next);
     }
 
     /// Records the sequence of one raw RAEP frame, if it carries one.
@@ -480,7 +487,9 @@ impl RemoteClient {
                 }
                 norte_code_wire::ServerEventKind::JobList { jobs: listed } => {
                     if let Some(key) = &event.session {
-                        jobs.insert(key.as_str().to_owned(), listed.clone());
+                        let mut bounded = listed.clone();
+                        bounded.truncate(MAX_JOBS_PER_SESSION);
+                        jobs.insert(key.as_str().to_owned(), bounded);
                     }
                 }
                 _ => {}

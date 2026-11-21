@@ -3,10 +3,10 @@ use norte_code_wire::{ClientRequest, ServerEvent};
 use raep_types::{Ack, Envelope, FrameType, StandardFrameType, TurnId, UserInput};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use super::RemoteClient;
+use super::{RemoteClient, SessionCache};
 use crate::agent::EventStream;
 use crate::decode::{percent_encode, timestamp_millis};
 use crate::error::ClientError;
@@ -15,6 +15,20 @@ use crate::sse::{SeqStep, drain_sse_buffer, seq_step};
 
 /// The outcome of the command a stream was opened for.
 type CommandOutcome = Arc<Mutex<Option<Result<(), ClientError>>>>;
+
+const MAX_PENDING_EVENTS: usize = 512;
+
+/// Queue one event, shedding an older non-terminal event when the queue is full.
+fn queue_event(pending: &mut VecDeque<(ServerEvent, bool)>, event: ServerEvent, terminal: bool) {
+    if pending.len() >= MAX_PENDING_EVENTS {
+        let oldest = pending
+            .iter()
+            .position(|(_, is_terminal)| !*is_terminal)
+            .unwrap_or(0);
+        pending.remove(oldest);
+    }
+    pending.push_back((event, terminal));
+}
 
 /// Drops the belief that a session is attached.
 ///
@@ -41,7 +55,7 @@ struct EventReader {
     http: reqwest::Client,
     ack_url: String,
     ack_token: Option<HeaderValue>,
-    session_seq: Arc<Mutex<HashMap<String, u64>>>,
+    session_seq: Arc<Mutex<SessionCache<u64>>>,
     attached_sessions: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -278,7 +292,8 @@ impl EventReader {
                         if let Err(error) = result {
                             command_reported = true;
                             finished = true;
-                            pending.push_back((
+                            queue_event(
+                                &mut pending,
                                 ServerEvent {
                                     request_id: 0,
                                     session: Some(session.clone()),
@@ -288,7 +303,7 @@ impl EventReader {
                                     },
                                 },
                                 true,
-                            ));
+                            );
                         } else {
                             command_reported = true;
                         }
@@ -328,7 +343,8 @@ impl EventReader {
                                         // Keep the stream and resync on the
                                         // next frame, or the reader loses
                                         // the turn entirely.
-                                        pending.push_back((
+                                        queue_event(
+                                            &mut pending,
                                             ServerEvent {
                                                 request_id: 0,
                                                 session: Some(session.clone()),
@@ -340,7 +356,7 @@ impl EventReader {
                                                 },
                                             },
                                             false,
-                                        ));
+                                        );
                                     }
                                     SeqStep::Apply => {}
                                 }
@@ -349,7 +365,7 @@ impl EventReader {
                                 last_applied = Some(seq);
                             }
                             if let Some(event) = event {
-                                pending.push_back((event, terminal));
+                                queue_event(&mut pending, event, terminal);
                             }
                         }
                         if let Some(seq) = last_applied {
@@ -388,7 +404,8 @@ impl EventReader {
                                     if let Err(error) = result {
                                         command_reported = true;
                                         finished = true;
-                                        pending.push_back((
+                                        queue_event(
+                                            &mut pending,
                                             ServerEvent {
                                                 request_id: 0,
                                                 session: Some(session.clone()),
@@ -398,7 +415,7 @@ impl EventReader {
                                                 },
                                             },
                                             true,
-                                        ));
+                                        );
                                     } else {
                                         command_reported = true;
                                     }
@@ -415,3 +432,7 @@ impl EventReader {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod tests;
