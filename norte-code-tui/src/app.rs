@@ -563,6 +563,15 @@ fn handle_key(
             let _ = cancel_active_turn(tree, commands, model);
         }
     }
+    settle_input(tree, commands, model);
+    false
+}
+
+fn settle_input(
+    tree: &mut terminalui::Tree,
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) {
     drain_compact(tree, commands, model);
     drain_question_answer(tree, commands, model);
     drain_models_actions(tree, commands, model);
@@ -577,7 +586,6 @@ fn handle_key(
     sync_selectors(tree, commands, model);
     drain_tab_request(tree, model);
     ui::sync_views(tree, model);
-    false
 }
 
 /// Ship the answer the ask-user overlay just committed, if any.
