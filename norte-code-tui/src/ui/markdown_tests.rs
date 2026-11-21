@@ -61,6 +61,28 @@ fn inline_emphasis_keeps_its_style() {
 }
 
 #[test]
+fn long_text_wraps_at_word_boundaries_within_the_available_width() {
+    let doc = Markdown::render("alpha beta gamma delta epsilon", 12, &Theme::default());
+    let lines = text(&doc);
+
+    assert_eq!(lines, vec!["alpha beta", "gamma delta", "epsilon"]);
+    assert!(lines.iter().all(|line| line.chars().count() <= 12));
+}
+
+#[test]
+fn wrapped_text_keeps_inline_styles() {
+    let doc = Markdown::render("plain **bold words here** tail", 10, &Theme::default());
+
+    assert!(text(&doc).len() > 1);
+    assert!(
+        span_with(&doc, "bold")
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
+}
+
+#[test]
 fn headings_render_at_every_level() {
     let doc = Markdown::render("# One\n## Two\n###### Six", 80, &Theme::default());
 

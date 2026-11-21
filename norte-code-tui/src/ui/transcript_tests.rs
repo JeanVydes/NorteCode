@@ -51,7 +51,7 @@ fn replayed_history_keeps_upload_markers_in_the_user_text() {
 
 #[test]
 fn a_long_notice_height_matches_the_width_it_is_painted_at() {
-    let text = "unsupported media type `application/x-rare-format`, no chip created";
+    let text = "unsupported media type `application/x-rare-format`";
     let width = 48usize;
     let height = Transcript::item_height(
         &Item::Notice {
