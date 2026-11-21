@@ -22,6 +22,20 @@ use super::*;
 
 use super::NorteCodeRaepHost;
 
+pub(super) fn purge_expired_exports(state: &mut super::stores::HostState) {
+    let now = now_millis();
+    let expired: Vec<_> = state
+        .exports
+        .iter()
+        .filter(|(_, export)| export.expires_at <= now)
+        .map(|(_, export)| export.path.clone())
+        .collect();
+    for path in expired {
+        bundle_store::remove(&path);
+    }
+    state.exports.retain(|_, export| export.expires_at > now);
+}
+
 impl NorteCodeRaepHost {
     pub(crate) async fn export(
         &self,
@@ -149,12 +163,12 @@ impl NorteCodeRaepHost {
         let expires_at = now_millis().saturating_add(
             i64::try_from(self.config.export_ttl_s.saturating_mul(1000)).unwrap_or(i64::MAX),
         );
+        let path = bundle_store::write_bytes(&self.config.replay_dir.join("exports"), &bytes)?;
         {
             let mut state = self.state.lock().await;
-            state
-                .exports
-                .retain(|_, export| export.expires_at > now_millis());
+            purge_expired_exports(&mut state);
             if state.exports.len() >= 4 {
+                bundle_store::remove(&path);
                 return Err(HostError::InvalidFrame(
                     "EXPORT_STORE_FULL: active export limit reached".to_owned(),
                 ));
@@ -162,7 +176,7 @@ impl NorteCodeRaepHost {
             state.exports.insert(
                 export_id.clone(),
                 StoredExport {
-                    bytes,
+                    path,
                     owner: principal.map(str::to_owned),
                     expires_at,
                 },

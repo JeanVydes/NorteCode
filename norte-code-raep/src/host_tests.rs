@@ -1829,3 +1829,16 @@ async fn context_pin_pins_and_unpins_turns() {
         .expect("context updated");
     assert_eq!(updated.payload["pinned_turn_ids"], json!(["turn_2"]));
 }
+
+#[test]
+fn host_limits_start_with_bounded_defaults() {
+    let config = HostConfig::default();
+
+    assert_eq!(config.replay_capacity, DEFAULT_REPLAY_CAPACITY);
+    assert_eq!(config.max_connections, DEFAULT_MAX_CONNECTIONS);
+}
+
+#[test]
+fn host_limits_fall_back_to_the_default_for_a_missing_value() {
+    assert_eq!(env_limit("NORTE_CODE_TEST_LIMIT_MISSING", 17), 17);
+}

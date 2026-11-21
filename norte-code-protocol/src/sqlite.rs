@@ -871,6 +871,18 @@ enum Fault {
     Corrupt { what: String, reason: String },
 }
 
+const MAX_NODE_JSON_BYTES: i64 = 1_048_576;
+
+fn oversized_node(length: i64) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        1,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::other(format!(
+            "node JSON of {length} bytes exceeds {MAX_NODE_JSON_BYTES}"
+        ))),
+    )
+}
+
 fn sqlite_u64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
@@ -1044,9 +1056,15 @@ impl Store for SqliteStore {
             .run(move |connection| {
                 connection
                     .query_row(
-                        "SELECT data FROM nodes WHERE id = ?1",
+                        "SELECT length(data), data FROM nodes WHERE id = ?1",
                         params![id.to_string()],
-                        |row| row.get(0),
+                        |row| {
+                            let length: i64 = row.get(0)?;
+                            if length > MAX_NODE_JSON_BYTES {
+                                return Err(oversized_node(length));
+                            }
+                            row.get(1)
+                        },
                     )
                     .optional()
                     .map_err(Fault::from)

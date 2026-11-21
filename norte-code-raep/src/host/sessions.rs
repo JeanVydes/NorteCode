@@ -483,7 +483,9 @@ impl NorteCodeRaepHost {
             state
                 .client_capabilities
                 .insert(session_id.clone(), client_capabilities.clone());
-            state.sequences.entry(session_id.clone()).or_insert(resumed);
+            if !state.sequences.contains_key(&session_id) {
+                state.sequences.insert(session_id.clone(), resumed);
+            }
         }
         let (replayed, replay_meta) = match attach.resume_from_seq {
             Some(after) => {

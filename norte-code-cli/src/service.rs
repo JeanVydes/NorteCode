@@ -10,6 +10,39 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const DEFAULT_TOKIO_WORKERS: usize = 4;
+
+/// Environment the daemon needs before glibc creates its per-thread arenas.
+#[cfg(target_os = "linux")]
+fn daemon_env_overrides() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("MALLOC_ARENA_MAX", "2"),
+        ("MALLOC_TRIM_THRESHOLD_", "65536"),
+    ]
+}
+
+#[cfg(not(target_os = "linux"))]
+fn daemon_env_overrides() -> Vec<(&'static str, &'static str)> {
+    Vec::new()
+}
+
+fn worker_count_from(override_value: Option<&str>, available: usize) -> usize {
+    let requested = override_value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKIO_WORKERS);
+    requested.clamp(1, available.max(1))
+}
+
+fn worker_count() -> usize {
+    let override_value = std::env::var("NORTE_CODE_TOKIO_WORKERS").ok();
+    let available = thread::available_parallelism().map_or(1, |count| count.get());
+    worker_count_from(override_value.as_deref(), available)
+}
+
+#[cfg(test)]
+#[path = "service_tests.rs"]
+mod tests;
+
 use crate::output;
 use norte_code_protocol::catalog::catalog_dir;
 
@@ -100,6 +133,9 @@ fn spawn_daemon() -> Result<u32, String> {
         .map_err(|e| format!("could not open {}: {e}", log.display()))?;
 
     let mut cmd = Command::new(exe);
+    for (key, value) in daemon_env_overrides() {
+        cmd.env(key, value);
+    }
     cmd.arg("service").arg("serve");
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::from(
@@ -143,6 +179,7 @@ fn kill_pid(pid: i32, signal: i32) {
 /// Returns an error when the server cannot bind or start.
 pub fn serve() -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_count())
         .enable_all()
         .build()
         .map_err(|e| format!("could not start the runtime: {e}"))?;
@@ -152,6 +189,11 @@ pub fn serve() -> Result<(), String> {
 }
 
 pub(crate) fn up() -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        println!(
+            "  warning: using a debug binary; build with `cargo build --release -p norte-code-cli` for lower memory use"
+        );
+    }
     let url = service_url();
     if probe(&url) {
         println!(

@@ -189,6 +189,42 @@ async fn a_message_with_an_image_is_stored_and_comes_back() {
 }
 
 #[tokio::test]
+async fn oversized_nodes_are_not_deserialized() {
+    let store = SqliteStore::in_memory().expect("open");
+    let session_id = SessionId::new();
+    store
+        .commit(Commit {
+            session_id,
+            expected_version: None,
+            nodes: Vec::new(),
+            head: None,
+            phase: NortePhase::Idle,
+            turn: 0,
+            metadata: None,
+        })
+        .await
+        .expect("create session");
+    let node = Node::message(Message::user("x".repeat(1_100_000)), None);
+    store
+        .commit(Commit {
+            session_id,
+            expected_version: Some(1),
+            nodes: vec![node.clone()],
+            head: Some(node.id),
+            phase: NortePhase::Idle,
+            turn: 1,
+            metadata: None,
+        })
+        .await
+        .expect("commit oversized node");
+
+    assert!(
+        store.node(node.id).await.is_err(),
+        "the oversized node is rejected before its JSON becomes a Value"
+    );
+}
+
+#[tokio::test]
 async fn reopens_the_same_database() {
     let directory = std::env::temp_dir().join(format!(
         "norte-code-sqlite-{}-{}",

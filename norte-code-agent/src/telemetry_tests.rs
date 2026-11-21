@@ -157,3 +157,43 @@ async fn a_cancel_after_usage_keeps_the_provider_cost() {
     assert_eq!(record.cost_usd, Some(0.25));
     assert!(record.metadata.get("usage").is_some());
 }
+
+fn request_record(id: &str, north_session: &str) -> RequestRecord {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "session": "logical",
+        "north_session": north_session,
+        "turn": 1,
+        "provider": "test",
+        "model": "test",
+        "endpoint": null,
+        "started_at": "2026-11-20T00:00:00Z",
+        "duration_ms": 1,
+        "cache_hit": false,
+        "tool_calls": [],
+        "params": {},
+        "extensions": {},
+        "metadata": {},
+        "status": "ok"
+    }))
+    .expect("request record")
+}
+
+#[test]
+fn the_ring_forgets_the_oldest_record_when_it_is_full() {
+    let telemetry = Telemetry::default();
+    for index in 0..=MAX_TELEMETRY_RECORDS {
+        telemetry.push(request_record(&index.to_string(), "session"));
+    }
+
+    let session = norte::SessionId::new();
+    telemetry.push(request_record("last", &session.to_string()));
+
+    let records = telemetry.take(session);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, "last");
+    assert_eq!(
+        telemetry.records.lock().expect("records").len(),
+        MAX_TELEMETRY_RECORDS - 1
+    );
+}
