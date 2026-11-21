@@ -176,6 +176,7 @@ impl Rail {
             pending_plan,
             ..
         } = self;
+        let clicked = pending_plan.take();
         let previewed = children
             .iter_mut()
             .skip(2)
@@ -189,7 +190,7 @@ impl Rail {
                     .then(|| plans.get(index).map(|plan| plan.id.clone()))
                     .flatten()
             });
-        previewed.or_else(|| pending_plan.take())
+        previewed.or(clicked)
     }
 
     /// Enable or disable the compact button from the host's state.

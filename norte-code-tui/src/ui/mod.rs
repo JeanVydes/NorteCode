@@ -50,7 +50,7 @@ pub(crate) use header::Header;
 
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
-pub(crate) use plan_overlay::PlanOverlay;
+pub(crate) use plan_overlay::{PLAN_REVIEW_PREFIX, PlanOverlay, PlanReviewAction};
 pub(crate) use plugins_page::PluginsAction;
 pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::{Rail, RailPosition};
