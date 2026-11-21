@@ -4,6 +4,7 @@ mod app_frame;
 mod chat_layout;
 mod composer;
 mod config_page;
+mod debug_overlay;
 mod detail_panel;
 #[cfg(test)]
 #[path = "focus_tests.rs"]
@@ -16,6 +17,7 @@ mod key_prompt;
 mod layout_tests;
 mod markdown;
 mod models_page;
+mod overlay_frame;
 mod plan_overlay;
 mod plugins_page;
 mod question_prompt;
@@ -38,6 +40,7 @@ use terminalui::Pane;
 pub(crate) use chat_layout::ChatLayout;
 pub(crate) use composer::Composer;
 pub(crate) use config_page::{ConfigAction, ConfigData, Setting};
+pub(crate) use debug_overlay::{DebugOverlay, OverlayClock};
 pub(crate) use header::Header;
 
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt};
@@ -159,7 +162,18 @@ pub(crate) fn build_tree(model: &UiModel) -> Tree {
         ]),
     );
 
-    let mut tree = Tree::new(root);
+    let screen = node(
+        "screen",
+        overlay_frame::OverlayFrame::new(
+            root,
+            node(
+                "debug_overlay",
+                DebugOverlay::new(model.preferences.debug.enabled()),
+            ),
+        ),
+    );
+
+    let mut tree = Tree::new(screen);
     if let Some(rail) = tree.find_mut::<Rail>("rail") {
         rail.set_context(model.effective_context());
     }
@@ -261,6 +275,7 @@ fn update_config(tree: &mut Tree, model: &UiModel) {
                 send_mode: model.preferences.send_mode.label().to_string(),
                 diff_mode: model.preferences.diff_mode.label().to_string(),
                 rail_position: model.preferences.rail_position.label().to_string(),
+                debug: model.preferences.debug,
             },
         );
     }

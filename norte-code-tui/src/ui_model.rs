@@ -125,6 +125,42 @@ pub(crate) enum SendMode {
     Reject,
 }
 
+/// Whether the floating performance overlay is shown.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum DebugOverlayMode {
+    /// No overlay.
+    #[default]
+    Off,
+    /// Show frame, event and memory metrics.
+    On,
+}
+
+impl DebugOverlayMode {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::Off => Self::On,
+            Self::On => Self::Off,
+        }
+    }
+
+    pub(crate) const fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
+impl From<bool> for DebugOverlayMode {
+    fn from(enabled: bool) -> Self {
+        if enabled { Self::On } else { Self::Off }
+    }
+}
+
 /// The preferences the client keeps across sessions.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Preferences {
@@ -140,6 +176,8 @@ pub(crate) struct Preferences {
     pub(crate) diff_mode: DiffMode,
     /// Where the session rail sits relative to the stream.
     pub(crate) rail_position: RailPosition,
+    /// Whether the floating performance overlay is shown.
+    pub(crate) debug: DebugOverlayMode,
 }
 
 /// The turn the host is running, when known.
@@ -347,6 +385,7 @@ impl UiModel {
                 send_mode: SendMode::Steer,
                 diff_mode: DiffMode::Unified,
                 rail_position: RailPosition::Left,
+                debug: DebugOverlayMode::Off,
             },
             attachment: SessionAttachmentState::Disconnected,
             turn: TurnState::Idle,

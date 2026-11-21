@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 
+use crate::ui_model::DebugOverlayMode;
+
 /// The setting a row controls.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub(crate) enum Setting {
@@ -15,15 +17,18 @@ pub(crate) enum Setting {
     DiffMode,
     /// Where the session rail sits.
     RailPosition,
+    /// Whether the floating performance overlay is shown.
+    Debug,
 }
 
 impl Setting {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Theme,
         Self::Thinking,
         Self::SendMode,
         Self::DiffMode,
         Self::RailPosition,
+        Self::Debug,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
@@ -33,6 +38,7 @@ impl Setting {
             Self::SendMode => "send mode",
             Self::DiffMode => "diff mode",
             Self::RailPosition => "rail",
+            Self::Debug => "debug overlay",
         }
     }
 }
@@ -56,4 +62,6 @@ pub(crate) struct ConfigData {
     pub(crate) diff_mode: String,
     /// The rail position.
     pub(crate) rail_position: String,
+    /// The floating performance overlay.
+    pub(crate) debug: DebugOverlayMode,
 }

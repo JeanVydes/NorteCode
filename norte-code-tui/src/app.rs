@@ -16,6 +16,7 @@ use crate::compact_notice;
 use crate::config::ClientConfig;
 use crate::context::ContextUsage;
 use crate::diff::{Diff, EditArgs};
+use crate::metrics::{Metrics, Phase};
 use crate::shell::ShellArgs;
 use crate::terminal::TerminalSession;
 use crate::theme::{CustomTheme, ThemeCatalog};
@@ -29,15 +30,30 @@ const IDLE_POLL_MS: u64 = 250;
 /// Shorter waits keep a streaming turn responsive.
 const ACTIVE_POLL_MS: u64 = 80;
 
+/// What draining the client channel produced.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DrainOutcome {
+    changed: bool,
+    events: usize,
+}
+
 /// What one input poll produced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PollOutcome {
     /// The poll timed out with no input.
     Idle,
     /// Input was handled, so the frame needs repainting.
-    Event,
+    Event(InputKind),
     /// The user asked to quit.
     Quit,
+}
+
+/// Which terminal event woke the loop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputKind {
+    Key,
+    Mouse,
+    Other,
 }
 
 /// Entry point. `run` renders the north star until the user quits.
@@ -49,9 +65,104 @@ pub(super) fn run() -> io::Result<()> {
     crate::terminal::watch_exit_signals();
 
     let mut model = UiModel::detached();
-    let mut config: Option<ClientConfig> = None;
-    let mut commands = None;
-    let mut events = match ClientConfig::load() {
+    let (config, mut commands, mut events) = attach_client(&mut model);
+
+    let mut tree = ui::build_tree(&model);
+    let mut metrics = Metrics::new();
+    let mut overlay_clock = ui::OverlayClock::new();
+    let mut views_dirty = true;
+    let mut redraw = true;
+    let mut last_tick = Instant::now();
+
+    loop {
+        let now = Instant::now();
+        if crate::terminal::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+
+        let drain_started = Instant::now();
+        let drained = drain_server_events(&mut events, &mut commands, &mut tree, &mut model);
+        metrics.record(Phase::Drain, drain_started.elapsed());
+        metrics.server_events(drained.events);
+        if drained.changed {
+            views_dirty = true;
+            redraw = true;
+        }
+
+        if views_dirty {
+            let refresh_started = Instant::now();
+            ui::refresh_views(&mut tree, &model);
+            ui::sync_views(&mut tree, &model);
+            metrics.record(Phase::Refresh, refresh_started.elapsed());
+            views_dirty = false;
+        }
+        let sync_started = Instant::now();
+        sync_chrome(&mut tree, &model);
+        metrics.record(Phase::SyncChrome, sync_started.elapsed());
+
+        let animating = animating(&model);
+        if overlay_clock.due(now, model.preferences.debug.enabled()) {
+            redraw = true;
+        }
+        prepare_debug(
+            &mut tree,
+            &mut metrics,
+            &model,
+            events.as_ref(),
+            now,
+            animating,
+        );
+        draw_if_needed(
+            &mut session,
+            &mut tree,
+            &model,
+            &mut metrics,
+            now,
+            &mut redraw,
+        )?;
+        tick_tree(&mut tree, &mut metrics, now, &mut last_tick);
+
+        let timeout = Duration::from_millis(if animating {
+            ACTIVE_POLL_MS
+        } else {
+            IDLE_POLL_MS
+        });
+        let poll_started = Instant::now();
+        let outcome = poll_event(
+            &mut tree,
+            &mut commands,
+            &mut events,
+            &mut model,
+            config.as_ref(),
+            timeout,
+        )?;
+        metrics.record(Phase::Poll, poll_started.elapsed());
+        match outcome {
+            PollOutcome::Quit => {
+                metrics.iteration(now);
+                break;
+            }
+            PollOutcome::Event(_) => {
+                metrics.input_event();
+                redraw = true;
+            }
+            PollOutcome::Idle => metrics.poll_timeout(),
+        }
+        metrics.iteration(now);
+    }
+
+    session.leave();
+    Ok(())
+}
+
+fn attach_client(
+    model: &mut UiModel,
+) -> (
+    Option<ClientConfig>,
+    Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
+) {
+    match ClientConfig::load() {
         Ok(loaded) => {
             model.preferences.catalog = ThemeCatalog {
                 custom: loaded
@@ -64,79 +175,74 @@ pub(super) fn run() -> io::Result<()> {
             };
             model.preferences.theme = model.preferences.catalog.choose(loaded.ui.theme.as_deref());
             model.preferences.rail_position = loaded.ui.rail_position.unwrap_or_default();
+            model.preferences.debug = loaded.ui.debug.into();
             model.service_url.clone_from(&loaded.service.url);
-            let (commands_us, events_rx) = start(loaded.clone());
-            config = Some(loaded);
-            commands = Some(commands_us);
+            let (commands, events) = start(loaded.clone());
             model.attachment = SessionAttachmentState::Connecting;
-            Some(events_rx)
+            (Some(loaded), Some(commands), Some(events))
         }
         Err(error) => {
             model.attachment = SessionAttachmentState::Failed {
                 reason: format!("{error}"),
             };
-            None
-        }
-    };
-
-    let mut tree = ui::build_tree(&model);
-    let mut views_dirty = true;
-    let mut redraw = true;
-    let mut last_tick = Instant::now();
-
-    loop {
-        if crate::terminal::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
-        }
-        if drain_server_events(&mut events, &mut commands, &mut tree, &mut model) {
-            views_dirty = true;
-            redraw = true;
-        }
-        if views_dirty {
-            ui::refresh_views(&mut tree, &model);
-            ui::sync_views(&mut tree, &model);
-            views_dirty = false;
-        }
-        sync_chrome(&mut tree, &model);
-
-        let animating = animating(&model);
-        if redraw || animating {
-            let theme = model.preferences.catalog.theme(&model.preferences.theme);
-            session.terminal().draw(|frame| {
-                let area = frame.area();
-                frame
-                    .buffer_mut()
-                    .set_style(area, Style::default().bg(theme.background));
-                tree.render(area, frame.buffer_mut(), &theme);
-            })?;
-            redraw = false;
-        }
-
-        let now = Instant::now();
-        tree.tick(now.duration_since(last_tick));
-        last_tick = now;
-
-        let timeout = Duration::from_millis(if animating {
-            ACTIVE_POLL_MS
-        } else {
-            IDLE_POLL_MS
-        });
-        match poll_event(
-            &mut tree,
-            &mut commands,
-            &mut events,
-            &mut model,
-            config.as_ref(),
-            timeout,
-        )? {
-            PollOutcome::Quit => break,
-            PollOutcome::Event => redraw = true,
-            PollOutcome::Idle => {}
+            (None, None, None)
         }
     }
+}
 
-    session.leave();
+fn prepare_debug(
+    tree: &mut terminalui::Tree,
+    metrics: &mut Metrics,
+    model: &UiModel,
+    events: Option<&tokio::sync::mpsc::Receiver<ClientEvent>>,
+    now: Instant,
+    animating: bool,
+) {
+    let debug = model.preferences.debug.enabled();
+    if debug {
+        metrics.sample_process(now);
+    }
+    let queued = events.map_or(0, tokio::sync::mpsc::Receiver::len);
+    let snapshot = metrics.snapshot(now, queued, animating);
+    sync_debug_overlay(tree, &snapshot, debug);
+}
+
+fn draw_if_needed(
+    session: &mut TerminalSession,
+    tree: &mut terminalui::Tree,
+    model: &UiModel,
+    metrics: &mut Metrics,
+    now: Instant,
+    redraw: &mut bool,
+) -> io::Result<()> {
+    if !*redraw && !animating(model) {
+        metrics.frame_skipped();
+        return Ok(());
+    }
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let draw_started = Instant::now();
+    session.terminal().draw(|frame| {
+        let area = frame.area();
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(theme.background));
+        tree.render(area, frame.buffer_mut(), &theme);
+    })?;
+    metrics.frame_drawn(now, draw_started.elapsed());
+    *redraw = false;
     Ok(())
+}
+
+fn tick_tree(
+    tree: &mut terminalui::Tree,
+    metrics: &mut Metrics,
+    now: Instant,
+    last_tick: &mut Instant,
+) {
+    let started = Instant::now();
+    tree.tick(now.duration_since(*last_tick));
+    metrics.record(Phase::Tick, started.elapsed());
+    *last_tick = now;
 }
 
 /// Whether anything on screen moves on its own.
@@ -162,7 +268,7 @@ fn poll_event(
             Ok(if quit {
                 PollOutcome::Quit
             } else {
-                PollOutcome::Event
+                PollOutcome::Event(InputKind::Key)
             })
         }
         Event::Mouse(mouse) => {
@@ -180,14 +286,14 @@ fn poll_event(
             }
             drain_sessions_actions(tree, commands, model);
             ui::sync_views(tree, model);
-            Ok(PollOutcome::Event)
+            Ok(PollOutcome::Event(InputKind::Mouse))
         }
         other => {
             let input = terminalui::InputEvent::from(other);
             let _ = tree.handle_event(&input);
             sync_selectors(tree, commands, model);
             ui::sync_views(tree, model);
-            Ok(PollOutcome::Event)
+            Ok(PollOutcome::Event(InputKind::Other))
         }
     }
 }
@@ -771,6 +877,7 @@ fn drain_config_actions(tree: &mut terminalui::Tree, model: &mut UiModel) -> boo
             Setting::RailPosition => {
                 model.preferences.rail_position = model.preferences.rail_position.next();
             }
+            Setting::Debug => model.preferences.debug = model.preferences.debug.next(),
         }
     }
     changed
@@ -917,13 +1024,17 @@ fn drain_server_events(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     tree: &mut terminalui::Tree,
     model: &mut UiModel,
-) -> bool {
+) -> DrainOutcome {
     let Some(receiver) = events else {
-        return false;
+        return DrainOutcome::default();
     };
     let mut changed = false;
+    let mut count = 0usize;
     loop {
         let next_event = receiver.try_recv();
+        if next_event.is_ok() {
+            count += 1;
+        }
         match next_event {
             Ok(ClientEvent::Attached { session }) => {
                 changed = apply_attached(tree, model, &session) || changed;
@@ -992,10 +1103,18 @@ fn drain_server_events(
                 fold(&event, tree, model);
                 changed = true;
             }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return changed,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                return DrainOutcome {
+                    changed,
+                    events: count,
+                };
+            }
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 *events = None;
-                return changed;
+                return DrainOutcome {
+                    changed,
+                    events: count,
+                };
             }
         }
     }
@@ -1453,6 +1572,17 @@ fn fold_delta(delta: &norte_code_wire::Delta, tree: &mut terminalui::Tree, model
             }
         }
         _ => {}
+    }
+}
+
+fn sync_debug_overlay(
+    tree: &mut terminalui::Tree,
+    snapshot: &crate::metrics::MetricsSnapshot,
+    enabled: bool,
+) {
+    if let Some(overlay) = tree.find_mut::<ui::DebugOverlay>("debug_overlay") {
+        overlay.set_enabled(enabled);
+        overlay.set_snapshot(snapshot);
     }
 }
 
