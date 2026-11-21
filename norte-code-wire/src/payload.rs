@@ -481,6 +481,10 @@ pub struct UserInputAccepted {
     pub replaces_turn_id: Option<String>,
 }
 
+#[cfg(test)]
+#[path = "payload_tests.rs"]
+mod tests;
+
 /// Who originated an accepted input.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Origin {
@@ -526,6 +530,14 @@ pub enum AcceptedContentKind {
     /// Plain text.
     #[default]
     Text,
+    /// An image.
+    Image,
+    /// A document.
+    Document,
+    /// An audio recording.
+    Audio,
+    /// A video.
+    Video,
 }
 
 /// One agent, as a change payload names it.
