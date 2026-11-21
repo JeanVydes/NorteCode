@@ -122,6 +122,7 @@ impl Rail {
             children: vec![
                 node("context_gauge", gauge),
                 node("compact", Button::new(ButtonVariant::Outline, "compact")),
+                node("preview", Button::new(ButtonVariant::Outline, "preview")),
             ],
         }
     }
@@ -141,7 +142,18 @@ impl Rail {
     }
 
     pub(crate) fn set_plans(&mut self, plans: Vec<norte_code_wire::PlanSummary>) {
+        self.set_preview_enabled(!plans.is_empty());
         self.plans = plans;
+    }
+
+    fn set_preview_enabled(&mut self, enabled: bool) {
+        if let Some(button) = self
+            .children
+            .get_mut(2)
+            .and_then(|node| node.view.as_any().downcast_mut::<Button>())
+        {
+            button.set_disabled(!enabled);
+        }
     }
 
     /// Take a plan request from a click.
@@ -278,6 +290,7 @@ impl Rail {
         y: u16,
         theme: &Theme,
         viewport: &RailViewport,
+        cx: &mut Context,
     ) {
         self.plan_rows.clear();
         if y + 1 >= inner.y + inner.height {
@@ -285,6 +298,18 @@ impl Rail {
         }
         let dim = Style::default().fg(theme.muted).bg(theme.background);
         buf.set_stringn(inner.x + 1, y, "PLANS", 6, dim.add_modifier(Modifier::BOLD));
+        let button_rect = Rect {
+            x: inner.x + inner.width.saturating_sub(10),
+            y,
+            width: 9,
+            height: 1,
+        };
+        if let Some(node) = self.children.get_mut(2) {
+            node.view.render(button_rect, buf, cx, theme);
+            if let Some(button) = node.view.as_any().downcast_mut::<Button>() {
+                button.state.area = Self::to_screen(button_rect, viewport);
+            }
+        }
         if self.plans.is_empty() {
             buf.set_stringn(inner.x + 1, y + 1, "none", 4, dim);
             return;
@@ -394,7 +419,7 @@ impl View for Rail {
         };
         y = self.paint_context(content, y, &mut scratch, cx, theme, &viewport);
         y = paint_jobs(&mut scratch, content, y, &self.jobs, theme);
-        self.paint_plans(&mut scratch, content, y, theme, &viewport);
+        self.paint_plans(&mut scratch, content, y, theme, &viewport, cx);
 
         for row in 0..visible_rows {
             let source = row.saturating_add(self.scroll);

@@ -226,14 +226,18 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     let plan_open = tree
         .find::<plan_overlay::PlanOverlay>("plan_overlay")
         .is_some_and(plan_overlay::PlanOverlay::is_open);
+    let visible = if plan_open {
+        3
+    } else if question_open {
+        2
+    } else {
+        usize::from(prompt_open)
+    };
+    let overlay_changed = tree
+        .find::<Pane>("root")
+        .is_none_or(|root| root.visible() != visible);
     if let Some(root) = tree.find_mut::<Pane>("root") {
-        root.set_visible(if plan_open {
-            3
-        } else if question_open {
-            2
-        } else {
-            usize::from(prompt_open)
-        });
+        root.set_visible(visible);
     }
     if let Some(overlay) = tree.find_mut::<question_prompt::QuestionPrompt>("question_prompt") {
         let open = overlay.is_open();
@@ -244,6 +248,15 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
         } else if !question_open && open {
             overlay.close();
         }
+    }
+    if overlay_changed {
+        let focus = match visible {
+            3 => "plan_overlay",
+            2 => "question_prompt",
+            1 => "key_prompt",
+            _ => "composer",
+        };
+        tree.focus(focus);
     }
 }
 

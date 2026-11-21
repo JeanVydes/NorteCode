@@ -140,6 +140,8 @@ pub(crate) enum UiCommand {
     },
     /// Refetch the catalogue views for the current session.
     RefreshViews,
+    /// Refetch only the plans and jobs shown in the rail.
+    RefreshRail,
     /// Answer the question the turn is parked on.
     AnswerQuestion {
         /// The session the question belongs to.
@@ -435,6 +437,17 @@ async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<Clien
     }
     if let Ok(quota) = quota {
         let _ = events.send(ClientEvent::Quota(quota)).await;
+    }
+}
+
+/// Refetch the session's plans and jobs after the agent changes them.
+async fn refresh_rail(api: &Arc<RestClient>, session: &str, events: &Sender<ClientEvent>) {
+    let (plans, jobs) = tokio::join!(api.plans(session), api.list_jobs(session));
+    if let Ok(plans) = plans {
+        let _ = events.send(ClientEvent::Plans(plans)).await;
+    }
+    if let Ok(jobs) = jobs {
+        let _ = events.send(ClientEvent::Jobs(jobs)).await;
     }
 }
 
@@ -903,6 +916,9 @@ async fn apply_command(
         }
         UiCommand::RefreshViews => {
             Box::pin(fetch_views(api, active.as_str(), events)).await;
+        }
+        UiCommand::RefreshRail => {
+            refresh_rail(api, active.as_str(), events).await;
         }
         UiCommand::SetModel {
             session,
