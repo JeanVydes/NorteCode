@@ -10,6 +10,7 @@ use serde::Serialize;
 use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius, draw_box};
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
+use crate::frame_limiter::FRAME_RATE_CAP;
 use crate::metrics::{MetricsSnapshot, Phase};
 
 const WIDTH: u16 = 58;
@@ -79,8 +80,8 @@ impl DebugOverlay {
             .map_or_else(|| "never".to_owned(), format_duration);
         let mut lines = vec![
             format!(
-                "fps       draw {:.1}  loop {:.1}",
-                snapshot.drawn_fps, snapshot.loop_fps
+                "fps       draw {:.1}  loop {:.1}  cap {}",
+                snapshot.drawn_fps, snapshot.loop_fps, FRAME_RATE_CAP
             ),
             phase(Phase::Draw),
             phase(Phase::Drain),

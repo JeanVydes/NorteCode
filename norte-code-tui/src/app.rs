@@ -16,6 +16,7 @@ use crate::compact_notice;
 use crate::config::ClientConfig;
 use crate::context::ContextUsage;
 use crate::diff::{Diff, EditArgs};
+use crate::frame_limiter::FrameLimiter;
 use crate::metrics::{Metrics, Phase};
 use crate::shell::ShellArgs;
 use crate::terminal::TerminalSession;
@@ -69,6 +70,7 @@ pub(super) fn run() -> io::Result<()> {
 
     let mut tree = ui::build_tree(&model);
     let mut metrics = Metrics::new();
+    let mut frame_limiter = FrameLimiter::new();
     let mut overlay_clock = ui::OverlayClock::new();
     let mut views_dirty = true;
     let mut redraw = true;
@@ -117,16 +119,13 @@ pub(super) fn run() -> io::Result<()> {
             &mut tree,
             &model,
             &mut metrics,
+            &mut frame_limiter,
             now,
             &mut redraw,
         )?;
         tick_tree(&mut tree, &mut metrics, now, &mut last_tick);
 
-        let timeout = Duration::from_millis(if animating {
-            ACTIVE_POLL_MS
-        } else {
-            IDLE_POLL_MS
-        });
+        let timeout = poll_timeout(animating, redraw, &frame_limiter, now);
         let poll_started = Instant::now();
         let outcome = poll_event(
             &mut tree,
@@ -212,10 +211,11 @@ fn draw_if_needed(
     tree: &mut terminalui::Tree,
     model: &UiModel,
     metrics: &mut Metrics,
+    frame_limiter: &mut FrameLimiter,
     now: Instant,
     redraw: &mut bool,
 ) -> io::Result<()> {
-    if !*redraw && !animating(model) {
+    if (!*redraw && !animating(model)) || !frame_limiter.allow(now) {
         metrics.frame_skipped();
         return Ok(());
     }
@@ -243,6 +243,24 @@ fn tick_tree(
     tree.tick(now.duration_since(*last_tick));
     metrics.record(Phase::Tick, started.elapsed());
     *last_tick = now;
+}
+
+fn poll_timeout(
+    animating: bool,
+    redraw: bool,
+    frame_limiter: &FrameLimiter,
+    now: Instant,
+) -> Duration {
+    let default = Duration::from_millis(if animating {
+        ACTIVE_POLL_MS
+    } else {
+        IDLE_POLL_MS
+    });
+    if redraw {
+        frame_limiter.remaining(now).min(default)
+    } else {
+        default
+    }
 }
 
 /// Whether anything on screen moves on its own.
