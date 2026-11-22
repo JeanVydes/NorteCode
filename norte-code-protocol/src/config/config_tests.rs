@@ -140,6 +140,39 @@ fn command_model_bytes_default_and_validation() {
 }
 
 #[test]
+fn shell_limits_default_to_an_unbounded_zero_and_bounded_requests() {
+    let loaded = Config::from_json("{}").expect("config");
+    let limits = loaded.config.tools.shell_limits;
+    assert!(limits.allow_indefinite);
+    assert_eq!(limits.default_timeout_ms, DEFAULT_SHELL_DEFAULT_TIMEOUT_MS);
+    assert_eq!(limits.max_timeout_ms, DEFAULT_SHELL_MAX_TIMEOUT_MS);
+
+    let custom = Config::from_json(
+        r#"{"tools":{"shell_limits":{"allow_indefinite":false,"default_timeout_ms":1000,"max_timeout_ms":5000}}} "#,
+    )
+    .expect("custom limits");
+    assert!(!custom.config.tools.shell_limits.allow_indefinite);
+    assert_eq!(custom.config.tools.shell_limits.default_timeout_ms, 1000);
+    assert_eq!(custom.config.tools.shell_limits.max_timeout_ms, 5000);
+}
+
+#[test]
+fn shell_limits_reject_zero_defaults_and_inverted_bounds() {
+    for body in [
+        r#"{"tools":{"shell_limits":{"default_timeout_ms":0}}}"#,
+        r#"{"tools":{"shell_limits":{"max_timeout_ms":0}}}"#,
+        r#"{"tools":{"shell_limits":{"max_timeout_ms":86400001}}}"#,
+        r#"{"tools":{"shell_limits":{"default_timeout_ms":6001,"max_timeout_ms":6000}}}"#,
+    ] {
+        let error = Config::from_json(body).expect_err("invalid shell limits");
+        assert!(
+            error.to_string().contains("tools.shell_limits"),
+            "the field is named: {error}"
+        );
+    }
+}
+
+#[test]
 fn confinement_confines_paths_and_leaves_the_sandbox_off() {
     let loaded = Config::from_json("{}").expect("config");
     assert!(

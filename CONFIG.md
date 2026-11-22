@@ -298,6 +298,9 @@ The CLI-only file contains:
 | `web_fetch` | boolean | `false` | Register the `web_fetch` tool. |
 | `disabled` | array of strings | `[]` | Tools a new session does not get, by the name the model calls them. A tool named here is not registered at all: no schema, no request, no entry in the registry. Read when a session is created and kept for its life, because the declarations are part of the prompt prefix; editing the file changes what the next session gets. |
 | `command_max_model_bytes` | integer `1024..=1048576` | `131072` | Bytes of each `command` stream and summary that reach the model. The tool still captures up to its own larger ceiling; this bounds the text the model sees, eliding the middle with a marker. |
+| `shell_limits.allow_indefinite` | boolean | `true` | Whether a `shell` call asking for `timeout_ms: 0` runs without a bound. Off, the default bound is applied instead. Detached jobs use the same setting. |
+| `shell_limits.default_timeout_ms` | integer `1..=86400000` | `120000` | Bound applied when a `shell` call asks for none, or asks for zero while indefinite runs are off. |
+| `shell_limits.max_timeout_ms` | integer `1..=86400000` | `600000` | Ceiling for a `shell` call's requested bound. A larger request is clamped to it. |
 | `confinement.workspace_only` | boolean | `true` | Confine tool paths to the workspace. Off, `read`, `write`, `edit`, `glob`, `list_dir`, `grep` and `command`'s `cwd` may name any path. A special file such as a FIFO is refused either way. |
 | `confinement.sandbox.enabled` | boolean | `false` | Run `command` inside bubblewrap (Linux) or `sandbox-exec` (macOS). |
 | `confinement.sandbox.network` | boolean | `false` | Allow network access inside the sandbox. |

@@ -12,8 +12,8 @@ use crate::keys::KeyStore;
 use super::loading::{invalid, merge, read_text, read_value, validate_pair};
 use super::{
     ApiKey, ApprovalsConfig, BudgetsConfig, CONFIG_VERSION, CliConfig, CompactionConfig, Config,
-    ConfigError, CostConfig, Loaded, McpServerConfig, PluginPolicies, ReasoningConfig, RetryConfig,
-    SkillsConfig, ToolsConfig,
+    ConfigError, CostConfig, Loaded, MAX_SHELL_TIMEOUT_MS, McpServerConfig, PluginPolicies,
+    ReasoningConfig, RetryConfig, SkillsConfig, ToolsConfig,
 };
 
 /// One server-owned agent definition.
@@ -325,6 +325,25 @@ impl Agent {
             return Err(invalid(
                 "tools.command_max_model_bytes",
                 "must be between 1024 and 1048576 bytes",
+            ));
+        }
+        let shell = self.tools.shell_limits;
+        if shell.default_timeout_ms == 0 {
+            return Err(invalid(
+                "tools.shell_limits.default_timeout_ms",
+                "must be greater than zero",
+            ));
+        }
+        if shell.max_timeout_ms == 0 || shell.max_timeout_ms > MAX_SHELL_TIMEOUT_MS {
+            return Err(invalid(
+                "tools.shell_limits.max_timeout_ms",
+                "must be between 1 and 86400000 milliseconds",
+            ));
+        }
+        if shell.default_timeout_ms > shell.max_timeout_ms {
+            return Err(invalid(
+                "tools.shell_limits.default_timeout_ms",
+                "must not exceed tools.shell_limits.max_timeout_ms",
             ));
         }
         for (scope, budget) in [

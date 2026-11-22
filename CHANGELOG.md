@@ -6,6 +6,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `tools.shell_limits` configures the shell's runtime bounds:
+  `allow_indefinite` (default `true`), `default_timeout_ms` (default `120000`)
+  and `max_timeout_ms` (default `600000`). Detached jobs report the same
+  limits, and a request that asks for `timeout_ms: 0` runs without a bound
+  unless the host turns it off.
+
 ### Changed
 
 - Browser automation is no longer built into the agent. `browser_use` now comes

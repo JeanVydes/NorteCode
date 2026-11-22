@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 /// Default cap on the bytes of each command stream that reach the model.
 pub const DEFAULT_COMMAND_MAX_MODEL_BYTES: usize = 128 * 1024;
 
+/// Default bound for a shell call whose request asks for none.
+pub const DEFAULT_SHELL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+/// Default ceiling for a shell call's requested bound.
+pub const DEFAULT_SHELL_MAX_TIMEOUT_MS: u64 = 600_000;
+/// Longest runtime the host may configure for a shell call.
+pub const MAX_SHELL_TIMEOUT_MS: u64 = 86_400_000;
+
 /// Default number of plugin messages one turn may inject.
 pub const DEFAULT_PLUGIN_MESSAGES_PER_TURN: usize = 2;
 
@@ -24,6 +31,8 @@ pub struct ToolsConfig {
     /// The tool still captures up to its own larger ceiling; this bounds only
     /// the text the model sees, eliding the middle with a marker.
     pub command_max_model_bytes: usize,
+    /// Runtime bounds for shell calls, detached jobs included.
+    pub shell_limits: ShellLimitsConfig,
     /// How far a tool may reach.
     pub confinement: ConfinementConfig,
     /// Policy for user-role messages plugins ask the host to add.
@@ -61,10 +70,39 @@ impl Default for ToolsConfig {
         Self {
             web_fetch: false,
             command_max_model_bytes: DEFAULT_COMMAND_MAX_MODEL_BYTES,
+            shell_limits: ShellLimitsConfig::default(),
             confinement: ConfinementConfig::default(),
             plugin_messages: PluginMessagesConfig::default(),
             auto_turn_on_job_end: false,
             disabled: Vec::new(),
+        }
+    }
+}
+
+/// Runtime bounds for a shell call and the job it may become.
+///
+/// A request of `0` asks for no bound. When `allow_indefinite` is off, the
+/// default bound is applied instead, which keeps a hung call distinguishable
+/// from one that is still working. A host that turns it on gets unbounded
+/// calls; the process remains cancellable and its process group is still
+/// killed on cancel or timeout.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellLimitsConfig {
+    /// Whether a request of `0` runs without a bound.
+    pub allow_indefinite: bool,
+    /// Bound used when the request asks for none, in milliseconds.
+    pub default_timeout_ms: u64,
+    /// Ceiling for a requested bound, in milliseconds.
+    pub max_timeout_ms: u64,
+}
+
+impl Default for ShellLimitsConfig {
+    fn default() -> Self {
+        Self {
+            allow_indefinite: true,
+            default_timeout_ms: DEFAULT_SHELL_DEFAULT_TIMEOUT_MS,
+            max_timeout_ms: DEFAULT_SHELL_MAX_TIMEOUT_MS,
         }
     }
 }

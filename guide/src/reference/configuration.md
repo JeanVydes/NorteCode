@@ -170,6 +170,9 @@ RAEP sessions use the RFC `job_turn_policy` session option instead: `always`
 | `auto_turn_on_job_end` | `false` | Start a turn when a detached shell or subagent finishes. |
 | `disabled` | `[]` | Tools a new session does not get, by model name; frozen at creation. |
 | `command_max_model_bytes` | `131072` | Bytes of each `shell` stream that reach the model; range `1024`–`1048576`. |
+| `shell_limits.allow_indefinite` | `true` | Grant `timeout_ms: 0` as an unbounded call; detached jobs use the same setting. |
+| `shell_limits.default_timeout_ms` | `120000` | Bound used when no time is asked for, or zero is asked for while indefinite runs are off. |
+| `shell_limits.max_timeout_ms` | `600000` | Ceiling for a requested bound; larger requests are clamped. |
 | `confinement.workspace_only` | `false` | Confine tool paths to the workspace. |
 | `confinement.sandbox.enabled` | `false` | Wrap commands in the OS sandbox. |
 | `confinement.sandbox.network` | `false` | Allow network in the sandbox. |

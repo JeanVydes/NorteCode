@@ -8506,6 +8506,34 @@ fn service_with(config: Config) -> Arc<Service> {
 }
 
 #[tokio::test]
+async fn shell_limits_from_config_reach_the_registered_tool() {
+    let mut config = Config::default();
+    config.tools.shell_limits = norte_code_protocol::config::ShellLimitsConfig {
+        allow_indefinite: false,
+        default_timeout_ms: 50,
+        max_timeout_ms: 5_000,
+    };
+    let service = service_with(config);
+    let registry = service.tools(None).expect("registry");
+    let shell = registry
+        .get(&norte::ToolName::new("shell").expect("name"))
+        .expect("shell is registered");
+    let context = ToolContext::new().with_call(CallId::new());
+    let output = shell
+        .execute(
+            &context,
+            &serde_json::json!({"script": "sleep 2", "timeout_ms": 0}),
+        )
+        .await
+        .expect("tool result");
+    let structured = output.structured.expect("structured");
+    assert_eq!(
+        structured["code"], "timeout",
+        "the configured refusal and default bound reached the tool: {structured}"
+    );
+}
+
+#[tokio::test]
 async fn the_tool_list_is_sorted_so_a_count_and_a_reading_agree() {
     let statuses = service().tool_rules(None);
     assert!(!statuses.is_empty(), "the registry has tools");

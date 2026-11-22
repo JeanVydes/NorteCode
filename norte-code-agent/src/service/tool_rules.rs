@@ -4,6 +4,7 @@
 //! behaviour here while the state stays in one place.
 
 use std::sync::{Arc, PoisonError};
+use std::time::Duration;
 
 use norte::{AnyFunction, ToolArgs, ToolDeclaration, ToolRegistry};
 use norte_code_protocol::skills::{
@@ -149,12 +150,15 @@ impl Service {
     ) -> Result<(), ServiceError> {
         let environment = ToolEnvironment::from_process();
         let env = environment.variables();
-        // Detached jobs are bounded too: RAEP requires every job to have a
-        // runtime ceiling, and a requested zero falls back to the executor's
-        // default timeout rather than creating an unbounded process.
+        // One set of limits for both shapes: the host's config decides whether
+        // a requested zero is granted, and the detached job reports that same
+        // decision in its limits.
+        let configured = self.config().tools.shell_limits;
         let limits = ShellLimits {
             max_model_bytes: self.config().tools.command_max_model_bytes,
-            allow_indefinite: false,
+            allow_indefinite: configured.allow_indefinite,
+            default_timeout: Duration::from_millis(configured.default_timeout_ms),
+            max_timeout: Duration::from_millis(configured.max_timeout_ms),
             ..ShellLimits::default()
         };
         let secrets = self

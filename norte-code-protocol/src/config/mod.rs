@@ -47,8 +47,9 @@ pub use plugins::{PluginPolicies, PluginPolicyConfig, allows_user_messages};
 pub use service::ServiceConfig;
 pub use tools::{
     ConfinementConfig, DEFAULT_COMMAND_MAX_MODEL_BYTES, DEFAULT_PLUGIN_MESSAGE_MAX_BYTES,
-    DEFAULT_PLUGIN_MESSAGES_PER_TURN, PluginMessagesConfig, SandboxConfig, SkillsConfig,
-    ToolsConfig,
+    DEFAULT_PLUGIN_MESSAGES_PER_TURN, DEFAULT_SHELL_DEFAULT_TIMEOUT_MS,
+    DEFAULT_SHELL_MAX_TIMEOUT_MS, MAX_SHELL_TIMEOUT_MS, PluginMessagesConfig, SandboxConfig,
+    ShellLimitsConfig, SkillsConfig, ToolsConfig,
 };
 
 /// The only config schema revision this build understands.
