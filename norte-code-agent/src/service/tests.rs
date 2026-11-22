@@ -8803,6 +8803,21 @@ async fn a_withheld_tool_is_not_registered_at_all() {
     assert!(names.iter().any(|name| name == "write"), "{names:?}");
 }
 
+#[tokio::test]
+async fn the_host_does_not_register_the_browser_tool() {
+    let service = service_with(config());
+    let registry = service.tools(None).expect("registry");
+    let names: Vec<String> = registry
+        .specs()
+        .iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+    assert!(
+        !names.iter().any(|name| name == "browser_use"),
+        "browser automation is a plugin now: {names:?}"
+    );
+}
+
 /// A scripted model that answers one text per turn, for a test that needs its
 /// own config rather than the shared one.
 #[tokio::test]
@@ -9427,10 +9442,6 @@ async fn a_child_session_never_sees_the_subagent_tool() {
     assert!(
         !child_names.contains(&"ask_user"),
         "the child never has ask_user: {child_names:?}"
-    );
-    assert!(
-        !child_names.contains(&"browser_use"),
-        "the child never has browser_use: {child_names:?}"
     );
     assert!(
         child_names.contains(&"read"),

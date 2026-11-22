@@ -35,7 +35,6 @@ use super::mcp::McpServers;
 use super::plans::PlanRepository;
 use super::prompt::{compose_system_prompt, load_project_instructions};
 use super::questions::DirectoryQuestions;
-use super::screenshots::{ScreenshotInterceptor, Screenshots};
 use super::skills::{collect_secrets, discover_skills};
 use super::steering::{Steering, SteeringInterceptor};
 use super::tooling::{ToolActivity, edit_source};
@@ -236,7 +235,6 @@ impl Service {
             cancels: Mutex::new(BTreeMap::new()),
             next_cancel_generation: AtomicU64::new(1),
             steering: Arc::new(Steering::default()),
-            screenshots: Arc::new(Screenshots::default()),
             jobs: Arc::new(JobRegistry::default()),
             detaches: Arc::new(DetachRegistry::default()),
             interceptors: Vec::new(),
@@ -434,13 +432,6 @@ impl Service {
                 interceptors.push(Arc::new(ToolRuleInterceptor::new(
                     Arc::clone(&self.approval_rules),
                     Arc::clone(&self.activity),
-                )));
-                // Read from the spec the engine was built with: never
-                // rebuilt, so the check the interceptor makes and the
-                // capabilities the model is handed are the same ones.
-                interceptors.push(Arc::new(ScreenshotInterceptor::new(
-                    Arc::clone(&self.screenshots),
-                    &spec.capabilities,
                 )));
                 interceptors.extend(self.interceptors.iter().cloned());
                 interceptors

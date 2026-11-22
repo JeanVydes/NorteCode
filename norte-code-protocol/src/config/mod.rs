@@ -44,8 +44,7 @@ pub use paths::{
 };
 pub use service::ServiceConfig;
 pub use tools::{
-    ConfinementConfig, DEFAULT_COMMAND_MAX_MODEL_BYTES, SandboxConfig, ScreenshotConfig,
-    SkillsConfig, ToolsConfig,
+    ConfinementConfig, DEFAULT_COMMAND_MAX_MODEL_BYTES, SandboxConfig, SkillsConfig, ToolsConfig,
 };
 
 /// The only config schema revision this build understands.

@@ -88,7 +88,7 @@ or fix.
 | `extensions` | object | `{}` | Vendor request fields keyed `<wire-family>:<dotted.path>`. |
 | `cost` | object | `{"show":true}` | Whether to display reported cost. |
 | `budgets` | object | all `null` | Optional message, session and daily limits. |
-| `tools` | object | see below | Tool switches, confinement and screenshots. |
+| `tools` | object | see below | Tool switches and confinement. |
 | `skills` | object | see below | Agent Skills discovery and execution. |
 | `mcpServers` | object | `{}` | MCP servers whose tools the agent may call. |
 
@@ -302,9 +302,6 @@ The CLI-only file contains:
 | `confinement.sandbox.enabled` | boolean | `false` | Run `command` inside bubblewrap (Linux) or `sandbox-exec` (macOS). |
 | `confinement.sandbox.network` | boolean | `false` | Allow network access inside the sandbox. |
 | `confinement.sandbox.writable` | array of paths | `[]` | Extra writable directories besides the workspace. Relative paths resolve against the workspace; missing paths are ignored. |
-| `screenshots.enabled` | boolean | `true` | Attach a `browser_use` screenshot to the conversation so the model can look at it. |
-| `screenshots.max_dimension` | integer | `1568` | Longest side, in pixels, a screenshot keeps. A larger one is downscaled. |
-| `screenshots.max_bytes` | integer | `4000000` | The largest a screenshot may be after re-encoding, in bytes. |
 
 On Linux the workspace and extras are writable, the rest of the filesystem is
 read-only, `/tmp` is a private tmpfs and the process tree gets new namespaces.
@@ -315,11 +312,6 @@ missing platform binary fails closed; there is no unsandboxed fallback.
 for one run or resume. The two halves of `confinement` are separate: the
 workspace gate is a check on a tool's arguments and the sandbox is an operating
 system isolation of one child process.
-
-`screenshots` promotes a `browser_use` capture out of its text result into an
-image the model can see on every wire. A model that does not take image input is
-not sent it: the capture is dropped with a warning. Setting `enabled` to `false`
-leaves the tool's answer as it was, with the size and no image.
 
 ## `mcpServers`
 

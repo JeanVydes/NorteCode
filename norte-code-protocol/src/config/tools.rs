@@ -20,8 +20,6 @@ pub struct ToolsConfig {
     pub command_max_model_bytes: usize,
     /// How far a tool may reach.
     pub confinement: ConfinementConfig,
-    /// How a browser screenshot reaches the model.
-    pub screenshots: ScreenshotConfig,
     /// Whether a finished job starts a turn by itself.
     ///
     /// A detached shell or subagent reports its result through steering, which
@@ -56,46 +54,8 @@ impl Default for ToolsConfig {
             web_fetch: false,
             command_max_model_bytes: DEFAULT_COMMAND_MAX_MODEL_BYTES,
             confinement: ConfinementConfig::default(),
-            screenshots: ScreenshotConfig::default(),
             auto_turn_on_job_end: false,
             disabled: Vec::new(),
-        }
-    }
-}
-
-/// Longest side, in pixels, a promoted screenshot keeps.
-const DEFAULT_SCREENSHOT_MAX_DIMENSION: u32 = 1568;
-/// The largest a promoted screenshot may be after re-encoding.
-const DEFAULT_SCREENSHOT_MAX_BYTES: u64 = 4_000_000;
-
-/// How a browser screenshot reaches the model.
-///
-/// `browser_use` answers with its capture as base64 inside the tool result, and
-/// a tool result carries text only on the chat completions wire, so the image
-/// never reached the model: it was told how many bytes there were and nothing
-/// else. The host promotes the capture into a user message, which carries an
-/// image on every wire — this is what bounds, and what can turn off, that
-/// promotion.
-///
-/// Turning it off leaves the tool's answer exactly as it is: the model is still
-/// told that a screenshot was taken and how big it is, and never sees it.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ScreenshotConfig {
-    /// Whether a capture becomes an image the model can look at.
-    pub enabled: bool,
-    /// Longest side, in pixels, a capture keeps. A larger one is downscaled.
-    pub max_dimension: u32,
-    /// The largest a capture may be after re-encoding, in bytes.
-    pub max_bytes: u64,
-}
-
-impl Default for ScreenshotConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_dimension: DEFAULT_SCREENSHOT_MAX_DIMENSION,
-            max_bytes: DEFAULT_SCREENSHOT_MAX_BYTES,
         }
     }
 }

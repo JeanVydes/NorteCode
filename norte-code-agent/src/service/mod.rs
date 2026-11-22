@@ -34,7 +34,6 @@ pub mod pins;
 mod prompt;
 mod questions;
 mod sandbox;
-mod screenshots;
 mod session_children;
 mod session_export;
 mod session_lifecycle;
@@ -86,7 +85,6 @@ use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec};
 use crate::telemetry::Telemetry;
 
-use self::screenshots::Screenshots;
 use self::session_record::{ChildSessionMetadata, SessionRecord};
 use self::steering::{Steered, Steering};
 use self::subagents::{MAX_DELEGATION_DEPTH, SubagentOutcome, SubagentRequest, SubagentRunner};
@@ -233,8 +231,6 @@ pub struct Service {
     next_cancel_generation: AtomicU64,
     /// The steering messages the running turns have not reached.
     steering: Arc<Steering>,
-    /// The browser screenshots waiting to be attached to the next request.
-    screenshots: Arc<Screenshots>,
     /// The shell calls running in the background, by job id.
     jobs: Arc<JobRegistry>,
     /// The detach token of the call each session's turn is waiting on.
@@ -420,7 +416,7 @@ impl Service {
             .unwrap_or_default();
         let mut disabled = parent_disabled;
         disabled.extend(target_config.tools.disabled.iter().cloned());
-        disabled.extend(["ask_user".to_owned(), "browser_use".to_owned()]);
+        disabled.extend(["ask_user".to_owned()]);
         // Nesting is bounded by the depth check in `spawn_agent` and, for the
         // internal `subagent` tool, by not registering it on a child at all:
         // a child keeps `spawn_agent` (which enforces the depth) but never

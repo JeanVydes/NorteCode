@@ -8,6 +8,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Browser automation is no longer built into the agent. `browser_use` now comes
+  from the `essentials-plugin-browser` plugin, along with the Norte `norte-tools`
+  implementation, and the `tools.screenshots` configuration block is gone.
 - Session-scoped controls live in the session header: the model the session
   runs on, and tabs for Transcript, Subagents, Jobs and Telemetry. The
   Providers page no longer switches a session's model, the Subagents page is

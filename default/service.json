@@ -53,11 +53,6 @@
             "writable": []
           }
         },
-        "screenshots": {
-          "enabled": true,
-          "max_dimension": 1568,
-          "max_bytes": 4000000
-        },
         "auto_turn_on_job_end": false,
         "disabled": []
       },
@@ -120,11 +115,6 @@
             "network": false,
             "writable": []
           }
-        },
-        "screenshots": {
-          "enabled": true,
-          "max_dimension": 1568,
-          "max_bytes": 4000000
         },
         "auto_turn_on_job_end": false,
         "disabled": []

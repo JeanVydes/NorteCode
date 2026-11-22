@@ -10,9 +10,7 @@ use norte_code_protocol::skills::{
     SkillResourceTool, SkillScriptConfig, SkillScriptTool, SkillTool,
 };
 use norte_code_protocol::tools::{AskUserTool, GrepTool, TodoTool, WebFetchTool};
-use norte_tools::{
-    BrowserTool, EditTool, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool,
-};
+use norte_tools::{EditTool, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool};
 
 use norte_code_wire::SessionKey;
 
@@ -20,7 +18,6 @@ use crate::ServiceError;
 
 use self::environment::ToolEnvironment;
 
-use self::screenshots::publishing_tool;
 use self::subagents::{SubagentRunner, SubagentTool};
 use background::ShellCalls;
 use effects::journalled;
@@ -131,42 +128,6 @@ where
     static SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     let description = SHELL.get_or_init(|| {
         Box::leak(format!("{}\n\n{}", declaration.description, environment.note()).into_boxed_str())
-    });
-    ToolDeclaration {
-        description,
-        ..declaration
-    }
-}
-
-/// Rebuilds the browser declaration, naming the display it needs.
-///
-/// The tool drives a browser that is already running, so the host has to say
-/// where that browser draws: a session with no display opens no window, and a
-/// model that is not told that keeps asking for a screenshot it cannot take.
-fn with_browser_environment<A>(
-    declaration: ToolDeclaration<A>,
-    environment: &ToolEnvironment,
-) -> ToolDeclaration<A>
-where
-    A: ToolArgs + serde::de::DeserializeOwned + std::fmt::Debug + 'static,
-{
-    static BROWSER: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    let session = environment.display().map_or_else(
-        || {
-            "This host has no graphical session: a browser must be started with \
-             `--remote-debugging-port=9222` by whoever runs the server, and no window is \
-             drawn here. If the CDP endpoint is not answering, say so instead of retrying."
-                .to_owned()
-        },
-        |display| {
-            format!(
-                "This host draws on `{display}`. The tool drives a browser that is already \
-                 running with `--remote-debugging-port=9222`; it does not start one."
-            )
-        },
-    );
-    let description = BROWSER.get_or_init(|| {
-        Box::leak(format!("{}\n\n{session}", declaration.description).into_boxed_str())
     });
     ToolDeclaration {
         description,
@@ -319,27 +280,6 @@ impl Service {
             &disabled,
             PlanTool::new(Arc::clone(&self.plans), Arc::clone(&self.questions)).into_declaration(),
         )?;
-        // The browser's capture is promoted into a user message: the tool
-        // answers with the PNG as base64 in its result, and a tool result
-        // carries text only on the chat completions wire. The wrapper reads the
-        // capture out before the model sees the answer, and the interceptor
-        // below attaches it.
-        let browser = with_browser_environment(
-            BrowserTool::new().into_declaration(),
-            &ToolEnvironment::from_process(),
-        );
-        let browser = if self.config().tools.screenshots.enabled {
-            publishing_tool(
-                browser,
-                Arc::clone(&self.screenshots),
-                Arc::clone(&self.blobs),
-                screenshots::preprocessor(&self.config().tools.screenshots),
-            )
-        } else {
-            browser
-        };
-        self.register_tool(&mut tools, &disabled, browser)?;
-
         self.register_shell(&mut tools, &disabled)?;
         self.register_tool(
             &mut tools,
