@@ -29,6 +29,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   and clicking the header or pressing Enter toggles between the compact window
   and every retained line.
 
+### Fixed
+
+- Long shell output lines wrap at the console width instead of being cut off.
+  The height reserved for a console counts wrapped rows, so expansion and
+  scrolling stay in sync with what is painted.
+- Scrolling into the middle of a tall transcript item no longer leaves its
+  scrolled-off top rows pinned over the following items. Partially visible
+  items render into a scratch buffer and only their visible rows are blitted.
+- The thinking indicator no longer paints over transcript rows when the view is
+  scrolled away from the tail.
+
 ### Changed
 
 - The configuration reference now matches the defaults in code for

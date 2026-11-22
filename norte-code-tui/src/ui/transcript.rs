@@ -29,6 +29,15 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 const BLOCK_GAP: u16 = 1;
 const NOTICE_PREFIX_CHARS: usize = 11;
 
+#[derive(Clone, Copy)]
+struct ItemPaint<'a> {
+    clip: u16,
+    diff_mode: crate::diff::DiffMode,
+    focused: bool,
+    doc: Option<&'a super::markdown::Markdown>,
+    theme: &'a Theme,
+}
+
 /// Execution state of a tool block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -669,9 +678,10 @@ impl Transcript {
                 }
             }
             Item::Tool { diff, console, .. } => {
+                let console_width = u16::try_from(width.saturating_sub(2)).unwrap_or(u16::MAX);
                 let extra = diff.as_ref().map_or(0, |diff| diff.rows(diff_mode) + 2)
                     + console.as_ref().map_or(0, |console| {
-                        console.measure().map_or(2, |(_, height)| height as usize) + 1
+                        usize::from(console.wrapped_height(console_width)) + 1
                     });
                 u16::try_from(extra + 2).unwrap_or(u16::MAX)
             }
@@ -827,7 +837,8 @@ impl Transcript {
             );
         }
         if let Some(console) = console {
-            let rows = console.measure().map_or(2, |(_, height)| height);
+            let console_width = rect.width.saturating_sub(2);
+            let rows = console.wrapped_height(console_width);
             let taken = u16::try_from(diff.as_ref().map_or(0, |diff| diff.rows(diff_mode) + 2))
                 .unwrap_or(0);
             let y = rect.y.saturating_add(1).saturating_add(taken);
@@ -842,6 +853,65 @@ impl Transcript {
                     cx,
                     theme,
                 );
+            }
+        }
+    }
+
+    fn paint_item(
+        item: &mut Item,
+        rect: Rect,
+        buf: &mut Buffer,
+        cx: &mut Context,
+        paint: &ItemPaint<'_>,
+    ) {
+        let theme = paint.theme;
+        match item {
+            Item::User { .. } => {
+                if paint.focused {
+                    buf.set_style(rect, Style::default().bg(theme.secondary));
+                }
+                paint_user(buf, rect, paint.doc, paint.clip, theme);
+            }
+            Item::Assistant { .. } => {
+                if paint.focused {
+                    buf.set_style(rect, Style::default().bg(theme.secondary));
+                }
+                paint_assistant(buf, rect, paint.doc, paint.clip);
+            }
+            Item::Tool { .. } => {
+                Self::paint_tool_item(item, rect, buf, cx, paint.clip, paint.diff_mode, theme);
+            }
+            Item::Notice { text, tone } | Item::Retry { text, tone } => {
+                paint_notice(buf, rect, text, *tone, paint.clip, theme);
+            }
+            Item::Reasoning { text, expanded } => {
+                paint_reasoning(buf, rect, text, *expanded, paint.clip, theme);
+            }
+        }
+    }
+
+    fn blit_visible_rows(
+        source: &Buffer,
+        target: &mut Buffer,
+        content: Rect,
+        screen_y: u16,
+        first_row: u16,
+        rows: u16,
+    ) {
+        for row in 0..rows {
+            for column in 0..content.width {
+                let Some(cell) = source.cell(ratatui::layout::Position::new(
+                    content.x + column,
+                    first_row + row,
+                )) else {
+                    continue;
+                };
+                if let Some(dst) = target.cell_mut(ratatui::layout::Position::new(
+                    content.x + column,
+                    screen_y + row,
+                )) {
+                    *dst = cell.clone();
+                }
             }
         }
     }
@@ -1309,6 +1379,85 @@ impl Transcript {
         self.first_visible = u16::try_from(next.clamp(0, max)).unwrap_or(u16::MAX);
         self.follow_tail = self.first_visible >= self.max_offset();
     }
+
+    fn paint_items(
+        &mut self,
+        area: Rect,
+        content: Rect,
+        buf: &mut Buffer,
+        cx: &mut Context,
+        docs: &[Option<super::markdown::Markdown>],
+        theme: &Theme,
+    ) {
+        let bottom = area.y + area.height;
+        let skip = self.first_visible;
+        let mut row: u16 = 0;
+        for (index, item) in self.items.iter_mut().enumerate() {
+            let height = self.heights[index];
+            let top = row;
+            row += height;
+            if top + height <= skip || top >= skip + area.height {
+                continue;
+            }
+            let screen_y = area.y + top.saturating_sub(skip);
+            let scrolled = skip.saturating_sub(top);
+            let visible = height.saturating_sub(scrolled).min(area.height);
+            let paint = ItemPaint {
+                clip: bottom,
+                diff_mode: self.diff_mode,
+                focused: self.focused_item == Some(index),
+                doc: docs.get(index).and_then(Option::as_ref),
+                theme,
+            };
+            if scrolled == 0 {
+                Self::paint_item(
+                    item,
+                    Rect {
+                        y: screen_y,
+                        height,
+                        ..content
+                    },
+                    buf,
+                    cx,
+                    &paint,
+                );
+                continue;
+            }
+            let scratch_height = height.min(scrolled.saturating_add(area.height));
+            let scratch_area = Rect {
+                x: content.x,
+                y: 0,
+                width: content.width,
+                height: scratch_height,
+            };
+            let mut scratch = Buffer::empty(scratch_area);
+            let mut scratch_paint = paint;
+            scratch_paint.clip = scratch_height;
+            Self::paint_item(
+                item,
+                Rect {
+                    y: 0,
+                    height,
+                    ..scratch_area
+                },
+                &mut scratch,
+                cx,
+                &scratch_paint,
+            );
+            if let Item::Tool {
+                console: Some(console),
+                ..
+            } = item
+            {
+                console.state.area = Rect {
+                    y: screen_y,
+                    height: visible,
+                    ..content
+                };
+            }
+            Self::blit_visible_rows(&scratch, buf, content, screen_y, scrolled, visible);
+        }
+    }
 }
 
 impl View for Transcript {
@@ -1360,58 +1509,13 @@ impl View for Transcript {
         self.compute_heights(content.width, *theme);
         let row_map = self.build_row_map();
 
-        let bottom = area.y + area.height;
         let docs = std::mem::take(&mut self.docs);
-        let skip = self.first_visible;
-        let mut row: u16 = 0;
-
-        for (index, item) in self.items.iter_mut().enumerate() {
-            let height = self.heights[index];
-            let top = row;
-            row += height;
-            if top + height <= skip || top >= skip + area.height {
-                continue;
-            }
-            let rect_y = area.y + top.saturating_sub(skip);
-            let rect = Rect {
-                y: rect_y,
-                height,
-                ..content
-            };
-            let clip = bottom;
-            match item {
-                Item::User { .. } => {
-                    if self.focused_item == Some(index) {
-                        buf.set_style(rect, Style::default().bg(theme.secondary));
-                    }
-                    paint_user(
-                        buf,
-                        rect,
-                        docs.get(index).and_then(Option::as_ref),
-                        clip,
-                        theme,
-                    );
-                }
-                Item::Assistant { .. } => {
-                    if self.focused_item == Some(index) {
-                        buf.set_style(rect, Style::default().bg(theme.secondary));
-                    }
-                    paint_assistant(buf, rect, docs.get(index).and_then(Option::as_ref), clip);
-                }
-                Item::Tool { .. } => {
-                    Self::paint_tool_item(item, rect, buf, cx, clip, self.diff_mode, theme);
-                }
-                Item::Notice { text, tone } | Item::Retry { text, tone } => {
-                    paint_notice(buf, rect, text, *tone, clip, theme);
-                }
-                Item::Reasoning { text, expanded } => {
-                    paint_reasoning(buf, rect, text, *expanded, clip, theme);
-                }
-            }
-        }
+        self.paint_items(area, content, buf, cx, &docs, theme);
         self.docs = docs;
 
-        if let Some(thinking) = self.thinking {
+        if self.first_visible >= self.max_offset()
+            && let Some(thinking) = self.thinking
+        {
             paint_thinking(buf, content, thinking, theme);
         }
 

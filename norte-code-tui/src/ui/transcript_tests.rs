@@ -411,6 +411,33 @@ fn expanded_shell_output_renders_every_retained_line() {
 }
 
 #[test]
+fn long_shell_output_wraps_to_the_console_width() {
+    use terminalui::{Theme, Tree, node};
+
+    let mut transcript = Transcript::new();
+    transcript.push(Item::Tool {
+        call_id: "call-1".to_string(),
+        name: "shell".to_string(),
+        target: Some("echo long".to_string()),
+        state: super::ToolState::Done,
+        meta: None,
+        diff: None,
+        console: Some(Box::new(
+            Console::new("echo long")
+                .set_lines(vec!["abcdefghijklmnopqrstuvwxyz0123456789".into()]),
+        )),
+    });
+
+    let area = Rect::new(0, 0, 24, 10);
+    let mut tree = Tree::new(node("stream", transcript));
+    let mut buffer = Buffer::empty(area);
+    tree.render(area, &mut buffer, &Theme::default());
+    let text = buffer_text(&buffer, area);
+    assert!(text.contains("abcdefghijklmnopqrstu"), "got: {text}");
+    assert!(text.contains("vwxyz0123456789"), "got: {text}");
+}
+
+#[test]
 fn shell_header_counts_new_output_as_it_arrives() {
     use terminalui::{Theme, Tree, node};
 
@@ -844,6 +871,87 @@ fn user_and_model_text_use_the_active_theme_foreground() {
             .unwrap_or_else(|| panic!("no painted cell for {word}"));
         assert_eq!(cell.fg, theme.foreground, "contrast for {word}");
     }
+}
+
+#[test]
+fn scrolling_into_a_long_item_shows_its_middle_rows_once() {
+    use terminalui::{Theme, Tree, node};
+
+    let mut transcript = Transcript::new();
+    let text = (0..20)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    transcript.push(Item::Notice {
+        text,
+        tone: Tone::Neutral,
+    });
+    transcript.push(Item::Notice {
+        text: "FOLLOWER".to_owned(),
+        tone: Tone::Warn,
+    });
+
+    let area = Rect::new(0, 0, 60, 8);
+    let theme = Theme::default();
+    let mut tree = Tree::new(node("stream", transcript));
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+
+    {
+        let stream = tree.find_mut::<Transcript>("stream").expect("stream");
+        stream.follow_tail = false;
+        stream.first_visible = 16;
+    }
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let lines: Vec<String> = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect();
+
+    assert!(lines[0].contains("line 16"), "got: {lines:?}");
+    assert!(lines[1].contains("line 17"), "got: {lines:?}");
+    assert!(lines[5].contains("FOLLOWER"), "got: {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("line 0")),
+        "scrolled-off row stayed pinned: {lines:?}"
+    );
+}
+
+#[test]
+fn the_thinking_row_does_not_cover_items_when_scrolled_up() {
+    use terminalui::{Theme, Tree, node};
+
+    let mut transcript = Transcript::new();
+    for index in 0..40 {
+        transcript.push(Item::Notice {
+            text: format!("row {index}"),
+            tone: Tone::Neutral,
+        });
+    }
+    transcript.start_thinking();
+
+    let area = Rect::new(0, 0, 60, 6);
+    let theme = Theme::default();
+    let mut tree = Tree::new(node("stream", transcript));
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let bottom_text = buffer_text(&buf, area);
+    assert!(bottom_text.contains("thinking"), "got: {bottom_text}");
+
+    {
+        let stream = tree.find_mut::<Transcript>("stream").expect("stream");
+        stream.follow_tail = false;
+        stream.first_visible = 0;
+    }
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let top_text = buffer_text(&buf, area);
+    assert!(!top_text.contains("thinking"), "got: {top_text}");
+    assert!(top_text.contains("row 0"), "got: {top_text}");
 }
 
 #[test]
