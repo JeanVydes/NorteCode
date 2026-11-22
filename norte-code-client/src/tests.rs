@@ -85,6 +85,36 @@ fn decodes_history_pages_with_flat_or_raep_content() {
 }
 
 #[test]
+fn decodes_history_origin_as_provenance() {
+    let payload = serde_json::json!({
+        "items": [{
+            "role": "user",
+            "kind": "user",
+            "content": "a screenshot",
+            "timestamp": 10,
+            "origin": {"plugin_id": "browser", "call_id": "call_1"}
+        }],
+        "has_more": false
+    });
+    let frame = frame(
+        FrameType::Standard(StandardFrameType::HistoryPage),
+        "session-1",
+        payload,
+    );
+    let event = server_event_from_frame(&frame)
+        .expect("history page")
+        .expect("history page event");
+
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::HistoryPage { ref items, .. }
+            if items.len() == 1
+                && items[0].provenance
+                    == Some(serde_json::json!({"plugin_id": "browser", "call_id": "call_1"}))
+    ));
+}
+
+#[test]
 fn rejects_an_unsupported_wire_version() {
     let mut frame = frame(
         FrameType::Standard(StandardFrameType::TokenDelta),

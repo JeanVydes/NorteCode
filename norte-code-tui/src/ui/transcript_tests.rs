@@ -288,6 +288,28 @@ fn history_item(id: &str, kind: &str, content: &str) -> norte_code_wire::History
 }
 
 #[test]
+fn replayed_plugin_messages_show_their_origin() {
+    let mut transcript = Transcript::new();
+    transcript.replace_history(vec![HistoryItem {
+        id: "message-1".to_owned(),
+        kind: "user".to_owned(),
+        content: "a screenshot".to_owned(),
+        created_at: 0,
+        turn_id: None,
+        role: HistorySpeaker::User,
+        provenance: Some(serde_json::json!({
+            "plugin_id": "browser",
+            "call_id": "call_1",
+        })),
+    }]);
+
+    let Some(Item::User { text, .. }) = transcript.items.first() else {
+        panic!("user row");
+    };
+    assert_eq!(text, "a screenshot\nfrom plugin browser");
+}
+
+#[test]
 fn replayed_shell_calls_keep_the_command_and_its_result() {
     let mut transcript = Transcript::new();
     transcript.replace_history(vec![

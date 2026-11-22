@@ -12,7 +12,7 @@ use norte_code_protocol::skills::{
 use norte_code_protocol::tools::{AskUserTool, GrepTool, TodoTool, WebFetchTool};
 use norte_tools::{EditTool, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool};
 
-use norte_code_wire::SessionKey;
+use norte_code_wire::{PluginId, SessionKey};
 
 use crate::ServiceError;
 
@@ -23,6 +23,7 @@ use background::ShellCalls;
 use effects::journalled;
 use manage::ManageJobs;
 use plans::PlanTool;
+use plugin_messages::PluginMessagePolicy;
 use sandbox::sandboxed_command;
 use tooling::{RecordingFunction, recording_tool};
 use workspace::{Confined, PathKind, Workspace, confined};
@@ -376,13 +377,28 @@ impl Service {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        let origins = self
+            .plugin_tool_origins
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let policy = PluginMessagePolicy::new(&self.config());
         for tool in plugin_tools {
             if withheld(&disabled, tool.name()) {
                 continue;
             }
+            let plugin_id = PluginId::new(
+                origins
+                    .get(tool.name())
+                    .cloned()
+                    .unwrap_or_else(|| tool.name().to_owned()),
+            );
             tools.register(Arc::new(RecordingFunction::new(
                 tool,
                 Arc::clone(&self.activity),
+                Arc::clone(&self.plugin_messages),
+                plugin_id,
+                policy.clone(),
             )))?;
         }
         Ok(tools)

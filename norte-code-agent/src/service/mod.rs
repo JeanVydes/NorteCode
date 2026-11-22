@@ -31,6 +31,9 @@ pub use models::ReasoningError;
 mod plans;
 pub use plans::PlanError;
 pub mod pins;
+mod plugin_message_interceptor;
+mod plugin_message_provenance;
+mod plugin_messages;
 mod prompt;
 mod questions;
 mod sandbox;
@@ -97,6 +100,7 @@ use mapping::single;
 use mcp::McpServers;
 use models::resolve_reasoning;
 use plans::PlanRepository;
+use plugin_messages::PluginMessages;
 use tooling::ToolActivity;
 
 pub use approvals::{RuleScope, ToolStatus};
@@ -207,6 +211,8 @@ pub struct Service {
     plugin_tools: RwLock<Vec<Arc<dyn norte::AnyFunction>>>,
     /// Which plugin declared each plugin tool, by tool name.
     plugin_tool_origins: RwLock<BTreeMap<String, String>>,
+    /// Plugin message drafts accepted from tool results and waiting to be applied.
+    plugin_messages: Arc<PluginMessages>,
     default_spec: RwLock<Option<ModelSpec>>,
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,
@@ -736,5 +742,8 @@ impl SubagentRunner for SubagentRunnerImpl {
     }
 }
 
+#[cfg(test)]
+#[path = "plugin_messages_tests.rs"]
+mod plugin_messages_tests;
 #[cfg(test)]
 mod tests;

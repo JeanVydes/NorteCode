@@ -401,6 +401,64 @@ fn a_response_format_rejects_an_unknown_field() {
 }
 
 #[test]
+fn a_plugin_message_event_round_trips() {
+    let event = ServerEvent::new(
+        9,
+        Some(SessionKey::new("s")),
+        ServerEventKind::PluginMessageInjected {
+            plugin_id: PluginId::new("browser"),
+            call_id: "call_1".to_owned(),
+            parts: 2,
+        },
+    );
+    let json = serde_json::to_string(&event).expect("serialize a plugin message event");
+    assert!(json.contains(r#""event":"plugin_message_injected""#));
+    let back: ServerEvent = serde_json::from_str(&json).expect("a plugin message event reads back");
+    match back.kind {
+        ServerEventKind::PluginMessageInjected {
+            plugin_id,
+            call_id,
+            parts,
+        } => {
+            assert_eq!(plugin_id, PluginId::new("browser"));
+            assert_eq!(call_id, "call_1");
+            assert_eq!(parts, 2);
+        }
+        other => panic!("expected a plugin message event, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_plugin_message_rejection_round_trips() {
+    let event = ServerEvent::new(
+        10,
+        Some(SessionKey::new("s")),
+        ServerEventKind::PluginMessageRejected {
+            plugin_id: PluginId::new("browser"),
+            call_id: "call_1".to_owned(),
+            reason: PluginMessageRejection::MediaNotAllowed,
+        },
+    );
+    let json = serde_json::to_string(&event).expect("serialize a plugin message rejection");
+    assert!(json.contains(r#""event":"plugin_message_rejected""#));
+    assert!(json.contains(r#""reason":"media_not_allowed""#));
+    let back: ServerEvent =
+        serde_json::from_str(&json).expect("a plugin message rejection reads back");
+    match back.kind {
+        ServerEventKind::PluginMessageRejected {
+            plugin_id,
+            call_id,
+            reason,
+        } => {
+            assert_eq!(plugin_id, PluginId::new("browser"));
+            assert_eq!(call_id, "call_1");
+            assert_eq!(reason, PluginMessageRejection::MediaNotAllowed);
+        }
+        other => panic!("expected a plugin message rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_pending_override_round_trips() {
     let pending = PendingOverride {
         model: Some(PendingModel {

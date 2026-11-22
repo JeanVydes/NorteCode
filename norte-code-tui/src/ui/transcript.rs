@@ -116,6 +116,11 @@ fn parse_turn(turn_id: Option<&str>) -> Option<u64> {
     turn_id.and_then(|id| id.strip_prefix("turn_").unwrap_or(id).parse().ok())
 }
 
+fn provenance_label(provenance: Option<&serde_json::Value>) -> Option<String> {
+    let plugin_id = provenance?.get("plugin_id")?.as_str()?;
+    Some(format!("from plugin {plugin_id}"))
+}
+
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];
@@ -399,10 +404,17 @@ impl Transcript {
         let mut last_shell: Option<usize> = None;
         for item in items {
             match item.kind.as_str() {
-                "user" => self.items.push(Item::User {
-                    text: item.content,
-                    turn: parse_turn(item.turn_id.as_deref()),
-                }),
+                "user" => {
+                    let text = match provenance_label(item.provenance.as_ref()) {
+                        Some(label) if item.content.is_empty() => label,
+                        Some(label) => format!("{}\n{label}", item.content),
+                        None => item.content,
+                    };
+                    self.items.push(Item::User {
+                        text,
+                        turn: parse_turn(item.turn_id.as_deref()),
+                    });
+                }
                 "assistant" => self.items.push(Item::Assistant {
                     text: item.content,
                     turn: parse_turn(item.turn_id.as_deref()),

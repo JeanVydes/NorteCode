@@ -38,6 +38,67 @@ impl fmt::Display for SessionKey {
     }
 }
 
+/// The name a loaded plugin reports to the host.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PluginId(String);
+
+impl PluginId {
+    /// Wraps a plugin name.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The name as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PluginId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Why the host did not inject a message a plugin requested.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginMessageRejection {
+    /// Plugin messages are switched off globally.
+    Disabled,
+    /// The named plugin has no permission to ask for messages.
+    PluginNotAllowed,
+    /// The draft carried media while media is switched off.
+    MediaNotAllowed,
+    /// The draft was larger than the configured byte cap.
+    TooLarge,
+    /// The model does not accept one of the draft's modalities.
+    UnsupportedModality,
+    /// The turn already injected its allowed number of plugin messages.
+    LimitReached,
+    /// The reserved envelope could not be read.
+    InvalidEnvelope,
+}
+
+impl PluginMessageRejection {
+    /// A short reason for host-side display.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "plugin messages are disabled",
+            Self::PluginNotAllowed => "the plugin has no message permission",
+            Self::MediaNotAllowed => "media is not allowed in plugin messages",
+            Self::TooLarge => "the plugin message is too large",
+            Self::UnsupportedModality => "the model does not accept the message parts",
+            Self::LimitReached => "the turn reached its plugin message limit",
+            Self::InvalidEnvelope => "the plugin returned an invalid host envelope",
+        }
+    }
+}
+
 /// One piece of media travelling with a message.
 ///
 /// Local clients may provide `path`; remote clients should provide `blob` after

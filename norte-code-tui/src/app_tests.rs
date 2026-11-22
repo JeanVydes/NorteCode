@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use norte_code_wire::{ServerEventKind, SessionKey, UploadReceipt};
+use norte_code_wire::{PluginId, ServerEventKind, SessionKey, UploadReceipt};
 use terminalui::{InputEvent, Theme, Tree, node};
 use tokio::sync::mpsc;
 
@@ -271,6 +271,51 @@ fn a_session_todos_event_updates_the_rail_model() {
     assert_eq!(model.todos.len(), 1);
     assert_eq!(model.todos[0].content, "write tests");
     assert_eq!(model.todos[0].status, TodoStatus::InProgress);
+}
+
+#[test]
+fn a_plugin_message_event_is_drawn_in_the_transcript() {
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = UiModel::detached();
+    let mut commands = None;
+    let event = norte_code_wire::ServerEvent {
+        request_id: 1,
+        session: Some(SessionKey::new("session_1")),
+        kind: ServerEventKind::PluginMessageInjected {
+            plugin_id: PluginId::new("browser"),
+            call_id: "call_1".to_owned(),
+            parts: 2,
+        },
+    };
+
+    fold(&event, &mut tree, &mut model, &mut commands);
+
+    let transcript = tree.find::<ui::Transcript>("stream").expect("stream");
+    let snapshot = serde_json::to_string(transcript).expect("transcript snapshot");
+    assert!(snapshot.contains("plugin browser added a message with 2 part(s)"));
+}
+
+#[test]
+fn a_plugin_message_rejection_is_drawn_as_a_warning() {
+    let mut tree = ui::build_tree(&UiModel::detached());
+    let mut model = UiModel::detached();
+    let mut commands = None;
+    let event = norte_code_wire::ServerEvent {
+        request_id: 1,
+        session: Some(SessionKey::new("session_1")),
+        kind: ServerEventKind::PluginMessageRejected {
+            plugin_id: PluginId::new("browser"),
+            call_id: "call_1".to_owned(),
+            reason: norte_code_wire::PluginMessageRejection::MediaNotAllowed,
+        },
+    };
+
+    fold(&event, &mut tree, &mut model, &mut commands);
+
+    let transcript = tree.find::<ui::Transcript>("stream").expect("stream");
+    let snapshot = serde_json::to_string(transcript).expect("transcript snapshot");
+    assert!(snapshot.contains("media is not allowed in plugin messages"));
+    assert!(snapshot.contains("warn"));
 }
 
 #[test]

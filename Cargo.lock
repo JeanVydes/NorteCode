@@ -1483,7 +1483,7 @@ dependencies = [
 [[package]]
 name = "norte"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "norte-anthropic",
  "norte-core",
@@ -1498,7 +1498,7 @@ dependencies = [
 [[package]]
 name = "norte-anthropic"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1521,6 +1521,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "norte",
+ "norte-code-plugin-api",
  "norte-code-protocol",
  "norte-code-wire",
  "norte-mcp",
@@ -1573,12 +1574,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "norte-code-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "norte",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "norte-code-plugin-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "libloading",
  "norte",
+ "norte-code-plugin-api",
  "norte-code-wire",
  "schemars",
  "serde",
@@ -1695,7 +1706,7 @@ dependencies = [
 [[package]]
 name = "norte-core"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1718,7 +1729,7 @@ dependencies = [
 [[package]]
 name = "norte-gemini"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1735,7 +1746,7 @@ dependencies = [
 [[package]]
 name = "norte-http"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1755,7 +1766,7 @@ dependencies = [
 [[package]]
 name = "norte-macros"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1765,7 +1776,7 @@ dependencies = [
 [[package]]
 name = "norte-mcp"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1783,7 +1794,7 @@ dependencies = [
 [[package]]
 name = "norte-openai"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1800,7 +1811,7 @@ dependencies = [
 [[package]]
 name = "norte-testing"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1814,7 +1825,7 @@ dependencies = [
 [[package]]
 name = "norte-tools"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#eebd9800f43eaef53562aedd78e61169500a140d"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#3792594ce9bd6ccc098de7523e1ca51e736b984a"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1932,7 +1943,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

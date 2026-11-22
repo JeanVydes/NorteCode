@@ -11,6 +11,7 @@ use crate::provider::ModelSpec;
 use crate::runtime::Harness;
 
 use super::compaction::used_context;
+use super::plugin_message_provenance::PluginMessageProvenance;
 use super::turn_helpers::{replay_text, role_name};
 use super::{Service, ServiceError};
 /// The session's accumulated usage, as the event a resuming client reads.
@@ -189,7 +190,11 @@ impl Service {
                     .filter(|(end, _)| *end >= index)
                     .min_by_key(|(end, _)| *end)
                     .map(|(_, turn)| *turn);
-                let provenance = node.metadata.get("provenance").cloned();
+                let provenance = node
+                    .metadata
+                    .get("provenance")
+                    .cloned()
+                    .or_else(|| PluginMessageProvenance::from_message(&node.message));
                 for (kind, text) in replay_text(&node.message) {
                     replayed.push((
                         turn,

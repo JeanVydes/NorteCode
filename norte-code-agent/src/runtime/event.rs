@@ -9,6 +9,7 @@ use norte::domain::part::Part;
 use norte::id::{CallId, Digest, SessionId, ToolName};
 use norte::model::GenerationParams;
 use norte::tool::ToolStream;
+use norte_code_wire::{PluginId, PluginMessageRejection};
 
 /// A streamed delta as observers see it. Continuity material is reduced to its
 /// length: token payloads never enter the event channel.
@@ -260,6 +261,28 @@ pub enum EngineEvent {
         /// What went wrong.
         message: String,
     },
+    /// A plugin asked the host to add a user-role message.
+    PluginMessageInjected {
+        /// The session the message joined.
+        session: SessionId,
+        /// The plugin that supplied the message.
+        plugin_id: PluginId,
+        /// The call whose tool result carried the effect.
+        call_id: CallId,
+        /// How many parts the message carried.
+        parts: usize,
+    },
+    /// The host refused a plugin's request for a user-role message.
+    PluginMessageRejected {
+        /// The session the message would have joined.
+        session: SessionId,
+        /// The plugin that supplied the message.
+        plugin_id: PluginId,
+        /// The call whose tool result carried the effect.
+        call_id: CallId,
+        /// Why the host refused it.
+        reason: PluginMessageRejection,
+    },
     /// An event a layer published under its own namespace.
     Extension {
         /// The namespace the publisher chose.
@@ -289,7 +312,9 @@ impl EngineEvent {
             | EngineEvent::CommitConflict { session, .. }
             | EngineEvent::LayerShortCircuited { session, .. }
             | EngineEvent::RequestReconstructed { session, .. }
-            | EngineEvent::PrefixInvalidated { session, .. } => Some(*session),
+            | EngineEvent::PrefixInvalidated { session, .. }
+            | EngineEvent::PluginMessageInjected { session, .. }
+            | EngineEvent::PluginMessageRejected { session, .. } => Some(*session),
             EngineEvent::Error { session, .. } => *session,
             EngineEvent::Extension { .. } => None,
         }

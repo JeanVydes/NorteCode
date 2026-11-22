@@ -832,6 +832,24 @@ pub enum ServerEventKind {
         #[serde(default)]
         last: bool,
     },
+    /// A plugin asked the host to add a user-role message.
+    PluginMessageInjected {
+        /// The plugin that supplied the message.
+        plugin_id: PluginId,
+        /// The call whose tool result carried the effect.
+        call_id: String,
+        /// The number of parts in the injected message.
+        parts: usize,
+    },
+    /// The host refused a plugin's request for a user-role message.
+    PluginMessageRejected {
+        /// The plugin that supplied the message.
+        plugin_id: PluginId,
+        /// The call whose tool result carried the effect.
+        call_id: String,
+        /// Why the host refused it.
+        reason: PluginMessageRejection,
+    },
     /// A tool call finished.
     ToolFinished {
         /// The turn.

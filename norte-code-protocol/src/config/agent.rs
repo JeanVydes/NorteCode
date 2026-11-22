@@ -12,8 +12,8 @@ use crate::keys::KeyStore;
 use super::loading::{invalid, merge, read_text, read_value, validate_pair};
 use super::{
     ApiKey, ApprovalsConfig, BudgetsConfig, CONFIG_VERSION, CliConfig, CompactionConfig, Config,
-    ConfigError, CostConfig, Loaded, McpServerConfig, ReasoningConfig, RetryConfig, SkillsConfig,
-    ToolsConfig,
+    ConfigError, CostConfig, Loaded, McpServerConfig, PluginPolicies, ReasoningConfig, RetryConfig,
+    SkillsConfig, ToolsConfig,
 };
 
 /// One server-owned agent definition.
@@ -85,6 +85,9 @@ pub struct Agent {
     pub budgets: BudgetsConfig,
     /// Tool switches.
     pub tools: ToolsConfig,
+    /// Plugin permissions, keyed by the name the plugin reports.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: PluginPolicies,
     /// Agent Skills settings.
     pub skills: SkillsConfig,
     /// MCP servers whose tools the agent may call.
@@ -130,6 +133,7 @@ impl Default for Agent {
             cost: CostConfig::default(),
             budgets: BudgetsConfig::default(),
             tools: ToolsConfig::default(),
+            plugins: BTreeMap::new(),
             skills: SkillsConfig::default(),
             mcp_servers: BTreeMap::new(),
             keys: None,

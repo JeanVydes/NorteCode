@@ -10,6 +10,7 @@ members = [
     "norte-code-wire",
     "norte-code-raep",
     "norte-code-plugin-host",
+    "norte-code-plugin-api",
     "tools/app-smoke",
 ]
 

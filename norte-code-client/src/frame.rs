@@ -67,6 +67,8 @@ pub(crate) struct HistoryItemPayload {
     pub(crate) content: HistoryContentPayload,
     #[serde(default, alias = "created_at")]
     pub(crate) timestamp: i64,
+    #[serde(default)]
+    pub(crate) origin: Option<Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -123,7 +125,7 @@ impl HistoryItemPayload {
             created_at: self.timestamp,
             turn_id: self.turn_id,
             role,
-            provenance: None,
+            provenance: self.origin,
         }
     }
 }

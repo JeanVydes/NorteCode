@@ -8,6 +8,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use norte::{AnyFunction, CallId, FnExecutor, ToolArgs, ToolContext, ToolDeclaration, ToolOutput};
+use norte_code_plugin_api::HostEffects;
+use norte_code_wire::{PluginId, PluginMessageRejection};
+
+use super::plugin_messages::{PluginMessagePolicy, PluginMessages};
 
 /// The largest file the host snapshots for an edit preview.
 const EDIT_MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -167,11 +171,26 @@ where
 pub(super) struct RecordingFunction {
     inner: Arc<dyn AnyFunction>,
     activity: Arc<ToolActivity>,
+    messages: Arc<PluginMessages>,
+    plugin_id: PluginId,
+    policy: PluginMessagePolicy,
 }
 
 impl RecordingFunction {
-    pub(super) fn new(inner: Arc<dyn AnyFunction>, activity: Arc<ToolActivity>) -> Self {
-        Self { inner, activity }
+    pub(super) fn new(
+        inner: Arc<dyn AnyFunction>,
+        activity: Arc<ToolActivity>,
+        messages: Arc<PluginMessages>,
+        plugin_id: PluginId,
+        policy: PluginMessagePolicy,
+    ) -> Self {
+        Self {
+            inner,
+            activity,
+            messages,
+            plugin_id,
+            policy,
+        }
     }
 }
 
@@ -210,7 +229,36 @@ impl AnyFunction for RecordingFunction {
         context: &ToolContext,
         arguments: &serde_json::Value,
     ) -> norte::Result<ToolOutput> {
-        let result = self.inner.execute(context, arguments).await;
+        let mut result = self.inner.execute(context, arguments).await;
+        let effects = match &mut result {
+            Ok(output) => match HostEffects::extract(output) {
+                Ok(effects) => effects,
+                Err(error) => {
+                    tracing::warn!(plugin_id = %self.plugin_id, %error, "a plugin tool returned invalid host effects");
+                    if let (Some(session), Some(call_id)) = (context.session, context.call_id) {
+                        self.messages.reject(
+                            session,
+                            &self.plugin_id,
+                            call_id,
+                            PluginMessageRejection::InvalidEnvelope,
+                        );
+                    }
+                    None
+                }
+            },
+            Err(_) => None,
+        };
+        if let (Some(session), Some(call_id)) = (context.session, context.call_id)
+            && let Some(effects) = effects
+        {
+            self.messages.enqueue(
+                session,
+                &self.plugin_id,
+                call_id,
+                vec![effects],
+                &self.policy,
+            );
+        }
         if let Some(call_id) = context.call_id {
             let output = match &result {
                 Ok(output) => output.clone(),

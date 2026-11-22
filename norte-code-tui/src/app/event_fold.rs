@@ -67,6 +67,10 @@ pub(in crate::app) fn fold(
         ServerEventKind::SessionTodos { todos } => {
             model.todos.clone_from(todos);
         }
+        kind @ (ServerEventKind::PluginMessageInjected { .. }
+        | ServerEventKind::PluginMessageRejected { .. }) => {
+            fold_plugin_message_event(kind, tree);
+        }
         ServerEventKind::Error { .. }
         | ServerEventKind::BudgetExceeded { .. }
         | ServerEventKind::BudgetWarning { .. }
@@ -111,6 +115,34 @@ pub(in crate::app) fn fold(
         | ServerEventKind::OutputPartFinished { .. }
         | ServerEventKind::SecretSaved { .. } => {}
     }
+}
+
+fn fold_plugin_message_event(kind: &ServerEventKind, tree: &mut terminalui::Tree) {
+    match kind {
+        ServerEventKind::PluginMessageInjected {
+            plugin_id, parts, ..
+        } => notice(
+            tree,
+            format!(
+                "plugin {} added a message with {} part(s)",
+                plugin_id.as_str(),
+                parts
+            ),
+            ui::Tone::Neutral,
+        ),
+        ServerEventKind::PluginMessageRejected {
+            plugin_id, reason, ..
+        } => notice(
+            tree,
+            format!(
+                "plugin {} message rejected: {}",
+                plugin_id.as_str(),
+                reason.as_str()
+            ),
+            ui::Tone::Warn,
+        ),
+        _ => false,
+    };
 }
 
 pub(in crate::app) fn push_attachment_notice(

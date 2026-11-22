@@ -284,6 +284,18 @@ enum CanonicalEvent<'a> {
         detached: bool,
         duration_ms: u64,
     },
+    /// A plugin asked the host to add a user-role message.
+    PluginMessageInjected {
+        plugin_id: &'a str,
+        call_id: &'a str,
+        parts: usize,
+    },
+    /// The host refused a plugin's request for a user-role message.
+    PluginMessageRejected {
+        plugin_id: &'a str,
+        call_id: &'a str,
+        reason: &'a str,
+    },
     /// The jobs currently known by the session.
     JobList { jobs: Value },
     /// The result of stopping jobs.

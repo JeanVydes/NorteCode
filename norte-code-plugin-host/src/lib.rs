@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 pub mod plugins;
 
+pub use norte_code_plugin_api::{HOST_EFFECTS_KEY, HostEffects, UserMessageDraft};
 pub use plugins::{PLUGIN_ABI_SYMBOL, PLUGIN_ABI_VERSION, Plugin, PluginContext, Plugins};
 
 static LIBRARIES: Mutex<Vec<(PathBuf, Arc<libloading::Library>)>> = Mutex::new(Vec::new());

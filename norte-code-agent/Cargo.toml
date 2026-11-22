@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+norte-code-plugin-api = { path = "../norte-code-plugin-api" }
 norte-code-protocol = { path = "../norte-code-protocol" }
 norte-code-wire = { path = "../norte-code-wire" }
 

@@ -33,6 +33,8 @@ use super::jobs::JobRegistry;
 use super::mapping::BudgetLayer;
 use super::mcp::McpServers;
 use super::plans::PlanRepository;
+use super::plugin_message_interceptor::PluginMessageInterceptor;
+use super::plugin_messages::PluginMessages;
 use super::prompt::{compose_system_prompt, load_project_instructions};
 use super::questions::DirectoryQuestions;
 use super::skills::{collect_secrets, discover_skills};
@@ -213,6 +215,7 @@ impl Service {
             plugin_catalogue: RwLock::new((Providers::default(), Models::default())),
             plugin_tools: RwLock::new(Vec::new()),
             plugin_tool_origins: RwLock::new(BTreeMap::new()),
+            plugin_messages: Arc::new(PluginMessages::default()),
             default_spec: RwLock::new(default_spec),
             store,
             blobs,
@@ -427,6 +430,13 @@ impl Service {
                 let mut interceptors: Vec<Arc<dyn TurnInterceptor>> = vec![Arc::new(
                     SteeringInterceptor::new(Arc::clone(&self.steering)),
                 )];
+                let plugin_config = self.config().tools.plugin_messages.clone();
+                interceptors.push(Arc::new(PluginMessageInterceptor::new(
+                    Arc::clone(&self.plugin_messages),
+                    Arc::clone(&self.blobs),
+                    &plugin_config,
+                    &spec.capabilities,
+                )));
                 // A rule refuses the call before it runs, and the reason it
                 // gives is what the model reads.
                 interceptors.push(Arc::new(ToolRuleInterceptor::new(

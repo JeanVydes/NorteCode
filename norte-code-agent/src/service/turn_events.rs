@@ -239,6 +239,26 @@ impl Service {
                     messages: texts,
                 })
             }
+            EngineEvent::PluginMessageInjected {
+                plugin_id,
+                call_id,
+                parts,
+                ..
+            } => Some(ServerEventKind::PluginMessageInjected {
+                plugin_id: plugin_id.clone(),
+                call_id: call_id.to_string(),
+                parts: *parts,
+            }),
+            EngineEvent::PluginMessageRejected {
+                plugin_id,
+                call_id,
+                reason,
+                ..
+            } => Some(ServerEventKind::PluginMessageRejected {
+                plugin_id: plugin_id.clone(),
+                call_id: call_id.to_string(),
+                reason: *reason,
+            }),
             _ => None,
         };
         if let Some(kind) = kind {

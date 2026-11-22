@@ -78,6 +78,24 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             detached: *detached,
             duration_ms: *duration_ms,
         },
+        ServerEventKind::PluginMessageInjected {
+            plugin_id,
+            call_id,
+            parts,
+        } => CanonicalEvent::PluginMessageInjected {
+            plugin_id: plugin_id.as_str(),
+            call_id,
+            parts: *parts,
+        },
+        ServerEventKind::PluginMessageRejected {
+            plugin_id,
+            call_id,
+            reason,
+        } => CanonicalEvent::PluginMessageRejected {
+            plugin_id: plugin_id.as_str(),
+            call_id,
+            reason: reason.as_str(),
+        },
         ServerEventKind::JobList { jobs } => CanonicalEvent::JobList {
             jobs: serde_json::to_value(jobs).expect("job list is serializable"),
         },

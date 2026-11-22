@@ -8571,6 +8571,30 @@ fn plugin_echo() -> Arc<dyn norte::AnyFunction> {
     ))
 }
 
+struct PluginMessageEcho;
+
+impl norte::ToolMetadata for PluginMessageEcho {
+    const NAME: &'static str = "plugin_message_echo";
+    const DESCRIPTION: &'static str = "ask the host for a user message";
+}
+
+#[async_trait]
+impl FnExecutor<PluginEchoArgs, norte::ToolOutput> for PluginMessageEcho {
+    async fn call(&self, _args: PluginEchoArgs) -> norte::Result<norte::ToolOutput> {
+        let draft = norte_code_plugin_api::UserMessageDraft::text("from plugin")?;
+        norte_code_plugin_api::HostEffects::user_message(draft)
+            .attach(norte::ToolOutput::json(serde_json::json!({"ok": true})))
+    }
+}
+
+fn plugin_message_echo() -> Arc<dyn norte::AnyFunction> {
+    Arc::new(norte::ToolDeclaration::new(
+        "plugin_message_echo",
+        "ask the host for a user message",
+        Arc::new(PluginMessageEcho),
+    ))
+}
+
 #[tokio::test]
 async fn a_plugin_tool_is_registered_beside_the_builtins() {
     let service = service();
@@ -8594,6 +8618,153 @@ async fn a_disabled_plugin_tool_is_not_registered() {
         !statuses.iter().any(|status| status.name == "plugin_echo"),
         "a denied plugin tool is absent from the registry"
     );
+}
+
+fn plugin_message_config(enabled: bool) -> Config {
+    let mut config = config();
+    config.tools.plugin_messages.enabled = enabled;
+    config.plugins.insert(
+        norte_code_wire::PluginId::new("browser"),
+        norte_code_protocol::config::PluginPolicyConfig {
+            allow_user_messages: true,
+        },
+    );
+    config
+}
+
+fn plugin_message_service(enabled: bool) -> (Arc<Service>, Arc<ScriptedModel>) {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(call, "plugin_message_echo", &serde_json::json!({}))
+            .turn_text("done"),
+    );
+    let service = Arc::new(
+        Service::new(
+            plugin_message_config(enabled),
+            catalog(),
+            Some(spec("scripted")),
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    service.set_plugin_tools(vec![plugin_message_echo()]);
+    service.set_plugin_tool_origins(std::collections::BTreeMap::from([(
+        "plugin_message_echo".to_owned(),
+        "browser".to_owned(),
+    )]));
+    (service, model)
+}
+
+#[tokio::test]
+async fn a_plugin_tool_effect_reaches_the_next_model_request() {
+    let (service, model) = plugin_message_service(true);
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "work".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            output: Vec::new(),
+            response_format: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, ServerEventKind::PluginMessageInjected { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        ServerEventKind::ToolFinished { output: Some(output), .. }
+            if !output.contains("norte_code.host_effects")
+    )));
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(user_texts(&requests[1]).contains(&"from plugin".to_owned()));
+    let visible_text = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(norte::Part::as_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!visible_text.contains("norte_code.host_effects"));
+
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    let history = service
+        .session_history_with_provenance(&key)
+        .await
+        .expect("history");
+    assert!(history.iter().any(|(_, _, _, text, _, provenance)| {
+        text == "from plugin"
+            && provenance
+                .as_ref()
+                .and_then(|value| value.get("plugin_id"))
+                .and_then(serde_json::Value::as_str)
+                == Some("browser")
+    }));
+}
+
+#[tokio::test]
+async fn a_disabled_plugin_message_switch_leaves_the_tool_result_unchanged() {
+    let (service, model) = plugin_message_service(false);
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "work".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            output: Vec::new(),
+            response_format: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, ServerEventKind::PluginMessageInjected { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        ServerEventKind::PluginMessageRejected {
+            reason: norte_code_wire::PluginMessageRejection::Disabled,
+            ..
+        }
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        ServerEventKind::ToolFinished {
+            output: Some(output),
+            ..
+        } if output == "{\"ok\":true}"
+    )));
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(!user_texts(&requests[1]).contains(&"from plugin".to_owned()));
 }
 
 #[tokio::test]

@@ -45,6 +45,27 @@ A plugin cannot register tools itself, change approval rules, edit prompts or
 configuration, or remove built-in tools. It only declares data, and the host
 decides what to do with it.
 
+## Planned user messages and ABI 2
+
+A future ABI may let a plugin ask the host to add a user-role message to a
+conversation. The plugin will not write history itself. It will attach a
+reserved `norte_code.host_effects` envelope to `ToolOutput.structured`. The host
+will remove that envelope before the result is stored, shown or sent to a model,
+then validate the request against global and per-plugin switches before
+committing a message.
+
+Only text and media parts will be accepted. The host will check model
+modalities, convert inline media to blobs and record provenance as a
+`Part::Extension` in the `norte-code/plugin-message` namespace. A plugin without
+explicit permission will have its envelope discarded. A tool that wants to use
+this envelope must return a `ToolOutput` from a `ToolDeclaration`, because a
+`FunctionDeclaration` wraps the result again and hides the envelope from the
+host.
+
+This is a contract change, so it belongs to ABI 2. ABI 1 plugins keep working
+as they do today and are not recompiled by this note. The current service does
+not inject plugin messages.
+
 ## Loading and lifecycle
 
 A plugin that fails to load is reported and skipped. The server starts either

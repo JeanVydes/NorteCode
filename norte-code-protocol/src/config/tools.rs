@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 /// Default cap on the bytes of each command stream that reach the model.
 pub const DEFAULT_COMMAND_MAX_MODEL_BYTES: usize = 128 * 1024;
 
+/// Default number of plugin messages one turn may inject.
+pub const DEFAULT_PLUGIN_MESSAGES_PER_TURN: usize = 2;
+
+/// Default byte cap for one plugin message.
+pub const DEFAULT_PLUGIN_MESSAGE_MAX_BYTES: usize = 1024 * 1024;
+
 /// Tool switches.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -20,6 +26,8 @@ pub struct ToolsConfig {
     pub command_max_model_bytes: usize,
     /// How far a tool may reach.
     pub confinement: ConfinementConfig,
+    /// Policy for user-role messages plugins ask the host to add.
+    pub plugin_messages: PluginMessagesConfig,
     /// Whether a finished job starts a turn by itself.
     ///
     /// A detached shell or subagent reports its result through steering, which
@@ -54,8 +62,37 @@ impl Default for ToolsConfig {
             web_fetch: false,
             command_max_model_bytes: DEFAULT_COMMAND_MAX_MODEL_BYTES,
             confinement: ConfinementConfig::default(),
+            plugin_messages: PluginMessagesConfig::default(),
             auto_turn_on_job_end: false,
             disabled: Vec::new(),
+        }
+    }
+}
+
+/// Policy for user-role messages plugins ask the host to add.
+///
+/// Both this switch and the plugin's own permission must be on before a plugin
+/// effect is applied. A plugin cannot grant itself this ability.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginMessagesConfig {
+    /// Whether any plugin message effect is applied.
+    pub enabled: bool,
+    /// How many messages one turn may inject.
+    pub max_messages_per_turn: usize,
+    /// How large one message may be, counting text and inline media bytes.
+    pub max_bytes: usize,
+    /// Whether a plugin message may carry media parts.
+    pub allow_media: bool,
+}
+
+impl Default for PluginMessagesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_messages_per_turn: DEFAULT_PLUGIN_MESSAGES_PER_TURN,
+            max_bytes: DEFAULT_PLUGIN_MESSAGE_MAX_BYTES,
+            allow_media: false,
         }
     }
 }

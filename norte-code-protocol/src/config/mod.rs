@@ -23,6 +23,7 @@ mod key;
 mod loading;
 mod mcp;
 mod paths;
+mod plugins;
 mod service;
 mod tools;
 
@@ -42,9 +43,12 @@ pub use paths::{
     set_user_mcp_enabled, update_user_approval, update_user_default, user_cli_path,
     user_config_path,
 };
+pub use plugins::{PluginPolicies, PluginPolicyConfig, allows_user_messages};
 pub use service::ServiceConfig;
 pub use tools::{
-    ConfinementConfig, DEFAULT_COMMAND_MAX_MODEL_BYTES, SandboxConfig, SkillsConfig, ToolsConfig,
+    ConfinementConfig, DEFAULT_COMMAND_MAX_MODEL_BYTES, DEFAULT_PLUGIN_MESSAGE_MAX_BYTES,
+    DEFAULT_PLUGIN_MESSAGES_PER_TURN, PluginMessagesConfig, SandboxConfig, SkillsConfig,
+    ToolsConfig,
 };
 
 /// The only config schema revision this build understands.
