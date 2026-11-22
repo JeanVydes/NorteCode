@@ -90,12 +90,16 @@ impl Service {
                     call_arguments(engine, nid, *call_id).await
                 };
                 let source = self.activity.source(call_id);
+                let origin = self
+                    .plugin_tool_origin(tool.as_str())
+                    .map(|plugin| norte_code_wire::payload::PluginToolOrigin { plugin });
                 Some(ServerEventKind::ToolStarted {
                     turn: stats.turn,
                     call_id: call_id.to_string(),
                     tool: tool.to_string(),
                     arguments,
                     source,
+                    origin,
                 })
             }
             EngineEvent::ToolCallFinished {

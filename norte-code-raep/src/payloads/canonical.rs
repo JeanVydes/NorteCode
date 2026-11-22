@@ -33,12 +33,14 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             tool,
             arguments,
             source,
+            origin,
         } => CanonicalEvent::ToolCallStarted {
             turn: *turn,
             call_id,
             tool,
             arguments,
             source,
+            origin,
         },
         ServerEventKind::ToolOutput {
             turn,

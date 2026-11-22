@@ -276,6 +276,21 @@ impl Plugins {
             .collect()
     }
 
+    /// Every tool paired with the name of the plugin that declared it.
+    #[must_use]
+    pub fn tools_named(&self) -> Vec<(String, Arc<dyn AnyFunction>)> {
+        self.loaded
+            .iter()
+            .flat_map(|plugin| {
+                let name = plugin.name().to_owned();
+                plugin
+                    .tools()
+                    .into_iter()
+                    .map(move |tool| (name.clone(), tool))
+            })
+            .collect()
+    }
+
     /// The status fields paired with the name of the plugin that offered them.
     ///
     /// The host uses this to publish a display line beside the plugin it came

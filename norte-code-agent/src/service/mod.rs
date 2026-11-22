@@ -207,6 +207,8 @@ pub struct Service {
     plugin_catalogue: RwLock<(Providers, Models)>,
     /// Tools contributed by server-loaded plugins, registered per engine.
     plugin_tools: RwLock<Vec<Arc<dyn norte::AnyFunction>>>,
+    /// Which plugin declared each plugin tool, by tool name.
+    plugin_tool_origins: RwLock<BTreeMap<String, String>>,
     default_spec: RwLock<Option<ModelSpec>>,
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,

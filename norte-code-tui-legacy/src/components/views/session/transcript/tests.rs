@@ -609,6 +609,7 @@ fn a_shell_log_shows_only_the_last_five_lines_by_default() {
             tool: "shell".to_owned(),
             arguments: Some(serde_json::json!({"script": "printf 'line'"})),
             source: None,
+            origin: None,
         },
     }))]
     .into_iter()
@@ -841,6 +842,7 @@ mod tail {
                         serde_json::json!({"script": "cat /tmp/a.txt"}),
                     ),
                     source: None,
+                    origin: None,
                 },
             })),
             TranscriptItem::ServerEvent(Box::new(norte_code_wire::ServerEvent {
@@ -889,6 +891,7 @@ mod tail {
                         serde_json::json!({"script": "for i in 1 2 3; do echo $i; sleep 1; done"}),
                     ),
                     source: None,
+                    origin: None,
                 },
             },
         ))];
@@ -971,6 +974,7 @@ mod tail {
                         serde_json::json!({"script": "for i in 1 2 3; do echo $i; sleep 1; done", "detach": true}),
                     ),
                     source: None,
+                    origin: None,
                 },
             })),
             TranscriptItem::ServerEvent(Box::new(norte_code_wire::ServerEvent {
@@ -1079,6 +1083,7 @@ fn parity_items() -> Vec<TranscriptItem> {
                 tool: "shell".to_owned(),
                 arguments: Some(serde_json::json!({"script": "ls -la"})),
                 source: None,
+                origin: None,
             },
         })),
         TranscriptItem::ServerEvent(Box::new(norte_code_wire::ServerEvent {
@@ -1363,6 +1368,7 @@ fn the_separator_shows_how_long_the_tools_ran() {
                 tool: "shell".to_owned(),
                 arguments: None,
                 source: None,
+                origin: None,
             },
         })),
         TranscriptItem::ServerEvent(Box::new(norte_code_wire::ServerEvent {

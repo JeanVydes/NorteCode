@@ -35,6 +35,7 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             tool,
             arguments,
             source,
+            origin,
             ..
         } => {
             let arguments = arguments
@@ -42,13 +43,19 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 .and_then(|arguments| arguments.as_object())
                 .cloned()
                 .unwrap_or_default();
+            let executor = if origin.is_some() {
+                norte_code_wire::ToolExecutor::Plugin
+            } else {
+                norte_code_wire::ToolExecutor::Server
+            };
             Some(payload(ToolStarted {
                 tool_call_id: call_id.clone(),
                 tool_name: tool.clone(),
                 arguments: Value::Object(arguments),
                 source: source.clone(),
                 requires_approval: false,
-                executor: norte_code_wire::ToolExecutor::Server,
+                origin: origin.clone(),
+                executor,
                 attempt: 1,
             }))
         }

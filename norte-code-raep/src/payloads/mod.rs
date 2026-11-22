@@ -258,6 +258,8 @@ enum CanonicalEvent<'a> {
         arguments: &'a Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         source: &'a Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        origin: &'a Option<norte_code_wire::payload::PluginToolOrigin>,
     },
     /// A detached tool/job produced output.
     JobProgressDelta {

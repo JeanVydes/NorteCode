@@ -244,6 +244,8 @@ pub(crate) struct ToolCallStartedPayload {
     pub(crate) arguments: Option<Value>,
     #[serde(default)]
     pub(crate) source: Option<String>,
+    #[serde(default)]
+    pub(crate) origin: Option<norte_code_wire::payload::PluginToolOrigin>,
 }
 
 /// A tool output delta payload.

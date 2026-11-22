@@ -49,6 +49,15 @@ pub enum ToolExecutor {
     /// The server ran it.
     #[default]
     Server,
+    /// A plugin loaded by the server declared and executed it.
+    Plugin,
+}
+
+/// The plugin that declared a tool the model called.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct PluginToolOrigin {
+    /// The name of the plugin that offered the tool.
+    pub plugin: String,
 }
 
 /// How a finished tool call stood.
@@ -102,6 +111,9 @@ pub struct ToolStarted {
     /// Who runs it.
     #[serde(default)]
     pub executor: ToolExecutor,
+    /// The plugin that declared it, when it was not a built-in tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<PluginToolOrigin>,
     /// Which attempt this is, for a retried call.
     #[serde(default)]
     pub attempt: u32,

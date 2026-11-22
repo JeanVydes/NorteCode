@@ -21,6 +21,36 @@ fn tool_output_uses_canonical_job_payload_and_preserves_wire_event() {
 }
 
 #[test]
+fn a_plugin_tool_call_reports_its_origin() {
+    let standard = standard_event_payload(&ServerEventKind::ToolStarted {
+        turn: 4,
+        call_id: "call-2".to_owned(),
+        tool: "catalog_search".to_owned(),
+        arguments: None,
+        source: None,
+        origin: Some(norte_code_wire::payload::PluginToolOrigin {
+            plugin: "catalog".to_owned(),
+        }),
+    })
+    .expect("standard tool start");
+    assert_eq!(standard["executor"], "plugin");
+    assert_eq!(standard["origin"]["plugin"], "catalog");
+
+    let canonical = canonical_event_payload(&ServerEventKind::ToolStarted {
+        turn: 4,
+        call_id: "call-2".to_owned(),
+        tool: "catalog_search".to_owned(),
+        arguments: None,
+        source: None,
+        origin: Some(norte_code_wire::payload::PluginToolOrigin {
+            plugin: "catalog".to_owned(),
+        }),
+    });
+    assert_eq!(canonical["event"], "tool_call_started");
+    assert_eq!(canonical["origin"]["plugin"], "catalog");
+}
+
+#[test]
 fn session_forked_uses_the_raep_turn_and_source_fields() {
     let payload = canonical_event_payload(&ServerEventKind::SessionForked {
         from: norte_code_wire::SessionKey::new("source"),
@@ -192,6 +222,7 @@ fn standard_token_and_tool_payloads_match_the_raep_schemas() {
         tool: "shell".to_owned(),
         arguments: Some(json!({"command": "ls"})),
         source: None,
+        origin: None,
     })
     .expect("standard tool start");
     assert_eq!(

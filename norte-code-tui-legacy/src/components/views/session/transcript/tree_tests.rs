@@ -40,6 +40,7 @@ fn tool_started(turn: u64, call_id: &str, name: &str) -> TranscriptItem {
         tool: name.to_owned(),
         arguments: None,
         source: None,
+        origin: None,
     })
 }
 

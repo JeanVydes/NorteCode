@@ -24,6 +24,7 @@ fn model_with_plugins() -> UiModel {
                 package: None,
                 status: None,
                 banner: None,
+                tools: Vec::new(),
             },
             PluginSummary {
                 name: "beta".to_owned(),
@@ -34,6 +35,7 @@ fn model_with_plugins() -> UiModel {
                 package: Some("beta".to_owned()),
                 status: None,
                 banner: None,
+                tools: Vec::new(),
             },
         ],
         ..UiModel::default()
@@ -182,6 +184,7 @@ fn an_enabled_plugin_the_host_did_not_load_is_not_called_failed() {
             package: None,
             status: None,
             banner: None,
+            tools: Vec::new(),
         }],
         ..UiModel::default()
     };

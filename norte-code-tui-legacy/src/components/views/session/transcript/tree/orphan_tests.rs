@@ -47,6 +47,7 @@ fn output_that_arrives_before_its_call_is_kept_for_it() {
             tool: "read".to_owned(),
             arguments: None,
             source: None,
+            origin: None,
         }),
     ];
 
@@ -62,6 +63,7 @@ fn two_calls_without_an_id_stay_two_named_nodes() {
             tool: "read".to_owned(),
             arguments: None,
             source: None,
+            origin: None,
         }),
         event(ServerEventKind::ToolFinished {
             turn: 1,
@@ -80,6 +82,7 @@ fn two_calls_without_an_id_stay_two_named_nodes() {
             tool: "grep".to_owned(),
             arguments: None,
             source: None,
+            origin: None,
         }),
     ];
 

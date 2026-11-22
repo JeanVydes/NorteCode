@@ -92,6 +92,18 @@ fn tools_from_every_plugin_reach_the_host() {
 }
 
 #[test]
+fn tools_are_paired_with_the_plugin_that_declared_them() {
+    let mut plugins = Plugins::new();
+    plugins.add(Box::new(Everything));
+    plugins.add(Box::new(Only));
+    let named = plugins.tools_named();
+    assert_eq!(named.len(), 2);
+    assert_eq!(named[0].0, "everything");
+    assert_eq!(named[0].1.name(), "hello");
+    assert_eq!(named[1].0, "only");
+}
+
+#[test]
 fn nothing_loaded_is_not_an_error() {
     let plugins = Plugins::new();
     assert!(plugins.is_empty());

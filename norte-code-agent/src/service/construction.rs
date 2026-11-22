@@ -213,6 +213,7 @@ impl Service {
             catalog: RwLock::new(catalog),
             plugin_catalogue: RwLock::new((Providers::default(), Models::default())),
             plugin_tools: RwLock::new(Vec::new()),
+            plugin_tool_origins: RwLock::new(BTreeMap::new()),
             default_spec: RwLock::new(default_spec),
             store,
             blobs,
@@ -304,6 +305,26 @@ impl Service {
             .plugin_tools
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = tools;
+    }
+
+    /// Supplies which plugin declared each plugin tool, by tool name.
+    ///
+    /// The agent uses this to label a tool call with its origin, so a reader can
+    /// tell a plugin tool from a built-in one in the transcript.
+    pub fn set_plugin_tool_origins(&self, origins: BTreeMap<String, String>) {
+        *self
+            .plugin_tool_origins
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = origins;
+    }
+
+    /// The plugin that declared a tool, when it was a plugin tool.
+    pub(crate) fn plugin_tool_origin(&self, tool: &str) -> Option<String> {
+        self.plugin_tool_origins
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(tool)
+            .cloned()
     }
 
     /// Builds a service over an in-memory store.

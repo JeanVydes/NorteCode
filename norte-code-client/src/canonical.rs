@@ -242,6 +242,8 @@ pub(crate) struct CanonicalToolCallStarted {
     pub(crate) arguments: Option<Value>,
     #[serde(default)]
     pub(crate) source: Option<String>,
+    #[serde(default)]
+    pub(crate) origin: Option<norte_code_wire::payload::PluginToolOrigin>,
 }
 
 /// A canonical `job_progress_delta` payload.

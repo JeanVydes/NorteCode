@@ -254,6 +254,7 @@ pub(crate) fn standard_event_from_frame(
                         tool: decoded.tool_name,
                         arguments: decoded.arguments,
                         source: decoded.source,
+                        origin: decoded.origin,
                     })
                 }
                 FrameKind::ToolOutputDelta => {
@@ -663,6 +664,7 @@ pub(crate) fn server_event_from_frame(
                     tool: decoded.tool,
                     arguments: decoded.arguments,
                     source: decoded.source,
+                    origin: decoded.origin,
                 }
             }
             CanonicalKind::JobProgressDelta => {

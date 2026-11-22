@@ -807,6 +807,9 @@ pub enum ServerEventKind {
         /// already written the file by the time the client renders the event.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
+        /// The plugin that declared this tool, when it came from one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<crate::payload::PluginToolOrigin>,
     },
     /// A chunk of a running tool's output, as it arrives.
     ///

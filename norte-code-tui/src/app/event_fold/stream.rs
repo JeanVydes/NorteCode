@@ -70,6 +70,7 @@ pub(in crate::app) fn fold_tool_event(
         call_id,
         arguments,
         source,
+        origin,
         ..
     } = kind
     {
@@ -78,6 +79,7 @@ pub(in crate::app) fn fold_tool_event(
             call_id,
             arguments.as_ref(),
             source.as_deref(),
+            origin.as_ref(),
             tree,
             model,
         );
@@ -128,6 +130,7 @@ fn fold_tool_started(
     call_id: &str,
     arguments: Option<&serde_json::Value>,
     source: Option<&str>,
+    origin: Option<&norte_code_wire::payload::PluginToolOrigin>,
     tree: &mut terminalui::Tree,
     model: &mut UiModel,
 ) {
@@ -162,7 +165,7 @@ fn fold_tool_started(
             name: tool.to_owned(),
             target,
             state: ui::ToolState::Running,
-            meta: None,
+            meta: origin.map(|origin| format!("plugin: {}", origin.plugin)),
             diff: edit.as_ref().and_then(|edit| Diff::from_call(source, edit)),
             console,
         });

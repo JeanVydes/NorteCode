@@ -138,6 +138,9 @@ pub struct PluginSummary {
     /// The banner line this plugin contributed, when it offered one.
     #[serde(default)]
     pub banner: Option<String>,
+    /// The names of the tools this plugin declared.
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 /// The result of a plugin operation.

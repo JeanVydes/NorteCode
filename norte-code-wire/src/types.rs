@@ -129,6 +129,9 @@ pub struct PluginInfo {
     /// The banner line this plugin contributed, when it offered one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banner: Option<String>,
+    /// The names of the tools this plugin declared.
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 /// One MCP server visible to the service.

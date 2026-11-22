@@ -153,9 +153,8 @@ async fn build_services(
     session_store: Arc<dyn norte_code_protocol::Store>,
     blobs: Arc<dyn norte::BlobStore>,
     directory: Arc<dyn SessionDirectory>,
-    offered: &Providers,
-    offered_models: &Models,
-    plugin_tools: &[Arc<dyn norte::AnyFunction>],
+    offered: &Catalogue,
+    plugin_tools: &crate::plugin_display::PluginTools,
 ) -> Result<HashMap<String, Arc<Service>>, Box<dyn std::error::Error>> {
     let mut services = HashMap::new();
     let profiles: BTreeMap<String, Agent> = agents
@@ -205,8 +204,16 @@ async fn build_services(
             .await?,
         )
         .with_agent_profiles(profiles.clone());
-        service.set_plugin_catalogue(offered.clone(), offered_models.clone());
-        service.set_plugin_tools(plugin_tools.to_vec());
+        service.set_plugin_catalogue(
+            Providers {
+                providers: offered.providers.clone(),
+            },
+            Models {
+                models: offered.models.clone(),
+            },
+        );
+        service.set_plugin_tools(plugin_tools.functions.clone());
+        service.set_plugin_tool_origins(plugin_tools.origins.clone());
         service.install_subagent_runner();
         services.insert(agent.name, service);
     }
@@ -264,8 +271,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let agent_id = agent.name.clone();
     let mut plugins = Plugins::new();
     load_plugins(&mut plugins, None);
-    let plugin_tools = plugins.tools();
-    crate::plugin_display::capture(plugins.status_named(), plugins.banner_named());
+    let plugin_tools = crate::plugin_display::capture(&plugins);
     let offered = plugins.catalogue();
     let created = ensure_catalog_files()?;
     if created.providers || created.models {
@@ -283,20 +289,13 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let session_store: Arc<dyn norte_code_protocol::Store> = store.clone();
     let blobs: Arc<dyn norte::BlobStore> = store.clone();
     let directory: Arc<dyn SessionDirectory> = store;
-    let offered_providers = Providers {
-        providers: offered.providers.clone(),
-    };
-    let offered_models = Models {
-        models: offered.models.clone(),
-    };
     let services = build_services(
         install_file_key_store(service_config.agents),
         catalog,
         session_store,
         Arc::clone(&blobs),
         directory,
-        &offered_providers,
-        &offered_models,
+        &offered,
         &plugin_tools,
     )
     .await?;

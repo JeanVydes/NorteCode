@@ -504,6 +504,7 @@ async fn service_turn_events_keep_the_client_turn_id() {
                 tool: "shell".to_owned(),
                 arguments: None,
                 source: None,
+                origin: None,
             },
         },
         ServerEvent {
