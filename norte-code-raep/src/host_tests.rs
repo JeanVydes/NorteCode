@@ -677,6 +677,40 @@ impl norte_code_agent::ModelFactory for SingleModel {
     }
 }
 
+struct PluginEcho;
+
+#[async_trait::async_trait]
+impl norte::FnExecutor<serde_json::Value, norte::ToolOutput> for PluginEcho {
+    async fn call(&self, _args: serde_json::Value) -> norte::Result<norte::ToolOutput> {
+        Ok(norte::ToolOutput::text("plugin says hi"))
+    }
+}
+
+fn plugin_echo() -> Arc<dyn norte::AnyFunction> {
+    Arc::new(norte::ToolDeclaration::new(
+        "plugin_echo",
+        "echo a message",
+        Arc::new(PluginEcho),
+    ))
+}
+
+async fn scripted_plugin_host(
+    model: Arc<norte_testing::ScriptedModel>,
+) -> (Arc<NorteCodeRaepHost>, Arc<Service>, String) {
+    let model_dyn: Arc<dyn norte::Model> = model;
+    let service = test_service(Some(scripted_spec()), SingleModel(model_dyn));
+    service.set_plugin_tools(vec![plugin_echo()]);
+    service.set_plugin_tool_origins(std::collections::BTreeMap::from([(
+        "plugin_echo".to_owned(),
+        "echo-plugin".to_owned(),
+    )]));
+    let host = Arc::new(
+        NorteCodeRaepHost::new(Arc::clone(&service), HostConfig::default()).expect("host"),
+    );
+    let session_id = attach_session(&host).await;
+    (host, service, session_id)
+}
+
 /// The spec a scripted host session runs with.
 fn scripted_spec() -> norte_code_agent::ModelSpec {
     norte_code_agent::ModelSpec {
@@ -1842,4 +1876,72 @@ fn host_limits_start_with_bounded_defaults() {
 #[test]
 fn host_limits_fall_back_to_the_default_for_a_missing_value() {
     assert_eq!(env_limit("NORTE_CODE_TEST_LIMIT_MISSING", 17), 17);
+}
+
+#[tokio::test]
+async fn a_plugin_tool_is_listed_sent_to_the_model_and_returns_output() {
+    let reference = norte::ModelRef::new(
+        norte::ProviderId::new("test").expect("provider"),
+        norte::ModelId::new("scripted").expect("model"),
+    );
+    let call = norte::CallId::new();
+    let model = Arc::new(
+        norte_testing::ScriptedModel::new(reference)
+            .turn_tool_call(call, "plugin_echo", &json!({}))
+            .turn_text("done"),
+    );
+    let (host, service, session_id) = scripted_plugin_host(Arc::clone(&model)).await;
+
+    let session_key = norte_code_wire::SessionKey::new(session_id.as_str());
+    let specs = service.tools(Some(&session_key)).expect("registry").specs();
+    assert!(
+        specs.iter().any(|spec| spec.name.as_str() == "plugin_echo"),
+        "the plugin tool is registered: {specs:?}"
+    );
+
+    let listed = host
+        .handle(command_frame(
+            &session_id,
+            norte_code_wire::ClientRequestKind::ListTools { session: None },
+            2,
+        ))
+        .await
+        .expect("tool list");
+    assert!(
+        listed.iter().any(|frame| {
+            frame.payload["data"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "plugin_echo"))
+        }),
+        "the plugin tool is listed: {listed:?}"
+    );
+
+    let frames = host
+        .handle(user_input(
+            &session_id,
+            "plugin_turn",
+            3,
+            json!({"prompt": "call the plugin"}),
+        ))
+        .await
+        .expect("turn frames");
+    let requests = model.requests();
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .any(|spec| spec.name.as_str() == "plugin_echo"),
+        "the model request carries the plugin tool: {requests:?}"
+    );
+    assert!(frames.iter().any(|frame| {
+        frame.kind == standard(StandardFrameType::ToolCallStarted)
+            && frame.payload["tool_name"] == "plugin_echo"
+            && frame.payload["executor"] == "plugin"
+            && frame.payload["origin"]["plugin"] == "echo-plugin"
+    }));
+    assert!(frames.iter().any(|frame| {
+        frame.kind == standard(StandardFrameType::ToolCallFinished)
+            && frame.payload["tool_name"] == "plugin_echo"
+            && frame.payload["result_summary"] == "plugin says hi"
+    }));
 }
