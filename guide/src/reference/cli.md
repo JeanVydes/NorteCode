@@ -82,7 +82,7 @@ as a cdylib and copied into the plugin directory).
 | `plugins enable <NAME>` | Re-enable a disabled plugin. |
 
 Plugins are loaded when the service starts, so restart it (`norte service
-restart`) after installing, enabling or disabling.
+restart`) after installing, updating, removing, enabling or disabling.
 
 ### `norte service providers …`
 

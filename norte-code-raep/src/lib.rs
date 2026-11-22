@@ -14,6 +14,7 @@ mod host;
 mod http;
 mod payloads;
 mod plugin_display;
+mod plugin_host;
 pub mod plugin_manager;
 
 pub use commands::AgentCommand;
@@ -59,7 +60,7 @@ use std::{
 
 use norte_code_agent::{DEFAULT_SYSTEM_PROMPT, ModelSpec, Service, VendorModels};
 use norte_code_plugin_host::load_plugins;
-use norte_code_plugin_host::plugins::{Catalogue, Plugins};
+use norte_code_plugin_host::plugins::{Catalogue, PluginContext, PluginHost, Plugins};
 use norte_code_protocol::{
     catalog::{Catalog, CatalogError, ensure_catalog_files, load_catalog_files},
     config::{
@@ -243,6 +244,20 @@ fn load_catalog(offered: Catalogue) -> Result<Catalog, Box<dyn std::error::Error
     }
 }
 
+fn load_plugins_for_host() -> (
+    Plugins,
+    crate::plugin_display::PluginTools,
+    Arc<crate::plugin_host::PluginHostAdapter>,
+) {
+    let plugin_host = crate::plugin_host::PluginHostAdapter::new();
+    let host: Arc<dyn PluginHost> = plugin_host.clone();
+    let context = PluginContext { host: Some(host) };
+    let mut plugins = Plugins::new();
+    load_plugins(&mut plugins, Some(&context));
+    let plugin_tools = crate::plugin_display::capture(&plugins);
+    (plugins, plugin_tools, plugin_host)
+}
+
 fn allowed_origins() -> Vec<String> {
     std::env::var("NORTE_CODE_ALLOWED_ORIGINS").map_or_else(
         |_| HostConfig::default().allowed_origins,
@@ -269,9 +284,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let service_config = ServiceConfig::load(user_config_path().as_deref(), Some(&project))?;
     let agent = service_config.default_agent()?;
     let agent_id = agent.name.clone();
-    let mut plugins = Plugins::new();
-    load_plugins(&mut plugins, None);
-    let plugin_tools = crate::plugin_display::capture(&plugins);
+    let (plugins, plugin_tools, plugin_host) = load_plugins_for_host();
     let offered = plugins.catalogue();
     let created = ensure_catalog_files()?;
     if created.providers || created.models {
@@ -300,6 +313,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     migrate_pins_to_session_stats(&services, &database.with_file_name("pins")).await;
+    plugin_host.install_services(services.clone(), agent_id.clone());
     let auth_principals = std::env::var("NORTE_CODE_AUTH_USERS")
         .ok()
         .map(|users| {
@@ -330,6 +344,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let artifact_store = Arc::new(BlobArtifactStore::new(blobs));
     let host = Arc::new(
         NorteCodeRaepHost::with_agents(services, host_config)?
+            .with_plugin_host(plugin_host)
             .with_replay_log(replay_log)
             .with_artifact_store(artifact_store)
             .with_upload_index(upload_index),

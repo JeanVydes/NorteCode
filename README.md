@@ -82,13 +82,13 @@ norte service plugins remove <name>
 ```
 
 Plugins are loaded when the service starts, so restart it after installing,
-enabling or disabling.
+updating, removing, enabling or disabling.
 
 ## Configuration
 
-- `CONFIG.md` — the full configuration schema (`service.json`, `cli.json`,
+- `CONFIG.md`: the full configuration schema (`service.json`, `cli.json`,
   catalogue files, secrets).
-- `AGENTS.md` — the crate layout and the rules that keep it that way.
+- `AGENTS.md`: the crate layout and the rules that keep it that way.
 - `guide/` — the user guide.
 
 Selecting a model in the TUI checks the provider's `environment_keys`, then

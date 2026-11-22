@@ -13,6 +13,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 
 use crate::payloads::payload;
+use crate::plugin_host::PluginHostAdapter;
 use norte_code_wire::{JobStatus, ServiceDataKind};
 
 const DEFAULT_REPLAY_CAPACITY: usize = 2_000;
@@ -1106,6 +1107,7 @@ pub struct NorteCodeRaepHost {
     upload_index: Option<Arc<dyn UploadIndex>>,
     connections: Arc<Semaphore>,
     turn_handles: Arc<turn_handles::TurnHandles>,
+    plugin_host: Option<Arc<PluginHostAdapter>>,
 }
 
 pub(crate) fn summarize_plugin_updates(
@@ -1183,6 +1185,7 @@ impl NorteCodeRaepHost {
             upload_index: None,
             connections: Arc::new(Semaphore::new(max_connections)),
             turn_handles: Arc::new(turn_handles::TurnHandles::default()),
+            plugin_host: None,
         })
     }
 
@@ -1213,6 +1216,13 @@ impl NorteCodeRaepHost {
         }
         host.services = services;
         Ok(host)
+    }
+
+    /// Gives plugins a way to ask this host about the current session.
+    #[must_use]
+    pub(crate) fn with_plugin_host(mut self, plugin_host: Arc<PluginHostAdapter>) -> Self {
+        self.plugin_host = Some(plugin_host);
+        self
     }
 
     /// Moves the replay log to another directory.
