@@ -1644,7 +1644,6 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
- "tokio-stream",
  "tower",
  "tower-http",
  "tracing",

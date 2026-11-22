@@ -420,39 +420,21 @@ const fn status_name(status: PlanStatus) -> &'static str {
 fn plan_front_matter(plan: &Plan) -> String {
     let mut front_matter = format!("---\nstatus: {}\n", status_name(plan.status));
     if let Some(title) = plan_title(&plan.content) {
-        writeln!(
-            front_matter,
-            "title: {}",
-            serde_json::to_string(title).expect("serializing a string cannot fail")
-        )
-        .expect("writing to a string cannot fail");
+        let _ = writeln!(front_matter, "title: {title:?}");
     }
     if let Some(created_at) = &plan.created_at {
-        writeln!(front_matter, "created_at: {}", created_at.to_rfc3339())
-            .expect("writing to a string cannot fail");
+        let _ = writeln!(front_matter, "created_at: {}", created_at.to_rfc3339());
     }
     if let Some(updated_at) = &plan.updated_at {
-        writeln!(front_matter, "updated_at: {}", updated_at.to_rfc3339())
-            .expect("writing to a string cannot fail");
+        let _ = writeln!(front_matter, "updated_at: {}", updated_at.to_rfc3339());
     }
     if let Some(provider) = &plan.provider {
-        writeln!(
-            front_matter,
-            "provider: {}",
-            serde_json::to_string(provider).expect("serializing a string cannot fail")
-        )
-        .expect("writing to a string cannot fail");
+        let _ = writeln!(front_matter, "provider: {provider:?}");
     }
     if let Some(model) = &plan.model {
-        writeln!(
-            front_matter,
-            "model: {}",
-            serde_json::to_string(model).expect("serializing a string cannot fail")
-        )
-        .expect("writing to a string cannot fail");
+        let _ = writeln!(front_matter, "model: {model:?}");
     }
-    writeln!(front_matter, "revision: {}", plan.revision).expect("writing to a string cannot fail");
-    front_matter.push_str("---");
+    let _ = write!(front_matter, "revision: {}\n---", plan.revision);
     front_matter
 }
 

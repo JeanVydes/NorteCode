@@ -344,3 +344,16 @@ fn session_stats_carries_the_context_the_footer_needs() {
     assert_eq!(payload["context_used"], 12_000);
     assert_eq!(payload["context_window"], 200_000);
 }
+
+struct Failing;
+
+impl serde::Serialize for Failing {
+    fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("serialization failed"))
+    }
+}
+
+#[test]
+fn an_unserializable_payload_becomes_null() {
+    assert_eq!(serialized(Failing), Value::Null);
+}

@@ -20,14 +20,21 @@ pub(crate) use canonical::canonical_event_payload;
 use serde_json::json;
 pub(crate) use standard::standard_event_payload;
 
-/// Serializes a typed RAEP payload. The payloads are closed structs, so this
-/// cannot fail; the helper exists so call sites never build wire JSON by hand.
+/// Serializes a typed RAEP payload. Call sites never build wire JSON by hand.
 ///
 /// The return is `Value` only because the envelope's payload slot is the
-/// spec's generic `P` — every caller passes a closed struct, and the client
+/// spec's generic `P`. Every caller passes a closed struct, and the client
 /// decodes it back into the matching struct. No payload is built as `Value`.
 pub(crate) fn payload<T: Serialize>(value: T) -> Value {
-    serde_json::to_value(value).expect("typed RAEP payload is serializable")
+    serialized(value)
+}
+
+/// Converts a value that is known to be serializable without aborting the host.
+pub(crate) fn serialized<T: Serialize>(value: T) -> Value {
+    serde_json::to_value(value).unwrap_or_else(|error| {
+        tracing::warn!("could not serialize a RAEP payload: {error}");
+        Value::Null
+    })
 }
 
 /// How a turn ended, in the canonical payload's spelling.

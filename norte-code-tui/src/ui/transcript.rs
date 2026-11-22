@@ -1026,9 +1026,9 @@ impl Transcript {
                 Outcome::Consumed
             }
             MouseEventKind::Down(MouseButton::Left)
-                if bar.is_some_and(|bar| mouse.column == bar.x) =>
+                if let Some(bar) = bar
+                    && mouse.column == bar.x =>
             {
-                let bar = bar.expect("bar");
                 let local = mouse.row.saturating_sub(self.area.y);
                 if bar.thumb_contains(local) {
                     self.dragging_thumb = true;

@@ -127,7 +127,8 @@ impl TreeBuilder {
     /// The result of a tool call: it belongs to the call that is open.
     fn push_tool_result(&mut self, text: String) {
         if let Some(slot) = self.last_tool()
-            && let TranscriptNodeKind::Tool(tool) = self.tool_at(slot).kind_mut()
+            && let Some(node) = self.tool_at(slot)
+            && let TranscriptNodeKind::Tool(tool) = node.kind_mut()
             && tool.output.is_none()
         {
             tool.output = Some(text);
@@ -152,7 +153,10 @@ impl TreeBuilder {
         let Some(slot) = self.tools.get(call_id).copied() else {
             return;
         };
-        let TranscriptNodeKind::Tool(tool) = self.tool_at(slot).kind_mut() else {
+        let Some(node) = self.tool_at(slot) else {
+            return;
+        };
+        let TranscriptNodeKind::Tool(tool) = node.kind_mut() else {
             return;
         };
         for line in text.lines() {
@@ -164,7 +168,8 @@ impl TreeBuilder {
     fn finish_tool(&mut self, finished: ToolNode, turn: Option<TurnKey>) {
         if finished.call_id.is_empty()
             && let Some(slot) = self.last_open_tool()
-            && let TranscriptNodeKind::Tool(tool) = self.tool_at(slot).kind_mut()
+            && let Some(node) = self.tool_at(slot)
+            && let TranscriptNodeKind::Tool(tool) = node.kind_mut()
         {
             tool.status = finished.status;
             tool.duration_ms = finished.duration_ms;
@@ -185,7 +190,10 @@ impl TreeBuilder {
         let Some(slot) = self.tools.get(&finished.call_id).copied() else {
             return;
         };
-        let TranscriptNodeKind::Tool(tool) = self.tool_at(slot).kind_mut() else {
+        let Some(node) = self.tool_at(slot) else {
+            return;
+        };
+        let TranscriptNodeKind::Tool(tool) = node.kind_mut() else {
             return;
         };
         tool.status = finished.status;
@@ -197,13 +205,12 @@ impl TreeBuilder {
         }
     }
 
-    /// The tool call at a slot.
-    fn tool_at(&mut self, slot: ToolSlot) -> &mut TranscriptNode {
+    /// The tool call at a slot, when the event stream is still consistent.
+    fn tool_at(&mut self, slot: ToolSlot) -> Option<&mut TranscriptNode> {
         if let Some(root) = slot.root {
-            return &mut self.roots[root];
+            return self.roots.get_mut(root);
         }
-        let turn = self.turn.as_mut().expect("the turn is open");
-        &mut turn.children[slot.child]
+        self.turn.as_mut()?.children.get_mut(slot.child)
     }
 
     /// A new tool call, in the turn being built.
@@ -317,16 +324,14 @@ impl TreeBuilder {
         None
     }
 
-    /// The turn being built.
-    fn turn_mut(&mut self) -> &mut TurnState {
-        self.turn
-            .as_mut()
-            .expect("the turn was opened before it was used")
+    /// The turn being built, when one is open.
+    fn turn_mut(&mut self) -> Option<&mut TurnState> {
+        self.turn.as_mut()
     }
 
     /// The turn being built, opened without a name when there is none: what
     /// a replayed item needs, since a replay names no turn.
-    fn turn_or_open(&mut self) -> &mut TurnState {
+    fn turn_or_open(&mut self) -> Option<&mut TurnState> {
         if self.turn.is_none() {
             self.turn = Some(TurnState {
                 key: TurnKey::Named("replay".to_owned()),

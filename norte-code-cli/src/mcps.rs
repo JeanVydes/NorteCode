@@ -125,6 +125,15 @@ fn default_agent_name(root: &serde_json::Value) -> Option<String> {
     None
 }
 
+fn agent_at_mut<'a>(
+    root: &'a mut serde_json::Value,
+    index: usize,
+) -> Result<&'a mut serde_json::Value, String> {
+    root.get_mut("agents")
+        .and_then(|agents| agents.get_mut(index))
+        .ok_or_else(|| format!("agent index {index} is invalid"))
+}
+
 fn find_agent_index(root: &mut serde_json::Value, agent: Option<&str>) -> Result<usize, String> {
     let target = match agent {
         Some(name) => name.to_owned(),
@@ -236,11 +245,13 @@ fn add(args: AddArgs) -> Result<(), String> {
 
     let (path, mut root) = load_service_json()?;
     let index = find_agent_index(&mut root, args.agent.as_deref())?;
-    let agent_name = root["agents"][index]["name"]
-        .as_str()
+    let agent = agent_at_mut(&mut root, index)?;
+    let agent_name = agent
+        .get("name")
+        .and_then(|name| name.as_str())
         .unwrap_or_default()
         .to_owned();
-    let servers = root["agents"][index]
+    let servers = agent
         .as_object_mut()
         .ok_or("agent entry is not an object".to_owned())?
         .entry("mcpServers")
@@ -268,13 +279,13 @@ fn add(args: AddArgs) -> Result<(), String> {
 fn remove(name: &str, agent: Option<&str>) -> Result<(), String> {
     let (path, mut root) = load_service_json()?;
     let index = find_agent_index(&mut root, agent)?;
-    let agent_name = root["agents"][index]["name"]
-        .as_str()
+    let agent = agent_at_mut(&mut root, index)?;
+    let agent_name = agent
+        .get("name")
+        .and_then(|name| name.as_str())
         .unwrap_or_default()
         .to_owned();
-    let servers = root["agents"][index]
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut());
+    let servers = agent.get_mut("mcpServers").and_then(|v| v.as_object_mut());
     let Some(servers) = servers else {
         return Err(format!("agent `{agent_name}` has no MCP servers"));
     };
@@ -425,3 +436,7 @@ fn cli_token() -> String {
         .unwrap_or_default()
         .to_owned()
 }
+
+#[cfg(test)]
+#[path = "mcps_tests.rs"]
+mod tests;

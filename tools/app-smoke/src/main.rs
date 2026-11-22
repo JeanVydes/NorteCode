@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-fn main() {
+fn main() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     // `--scenario` runs a named flow instead of one prompt: the point of this
     // binary is to exercise the paths the page shows, not just one answer.
@@ -64,11 +64,12 @@ fn main() {
         _ => vec![("Reply with exactly: smoke ok", Expectations::text_only())],
     };
     for (prompt, expected) in runs {
-        run(&args, prompt, &expected);
+        run(&args, prompt, &expected)?;
     }
+    Ok(())
 }
 
-fn run(args: &[String], prompt: &str, expected: &Expectations) {
+fn run(args: &[String], prompt: &str, expected: &Expectations) -> Result<(), String> {
     let args = args.to_vec();
     let base = args
         .first()
@@ -78,18 +79,19 @@ fn run(args: &[String], prompt: &str, expected: &Expectations) {
     let prompt = prompt.to_owned();
     let agent = flag(&args, "--agent").unwrap_or_else(|| "norte-code".to_owned());
 
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| format!("runtime: {error}"))?;
     runtime.block_on(async move {
         let client = reqwest::Client::new();
         let base = base.trim_end_matches('/').to_owned();
         let session_id = match session {
             Some(id) => id,
-            None => create_session(&client, &base).await,
+            None => create_session(&client, &base).await?,
         };
         println!("session {session_id}");
 
-        let mut events = EventReader::new(open_stream(&client, &base, &session_id, &agent).await);
-        send_prompt(&client, &base, &session_id, &prompt).await;
+        let stream = open_stream(&client, &base, &session_id, &agent).await?;
+        let mut events = EventReader::new(stream);
+        send_prompt(&client, &base, &session_id, &prompt).await?;
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         let mut seen = Counts::default();
@@ -110,68 +112,77 @@ fn run(args: &[String], prompt: &str, expected: &Expectations) {
         if args.iter().any(|argument| argument == "--scenario")
             && flag(&args, "--scenario").as_deref() == Some("export")
         {
-            export_and_import(&client, &base, &session_id).await;
+            export_and_import(&client, &base, &session_id).await?;
         }
-        assert!(
+        check(
             seen.user_input_accepted,
-            "the server never accepted the input"
-        );
+            "the server never accepted the input".to_owned(),
+        )?;
         if expected.text {
-            assert!(seen.token_deltas > 0, "no answer text arrived");
+            check(seen.token_deltas > 0, "no answer text arrived".to_owned())?;
         }
         if expected.tools {
-            assert!(
+            check(
                 seen.tool_started > 0 && seen.tool_started == seen.tool_finished,
-                "tools started {} but finished {}",
-                seen.tool_started,
-                seen.tool_finished
-            );
+                format!(
+                    "tools started {} but finished {}",
+                    seen.tool_started, seen.tool_finished
+                ),
+            )?;
         }
         if expected.todos {
-            assert!(seen.todos > 0, "the todo list never arrived");
+            check(seen.todos > 0, "the todo list never arrived".to_owned())?;
         }
         if expected.question {
-            assert!(seen.questions > 0, "the question never arrived");
+            check(seen.questions > 0, "the question never arrived".to_owned())?;
         }
         if expected.job_turn {
             // The screenshot bug: the job finished, and the page stayed on
             // "Thinking…" because the auto-turn's events were drained by the
             // service and never forwarded. Two accepted inputs prove the
-            // injected message arrived; the text assertion above proves the
+            // injected message arrived; the text check above proves the
             // answer that followed did too.
-            assert!(
+            check(
                 seen.accepted >= 2,
-                "the injected job message never reached the client (accepted={})",
-                seen.accepted
-            );
-            assert!(
+                format!(
+                    "the injected job message never reached the client (accepted={})",
+                    seen.accepted
+                ),
+            )?;
+            check(
                 seen.deltas_after_job > 0,
-                "the model's answer after the job never reached the client"
-            );
+                "the model's answer after the job never reached the client".to_owned(),
+            )?;
         }
         if expected.jobs {
             // A detached call must announce itself on the session's own
             // stream; it used to be emitted under the engine's session id and
             // dropped, so a client only ever saw the finished job.
-            assert!(
+            check(
                 seen.jobs_started > 0,
-                "JOB_STARTED never reached the session stream"
-            );
-            assert!(
+                "JOB_STARTED never reached the session stream".to_owned(),
+            )?;
+            check(
                 seen.job_progress > 0,
-                "JOB_PROGRESS_DELTA never reached the session stream"
-            );
+                "JOB_PROGRESS_DELTA never reached the session stream".to_owned(),
+            )?;
         }
         if expected.question {
             // A parked turn does not finish; it is waiting on the person.
-            assert!(
+            check(
                 !seen.states.iter().any(|state| state == "COMPLETED"),
-                "a turn parked on a question reported COMPLETED"
-            );
+                "a turn parked on a question reported COMPLETED".to_owned(),
+            )?;
         } else {
-            assert!(seen.finished, "the turn never reported an end");
+            check(seen.finished, "the turn never reported an end".to_owned())?;
         }
-    });
+        Ok::<(), String>(())
+    })?;
+    Ok(())
+}
+
+fn check(ok: bool, message: String) -> Result<(), String> {
+    if ok { Ok(()) } else { Err(message) }
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -286,7 +297,11 @@ impl Counts {
 ///
 /// A conversation with tool calls could not be exported at all until the
 /// bundle learned to carry them as text; this is the regression check.
-async fn export_and_import(client: &reqwest::Client, base: &str, session_id: &str) {
+async fn export_and_import(
+    client: &reqwest::Client,
+    base: &str,
+    session_id: &str,
+) -> Result<(), String> {
     let body = serde_json::json!({
         "version": "1.0",
         "id": uuid::Uuid::new_v4().to_string(),
@@ -303,10 +318,10 @@ async fn export_and_import(client: &reqwest::Client, base: &str, session_id: &st
         .json(&body)
         .send()
         .await
-        .expect("export request")
+        .map_err(|error| format!("export request: {error}"))?
         .json::<Value>()
         .await
-        .expect("export reply");
+        .map_err(|error| format!("export reply: {error}"))?;
     let export_id = reply["events"]
         .as_array()
         .and_then(|events| {
@@ -314,58 +329,62 @@ async fn export_and_import(client: &reqwest::Client, base: &str, session_id: &st
                 .iter()
                 .find_map(|event| event["payload"]["export_id"].as_str())
         })
-        .unwrap_or_else(|| panic!("no export id in {reply}"));
+        .ok_or_else(|| format!("no export id in {reply}"))?;
     let bundle = client
         .get(format!("{base}/raep/v1/exports/{export_id}"))
         .send()
         .await
-        .expect("download export")
+        .map_err(|error| format!("download export: {error}"))?
         .bytes()
         .await
-        .expect("bundle bytes");
-    assert!(!bundle.is_empty(), "the exported bundle is empty");
+        .map_err(|error| format!("bundle bytes: {error}"))?;
+    check(
+        !bundle.is_empty(),
+        "the exported bundle is empty".to_owned(),
+    )?;
     let imported = client
         .post(format!("{base}/raep/v1/imports"))
         .header("content-type", "application/vnd.raep.bundle+zip")
         .body(bundle)
         .send()
         .await
-        .expect("import request")
+        .map_err(|error| format!("import request: {error}"))?
         .json::<Value>()
         .await
-        .expect("import reply");
+        .map_err(|error| format!("import reply: {error}"))?;
     let import_id = imported["import_id"]
         .as_str()
-        .unwrap_or_else(|| panic!("no import id in {imported}"))
+        .ok_or_else(|| format!("no import id in {imported}"))?
         .to_owned();
     let committed = client
         .post(format!("{base}/raep/v1/imports/{import_id}/commit"))
         .json(&serde_json::json!({}))
         .send()
         .await
-        .expect("commit request");
-    assert!(
+        .map_err(|error| format!("commit request: {error}"))?;
+    check(
         committed.status().is_success(),
-        "import commit failed: {}",
-        committed.status()
-    );
+        format!("import commit failed: {}", committed.status()),
+    )?;
     println!("export/import roundtrip ok");
+    Ok(())
 }
 
-async fn create_session(client: &reqwest::Client, base: &str) -> String {
+async fn create_session(client: &reqwest::Client, base: &str) -> Result<String, String> {
     let response = client
         .post(format!("{base}/raep/v1/sessions"))
         .json(&serde_json::json!({ "agent_id": "norte-code", "title": "smoke" }))
         .send()
         .await
-        .expect("create session")
+        .map_err(|error| format!("create session: {error}"))?
         .json::<Value>()
         .await
-        .expect("session json");
-    response["session_id"]
+        .map_err(|error| format!("session json: {error}"))?;
+    let id = response["session_id"]
         .as_str()
-        .expect("session id")
-        .to_owned()
+        .ok_or_else(|| format!("no session id in {response}"))?
+        .to_owned();
+    Ok(id)
 }
 
 async fn open_stream(
@@ -373,18 +392,24 @@ async fn open_stream(
     base: &str,
     session_id: &str,
     agent: &str,
-) -> reqwest::Response {
-    client
+) -> Result<reqwest::Response, String> {
+    let response = client
         .get(format!(
             "{base}/raep/v1/sessions/{session_id}/events?agent_id={agent}"
         ))
         .header("accept", "text/event-stream")
         .send()
         .await
-        .expect("open stream")
+        .map_err(|error| format!("open stream: {error}"))?;
+    Ok(response)
 }
 
-async fn send_prompt(client: &reqwest::Client, base: &str, session_id: &str, prompt: &str) {
+async fn send_prompt(
+    client: &reqwest::Client,
+    base: &str,
+    session_id: &str,
+    prompt: &str,
+) -> Result<(), String> {
     let body = serde_json::json!({
         "version": "1.0",
         "id": uuid::Uuid::new_v4().to_string(),
@@ -399,14 +424,14 @@ async fn send_prompt(client: &reqwest::Client, base: &str, session_id: &str, pro
         .json(&body)
         .send()
         .await
-        .expect("send prompt")
+        .map_err(|error| format!("send prompt: {error}"))?
         .json::<Value>()
         .await
-        .expect("reply json");
-    assert_eq!(
-        reply["accepted"], true,
-        "the host refused the input: {reply}"
-    );
+        .map_err(|error| format!("reply json: {error}"))?;
+    check(
+        reply["accepted"].as_bool() == Some(true),
+        format!("the host refused the input: {reply}"),
+    )
 }
 
 /// Reads SSE frames incrementally, keeping whatever part of a frame was cut
@@ -446,3 +471,7 @@ impl EventReader {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;

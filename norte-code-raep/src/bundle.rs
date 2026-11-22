@@ -292,7 +292,7 @@ pub fn sha256(bytes: &[u8]) -> String {
 
     let mut digest = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {
-        write!(digest, "{byte:02x}").expect("writing to a String cannot fail");
+        let _ = write!(digest, "{byte:02x}");
     }
     digest
 }

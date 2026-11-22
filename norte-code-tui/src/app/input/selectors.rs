@@ -28,18 +28,20 @@ pub(in crate::app) fn sync_selectors(
         selector.select(model.preferences.send_mode.label());
     }
     if let Some(selector) = tree.find_mut::<crate::ui::Selector>("reasoning") {
-        let next = crate::ui_model::ReasoningLevel::from_label(selector.value())
-            .unwrap_or(crate::ui_model::ReasoningLevel::Auto);
+        let next =
+            crate::ui_model::ReasoningLevel::from_label(selector.value().unwrap_or_default())
+                .unwrap_or(crate::ui_model::ReasoningLevel::Auto);
         if next != model.preferences.reasoning {
             model.preferences.reasoning = next;
             if let (Some(cmd), Some(session)) = (commands.as_ref(), model.active.clone()) {
-                let effort = selector.value().to_string();
+                let effort = selector.value().unwrap_or_default().to_string();
                 let _ = cmd.try_send(UiCommand::SetReasoning { session, effort });
             }
         }
     }
     if let Some(selector) = tree.find_mut::<crate::ui::Selector>("queue") {
-        model.preferences.send_mode = crate::ui_model::SendMode::from_label(selector.value())
-            .unwrap_or(crate::ui_model::SendMode::Steer);
+        model.preferences.send_mode =
+            crate::ui_model::SendMode::from_label(selector.value().unwrap_or_default())
+                .unwrap_or(crate::ui_model::SendMode::Steer);
     }
 }

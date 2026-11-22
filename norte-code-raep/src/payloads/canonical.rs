@@ -9,7 +9,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
     let payload = match kind {
         ServerEventKind::SessionCreated { title } => CanonicalEvent::SessionCreated { title },
         ServerEventKind::SessionList { sessions } => CanonicalEvent::SessionList {
-            sessions: serde_json::to_value(sessions).expect("session list is serializable"),
+            sessions: serialized(sessions),
         },
         ServerEventKind::SessionDeleted => CanonicalEvent::SessionDeleted,
         ServerEventKind::SessionRenamed { title } => CanonicalEvent::SessionRenamed { title },
@@ -25,7 +25,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::TurnStarted { turn } => CanonicalEvent::TurnStarted { turn: *turn },
         ServerEventKind::Delta { turn, delta } => CanonicalEvent::TokenDelta {
             turn: *turn,
-            delta: serde_json::to_value(delta).expect("protocol delta is serializable"),
+            delta: serialized(delta),
         },
         ServerEventKind::ToolStarted {
             turn,
@@ -53,7 +53,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             turn: *turn,
             call_id,
             tool,
-            stream: serde_json::to_value(stream).expect("output stream is serializable"),
+            stream: serialized(stream),
             text,
             last: *last,
         },
@@ -97,7 +97,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             reason: reason.as_str(),
         },
         ServerEventKind::JobList { jobs } => CanonicalEvent::JobList {
-            jobs: serde_json::to_value(jobs).expect("job list is serializable"),
+            jobs: serialized(jobs),
         },
         ServerEventKind::JobsStopped { stopped } => {
             CanonicalEvent::JobsStopped { stopped: *stopped }
@@ -122,7 +122,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             index,
         } => CanonicalEvent::DetachedJobProgress {
             job_id,
-            stream: serde_json::to_value(stream).expect("job output stream is serializable"),
+            stream: serialized(stream),
             delta,
             index: *index,
         },
@@ -217,7 +217,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         } => CanonicalEvent::RequestCompleted {
             turn: *turn,
             index: *index,
-            usage: serde_json::to_value(usage).expect("usage is serializable"),
+            usage: serialized(usage),
             cost_usd: *cost_usd,
             truncated: *truncated,
             duration_ms: *duration_ms,
@@ -246,7 +246,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::SessionTodos { todos } => CanonicalEvent::SessionTodos { todos },
         ServerEventKind::CompactionStarted { reason } => CanonicalEvent::ContextUpdate {
             state: CompactionState::Started,
-            reason: Some(serde_json::to_value(reason).expect("compaction reason is serializable")),
+            reason: Some(serialized(reason)),
             compacted: None,
             summary: None,
             error: None,
@@ -322,7 +322,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             requests: *requests,
         },
         ServerEventKind::PluginList { plugins } => CanonicalEvent::PluginList {
-            plugins: serde_json::to_value(plugins).expect("plugin list is serializable"),
+            plugins: serialized(plugins),
         },
         ServerEventKind::PluginChanged { operation, name } => {
             CanonicalEvent::PluginChanged { operation, name }
@@ -385,11 +385,11 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         },
         ServerEventKind::PlanList { plans } => CanonicalEvent::AgentCatalog {
             kind: CatalogKind::Plans,
-            entries: serde_json::to_value(plans).expect("plan list is serializable"),
+            entries: serialized(plans),
         },
         ServerEventKind::ModelList { models } => CanonicalEvent::AgentCatalog {
             kind: CatalogKind::Models,
-            entries: serde_json::to_value(models).expect("model list is serializable"),
+            entries: serialized(models),
         },
         ServerEventKind::SkillList { skills, warnings } => CanonicalEvent::AgentCatalog {
             kind: CatalogKind::Skills,
@@ -426,11 +426,11 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::Error { code, message } => CanonicalEvent::Error { code, message },
         ServerEventKind::Telemetry { records } => CanonicalEvent::ServiceData {
             kind: ServiceDataKind::Telemetry,
-            data: serde_json::to_value(records).expect("telemetry is serializable"),
+            data: serialized(records),
         },
         ServerEventKind::ToolList { tools } => CanonicalEvent::ServiceData {
             kind: ServiceDataKind::ToolList,
-            data: serde_json::to_value(tools).expect("tool list is serializable"),
+            data: serialized(tools),
         },
         ServerEventKind::McpList { servers, failures } => CanonicalEvent::ServiceData {
             kind: ServiceDataKind::McpList,
@@ -442,12 +442,12 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::SessionExportReady { export_id, bundle } => {
             CanonicalEvent::SessionExportReady {
                 export_id,
-                bundle: serde_json::to_value(bundle).expect("export bundle is serializable"),
+                bundle: serialized(bundle),
             }
         }
         ServerEventKind::ImportResult { session_id, id_map } => CanonicalEvent::ImportResult {
             session_id,
-            id_map: serde_json::to_value(id_map).expect("id map is serializable"),
+            id_map: serialized(id_map),
         },
         ServerEventKind::ChildSessionStarted {
             child_session_id,
@@ -503,7 +503,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             }
         }
         ServerEventKind::HistoryPage { items, has_more } => CanonicalEvent::HistoryPage {
-            items: serde_json::to_value(items).expect("history items serializable"),
+            items: serialized(items),
             has_more: *has_more,
         },
         ServerEventKind::HistoryRewound {
@@ -515,9 +515,8 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         } => CanonicalEvent::HistoryRewound {
             to_turn_id,
             inclusive: *inclusive,
-            rewound_turn_ids: serde_json::to_value(rewound_turn_ids)
-                .expect("rewound turn ids serializable"),
-            side_effects: serde_json::to_value(side_effects).expect("side effects serializable"),
+            rewound_turn_ids: serialized(rewound_turn_ids),
+            side_effects: serialized(side_effects),
             workspace_restored: *workspace_restored,
         },
         ServerEventKind::OutputPartStarted {
@@ -532,7 +531,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             turn: *turn,
             part_id,
             index: *index,
-            modality: serde_json::to_value(modality).expect("modality serializable"),
+            modality: serialized(modality),
             mime_type: mime_type.clone(),
             streamed: *streamed,
             bytes_expected: *bytes_expected,
@@ -550,12 +549,12 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             turn: *turn,
             part_id,
             index: *index,
-            modality: serde_json::to_value(modality).expect("modality serializable"),
+            modality: serialized(modality),
             bytes: *bytes,
             sha256,
             blob: blob.clone(),
             error: error.clone(),
         },
     };
-    serde_json::to_value(payload).expect("canonical event is serializable")
+    serialized(payload)
 }

@@ -12,12 +12,16 @@ impl TreeBuilder {
                 Delta::Text { text, .. } | Delta::Refusal { text, .. } => {
                     self.flush_reasoning();
                     self.open_turn(TurnKey::Live(*turn));
-                    self.turn_mut().assistant.push_str(text);
+                    if let Some(turn) = self.turn_mut() {
+                        turn.assistant.push_str(text);
+                    }
                 }
                 Delta::Reasoning { text, .. } => {
                     self.flush_assistant();
                     self.open_turn(TurnKey::Live(*turn));
-                    self.turn_mut().reasoning.push_str(text);
+                    if let Some(turn) = self.turn_mut() {
+                        turn.reasoning.push_str(text);
+                    }
                 }
                 Delta::ToolArguments { .. } => {}
                 Delta::Media { bytes, last, .. } => {
@@ -106,7 +110,9 @@ impl TreeBuilder {
             } => match kind {
                 ReplayedKind::Reasoning => {
                     self.flush_assistant();
-                    self.turn_or_open().reasoning.push_str(text);
+                    if let Some(turn) = self.turn_or_open() {
+                        turn.reasoning.push_str(text);
+                    }
                 }
                 ReplayedKind::ToolCall => {
                     self.flush();

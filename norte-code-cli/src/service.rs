@@ -98,7 +98,7 @@ pub(crate) fn probe(url: &str) -> bool {
     let Ok(stream) = TcpStream::connect_timeout(
         &addr
             .parse()
-            .unwrap_or_else(|_| "127.0.0.1:8787".parse().unwrap()),
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 8787))),
         Duration::from_millis(250),
     ) else {
         return false;

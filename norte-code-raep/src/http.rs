@@ -651,11 +651,11 @@ async fn download_session_output(
     );
     match range {
         Some((start, end)) => {
-            response_headers.insert(
-                axum::http::header::CONTENT_RANGE,
+            if let Ok(value) =
                 HeaderValue::from_str(&format!("bytes {start}-{end}/{}", bytes.len()))
-                    .expect("numeric content-range is a valid header"),
-            );
+            {
+                response_headers.insert(axum::http::header::CONTENT_RANGE, value);
+            }
             (
                 StatusCode::PARTIAL_CONTENT,
                 response_headers,
@@ -739,11 +739,11 @@ async fn download_export(
     );
     match range {
         Some((start, end)) => {
-            response_headers.insert(
-                axum::http::header::CONTENT_RANGE,
+            if let Ok(value) =
                 HeaderValue::from_str(&format!("bytes {start}-{end}/{}", bytes.len()))
-                    .expect("numeric content-range is a valid header"),
-            );
+            {
+                response_headers.insert(axum::http::header::CONTENT_RANGE, value);
+            }
             (
                 StatusCode::PARTIAL_CONTENT,
                 response_headers,

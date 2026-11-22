@@ -33,9 +33,9 @@ impl Selector {
         }
     }
 
-    /// The value currently shown.
-    pub(crate) fn value(&self) -> &str {
-        &self.options[self.index]
+    /// The value currently shown, when the selector has options.
+    pub(crate) fn value(&self) -> Option<&str> {
+        self.options.get(self.index).map(String::as_str)
     }
 
     /// Show `value`, when the selector offers it.
@@ -59,7 +59,8 @@ impl Selector {
 
     /// Width in cells of the whole selector.
     pub(crate) fn width(&self) -> u16 {
-        let cells = self.label.chars().count() + self.value().chars().count() + 6;
+        let cells =
+            self.label.chars().count() + self.value().unwrap_or_default().chars().count() + 6;
         u16::try_from(cells).unwrap_or(u16::MAX)
     }
 }
@@ -82,7 +83,11 @@ impl View for Selector {
     }
 
     fn outline(&self) -> Option<String> {
-        Some(format!("{}='{}'", self.label, self.value()))
+        Some(format!(
+            "{}='{}'",
+            self.label,
+            self.value().unwrap_or_default()
+        ))
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
@@ -98,7 +103,7 @@ impl View for Selector {
             label.chars().count(),
             Style::default().fg(theme.muted).bg(surface),
         );
-        let value = self.value().to_string();
+        let value = self.value().unwrap_or_default().to_string();
         let value_x = area.x + u16::try_from(label.chars().count()).unwrap_or(u16::MAX) + 1;
         let mut value_style = Style::default()
             .fg(theme.accent)
@@ -158,3 +163,7 @@ impl View for Selector {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "selector_tests.rs"]
+mod tests;

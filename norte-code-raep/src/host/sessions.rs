@@ -67,9 +67,8 @@ impl NorteCodeRaepHost {
             .filter(|(_, service)| stored(service).is_some())
             .map(|(agent_id, _)| agent_id.to_owned())
             .collect::<Vec<_>>();
-        if holders.len() == 1 {
-            let [agent_id] = <[String; 1]>::try_from(holders).expect("one holder");
-            return agent_id;
+        if let [agent_id] = holders.as_slice() {
+            return agent_id.clone();
         }
         self.services
             .iter()

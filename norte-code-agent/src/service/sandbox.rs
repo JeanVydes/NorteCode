@@ -7,13 +7,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(any(target_os = "macos", test))]
+use std::fmt::Write as _;
+
 use async_trait::async_trait;
 use norte::{FnExecutor, ToolContext, ToolDeclaration, ToolOutput};
 use norte_code_protocol::config::SandboxConfig;
 use norte_tools::ShellRequest;
-
-#[cfg(any(target_os = "macos", test))]
-use std::fmt::Write as _;
 
 /// Wraps the command tool's executor so the OS sandbox runs the same call.
 ///
@@ -258,7 +258,7 @@ pub(super) fn macos_profile(
             return Err("a sandbox path contains a control character".to_owned());
         }
         let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
-        writeln!(profile, "  (subpath \"{escaped}\")").expect("writing to a String");
+        let _ = writeln!(profile, "  (subpath \"{escaped}\")");
     }
     profile.push_str(")\n");
     Ok(profile)

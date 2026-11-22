@@ -30,7 +30,9 @@ impl TreeBuilder {
                 if let Some(turn_id) = item.turn_id.as_deref() {
                     self.open_turn(TurnKey::from_history(turn_id));
                 }
-                self.turn_or_open().reasoning.push_str(&item.content);
+                if let Some(turn) = self.turn_or_open() {
+                    turn.reasoning.push_str(&item.content);
+                }
             }
             _ => {
                 self.flush();

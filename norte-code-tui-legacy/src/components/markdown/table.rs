@@ -226,10 +226,9 @@ fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> 
                 lines.push(Vec::new());
                 line_width = 0;
             }
-            lines
-                .last_mut()
-                .expect("a wrapping line exists")
-                .push(Span::styled(character.to_string(), span.style));
+            if let Some(line) = lines.last_mut() {
+                line.push(Span::styled(character.to_string(), span.style));
+            }
             line_width += character_width;
         }
     }
