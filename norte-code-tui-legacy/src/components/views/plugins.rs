@@ -424,7 +424,8 @@ fn progress_line(job: &crate::ui_model::PluginJob, model: &UiModel, width: u16) 
     // three-of-four build fills three of four cells without rounding drift.
     let total = job.total.max(1);
     let cells = width.saturating_sub(48).clamp(6, 24);
-    let filled = u16::try_from((job.step.min(total) * u64::from(cells)).div_ceil(total))
+    let scaled = job.step.min(total).saturating_mul(u64::from(cells));
+    let filled = u16::try_from(scaled.div_ceil(total))
         .unwrap_or(cells)
         .min(cells);
     Line::from(vec![

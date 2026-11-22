@@ -10,7 +10,6 @@ use norte_code_protocol::costs::CostRecord;
 use norte_code_protocol::sqlite::RequestStatus;
 use norte_code_wire::{ServerEvent, ServerEventKind};
 
-use super::Service;
 use super::compaction::used_context;
 use super::mapping::{
     ToolResultText, call_arguments, emit, reported_cost, request_metrics, shorten_tool_output,
@@ -20,6 +19,7 @@ use super::tooling::output_text;
 use super::turn_context::TurnContext;
 use super::turn_helpers::{budget_notice_kind, is_detached};
 use super::turn_history::from_todo_item;
+use super::{Service, Stats};
 
 impl Service {
     /// Maps one engine event and answers whether to keep going (the client is
@@ -298,17 +298,13 @@ impl Service {
             let Some(origin) = &message.origin else {
                 continue;
             };
-            stats.requests += 1;
+            accumulate_usage(stats, &origin.usage);
             let cost = reported_cost(&origin.usage);
             if let Some(cost) = cost {
                 stats.cost += cost;
             } else {
-                stats.unpriced += 1;
+                stats.unpriced = stats.unpriced.saturating_add(1);
             }
-            stats.input_tokens += origin.usage.input_tokens.unwrap_or(0);
-            stats.output_tokens += origin.usage.output_tokens.unwrap_or(0);
-            stats.cache_read_tokens += origin.usage.cache_read_tokens.unwrap_or(0);
-            stats.cache_write_tokens += origin.usage.cache_write_tokens.unwrap_or(0);
             // The last request's input tokens are the context: the whole
             // conversation goes again every time, so what it carried is what
             // the session holds.
@@ -372,3 +368,23 @@ impl Service {
         true
     }
 }
+
+fn accumulate_usage(stats: &mut Stats, usage: &norte::Usage) {
+    stats.requests = stats.requests.saturating_add(1);
+    stats.input_tokens = stats
+        .input_tokens
+        .saturating_add(usage.input_tokens.unwrap_or(0));
+    stats.output_tokens = stats
+        .output_tokens
+        .saturating_add(usage.output_tokens.unwrap_or(0));
+    stats.cache_read_tokens = stats
+        .cache_read_tokens
+        .saturating_add(usage.cache_read_tokens.unwrap_or(0));
+    stats.cache_write_tokens = stats
+        .cache_write_tokens
+        .saturating_add(usage.cache_write_tokens.unwrap_or(0));
+}
+
+#[cfg(test)]
+#[path = "turn_events_tests.rs"]
+mod tests;

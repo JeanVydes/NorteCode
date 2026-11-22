@@ -42,6 +42,15 @@ fn model_with_plugins() -> UiModel {
     }
 }
 
+fn extreme_job() -> PluginJob {
+    PluginJob {
+        operation: "build".to_owned(),
+        step: u64::MAX,
+        total: u64::MAX,
+        stage: "compiling".to_owned(),
+    }
+}
+
 fn drawn(view: &mut PluginsView, model: &UiModel) -> String {
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
     terminal
@@ -56,6 +65,15 @@ fn drawn(view: &mut PluginsView, model: &UiModel) -> String {
         text.push('\n');
     }
     text
+}
+
+#[test]
+fn a_progress_bar_with_extreme_steps_stays_within_its_cells() {
+    let model = UiModel::default();
+
+    let line = super::progress_line(&extreme_job(), &model, 80);
+
+    assert_ne!(line.spans, Vec::new());
 }
 
 #[test]

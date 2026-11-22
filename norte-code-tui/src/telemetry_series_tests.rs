@@ -70,6 +70,15 @@ fn an_unparseable_stamp_is_skipped() {
 }
 
 #[test]
+fn a_stamp_cut_inside_a_character_is_skipped() {
+    let data = report(vec![record("2026-11-19T10:0\u{e9}Z", 1.0, 1, 1, 0)]);
+
+    let result = series(Some(&data), ChartInterval::Minute);
+
+    assert_eq!(result.buckets, Vec::new());
+}
+
+#[test]
 fn the_series_downsamples_the_full_history_to_the_chart_limit() {
     let records = (0..MAX_CHART_BUCKETS + 10)
         .map(|minute| {

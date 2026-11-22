@@ -41,6 +41,19 @@ fn model_usage_ranks_by_requests() {
 }
 
 #[test]
+fn token_totals_saturate_when_reports_overflow() {
+    let records = vec![
+        record("a", 1, "p", "m", Some(u64::MAX), Some(u64::MAX), None),
+        record("a", 2, "p", "m", Some(u64::MAX), Some(u64::MAX), None),
+    ];
+
+    let board = Leaderboard::build(&records, LeaderboardGroup::Usage, LeaderboardSubject::Model);
+
+    assert_eq!(board.rows[0].input_tokens, u64::MAX);
+    assert_eq!(board.rows[0].output_tokens, u64::MAX);
+}
+
+#[test]
 fn session_usage_combines_input_and_output_tokens() {
     let records = vec![
         record("few", 1, "p", "m", Some(10), Some(10), Some(0.1)),

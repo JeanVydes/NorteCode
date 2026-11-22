@@ -25,7 +25,7 @@ impl TelemetryPage {
             .clamp(30, 52)
             .min(area.width.saturating_sub(32));
         let left_width = area.width.saturating_sub(detail_width + 1);
-        let lower_h = area.y + area.height - lower_y;
+        let lower_h = lower_y.saturating_sub(area.y).min(area.height);
 
         let mut sessions_style = Style::default().fg(theme.muted);
         let mut requests_style = Style::default().fg(theme.muted);
@@ -181,6 +181,9 @@ impl View for TelemetryPage {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
         buf.set_style(area, Style::default().bg(theme.background));
         let caption = self.caption();
         buf.set_stringn(

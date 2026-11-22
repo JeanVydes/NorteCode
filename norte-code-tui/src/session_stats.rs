@@ -65,19 +65,26 @@ impl SessionUsage {
 }
 
 fn add(usage: &mut SessionUsage, record: &TelemetryRecord) {
-    usage.requests += 1;
-    usage.input += record.input_tokens.unwrap_or(0);
-    usage.output += record.output_tokens.unwrap_or(0);
-    usage.cache_read += record.cache_read_tokens.unwrap_or(0);
-    usage.tools += record.tool_calls.len() as u64;
+    usage.requests = usage.requests.saturating_add(1);
+    usage.input = usage.input.saturating_add(record.input_tokens.unwrap_or(0));
+    usage.output = usage
+        .output
+        .saturating_add(record.output_tokens.unwrap_or(0));
+    usage.cache_read = usage
+        .cache_read
+        .saturating_add(record.cache_read_tokens.unwrap_or(0));
+    usage.tools = usage
+        .tools
+        .saturating_add(u64::try_from(record.tool_calls.len()).unwrap_or(u64::MAX));
     usage.turns.insert(record.turn);
-    *usage.models.entry(record.model.clone()).or_default() += 1;
+    let model_count = usage.models.entry(record.model.clone()).or_default();
+    *model_count = model_count.saturating_add(1);
     match record.status {
-        RequestStatus::Error => usage.errors += 1,
-        RequestStatus::Cancelled => usage.cancelled += 1,
+        RequestStatus::Error => usage.errors = usage.errors.saturating_add(1),
+        RequestStatus::Cancelled => usage.cancelled = usage.cancelled.saturating_add(1),
         RequestStatus::Ok => {}
     }
-    usage.duration_ms += record.duration_ms;
+    usage.duration_ms = usage.duration_ms.saturating_add(record.duration_ms);
     if let Some(cost) = record.cost_usd {
         usage.cost += cost;
         usage.has_cost = true;

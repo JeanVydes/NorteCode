@@ -82,10 +82,7 @@ fn key(record: &norte_code_wire::TelemetryRecord, interval: ChartInterval) -> Op
         ChartInterval::Day => 10,
     };
     let stamp = record.started_at.as_str();
-    if stamp.len() < width {
-        return None;
-    }
-    Some(stamp[..width].to_owned())
+    stamp.get(..width).map(str::to_owned)
 }
 
 /// Fold the report's records into buckets for the chosen interval.

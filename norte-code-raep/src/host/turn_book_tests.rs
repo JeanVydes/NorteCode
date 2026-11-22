@@ -32,6 +32,16 @@ fn reserving_and_releasing_leaves_the_session_free() {
 }
 
 #[test]
+fn a_second_reservation_does_not_replace_the_running_turn() {
+    let mut book = TurnBook::default();
+    book.reserve("s", id("turn-1"));
+
+    book.reserve("s", id("turn-2"));
+
+    assert_eq!(book.reserved("s"), Some(id("turn-1")));
+}
+
+#[test]
 fn a_stale_release_does_not_clear_the_running_turn() {
     let mut book = TurnBook::default();
     book.reserve("s", id("turn-2"));

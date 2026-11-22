@@ -33,7 +33,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 }
 
 /// The civil date a moment belongs to, `YYYY-MM-DD`.
-fn civil_date(milliseconds: i64) -> String {
+pub(super) fn civil_date(milliseconds: i64) -> String {
     const DAY_MS: i64 = 86_400_000;
     let (year, month, day) = civil_from_days(milliseconds.div_euclid(DAY_MS));
     format!("{year:04}-{month:02}-{day:02}")
@@ -41,11 +41,11 @@ fn civil_date(milliseconds: i64) -> String {
 
 /// How long ago a moment is, as `just now`, `5m ago`, `3h ago`, `2d ago` or,
 /// past a month, its civil date.
-fn relative_time(milliseconds: i64, now_milliseconds: i64) -> String {
+pub(super) fn relative_time(milliseconds: i64, now_milliseconds: i64) -> String {
     const MINUTE: i64 = 60_000;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
-    let elapsed = (now_milliseconds - milliseconds).max(0);
+    let elapsed = now_milliseconds.saturating_sub(milliseconds);
     match elapsed {
         delta if delta < MINUTE => "just now".to_owned(),
         delta if delta < HOUR => format!("{}m ago", delta / MINUTE),

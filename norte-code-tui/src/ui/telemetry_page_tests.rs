@@ -179,6 +179,18 @@ fn render_charts(tree: &mut Tree, theme: &Theme, height: u16) -> Rect {
     area
 }
 
+#[test]
+fn a_zero_height_session_view_does_not_underflow_its_lower_panel() {
+    let (mut tree, _, theme) = chart_tree();
+    if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
+        page.toggle_focus();
+    }
+    let area = Rect::new(0, 0, 100, 0);
+    let mut buf = Buffer::empty(area);
+
+    tree.render(area, &mut buf, &theme);
+}
+
 fn page(tree: &Tree) -> &TelemetryPage {
     tree.find::<TelemetryPage>("telemetry")
         .expect("telemetry page")

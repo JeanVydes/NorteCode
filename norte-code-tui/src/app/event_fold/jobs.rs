@@ -96,7 +96,10 @@ pub(in crate::app) fn fold_session_stats(
 }
 
 pub(in crate::app) fn fold_request_usage(usage: &norte_code_wire::Usage, model: &mut UiModel) {
-    let spent = usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0);
+    let spent = usage
+        .input_tokens
+        .unwrap_or(0)
+        .saturating_add(usage.output_tokens.unwrap_or(0));
     if spent > 0 {
         model.context.used = spent;
     }
@@ -121,3 +124,7 @@ pub(in crate::app) fn fold_compaction_finished(
     notice(tree, text, tone);
     set_compact_loading(tree, false);
 }
+
+#[cfg(test)]
+#[path = "jobs_tests.rs"]
+mod tests;

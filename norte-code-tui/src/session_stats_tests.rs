@@ -29,6 +29,19 @@ fn only_the_sessions_records_are_counted() {
 }
 
 #[test]
+fn counters_saturate_when_reports_overflow() {
+    let records = vec![
+        record("a", "m", 1, u64::MAX, u64::MAX),
+        record("a", "m", 2, u64::MAX, u64::MAX),
+    ];
+
+    let usage = by_session(&records).remove("a").expect("session a");
+
+    assert_eq!(usage.input, u64::MAX);
+    assert_eq!(usage.cache_read, u64::MAX);
+}
+
+#[test]
 fn cache_rate_is_the_share_of_prompt_served_from_cache() {
     let usage = SessionUsage {
         input: 200,

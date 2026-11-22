@@ -1,5 +1,6 @@
 //! The chrome measures in display width and never overflows.
 
+use super::data::{civil_date, relative_time};
 use crate::components::ComponentId;
 use crate::text_builder::TextBuilder;
 use crate::text_builder::status::status_line;
@@ -17,6 +18,11 @@ fn text_of(line: &ratatui::text::Line<'_>) -> String {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>()
+}
+
+#[test]
+fn an_extreme_timestamp_does_not_underflow_the_elapsed_time() {
+    assert_eq!(relative_time(i64::MIN, i64::MAX), civil_date(i64::MIN));
 }
 
 #[test]

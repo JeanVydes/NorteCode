@@ -74,18 +74,16 @@ impl TurnBook {
     }
 
     /// Records a turn the host accepted but has not seen start.
+    ///
+    /// A second reservation for a busy session is ignored, so a stale caller
+    /// cannot replace the turn the host is already tracking.
     pub(super) fn reserve(&mut self, session: &str, turn: TurnId) {
-        let previous = self.running.insert(
-            session.to_owned(),
-            RunningTurn {
+        self.running
+            .entry(session.to_owned())
+            .or_insert(RunningTurn {
                 id: turn,
                 phase: Phase::Reserved,
-            },
-        );
-        debug_assert!(
-            previous.is_none(),
-            "a session must not reserve a second turn while one is running"
-        );
+            });
     }
 
     /// Marks the turn as started, keeping its id.

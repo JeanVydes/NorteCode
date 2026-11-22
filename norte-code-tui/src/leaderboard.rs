@@ -120,10 +120,14 @@ impl Leaderboard {
             std::collections::BTreeMap::new();
         for record in records {
             let entry = totals.entry(key(record, subject).to_owned()).or_default();
-            entry.requests += 1;
+            entry.requests = entry.requests.saturating_add(1);
             entry.turns.insert((record.session.clone(), record.turn));
-            entry.input_tokens += record.input_tokens.unwrap_or(0);
-            entry.output_tokens += record.output_tokens.unwrap_or(0);
+            entry.input_tokens = entry
+                .input_tokens
+                .saturating_add(record.input_tokens.unwrap_or(0));
+            entry.output_tokens = entry
+                .output_tokens
+                .saturating_add(record.output_tokens.unwrap_or(0));
             entry.cost_usd += record.cost_usd.unwrap_or(0.0);
         }
         let mut rows: Vec<LeaderboardRow> = totals

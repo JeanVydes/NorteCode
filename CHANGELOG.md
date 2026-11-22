@@ -59,6 +59,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Rendering the telemetry page in a zero-height area no longer underflows the
+  lower panel, and a start time cut inside a UTF-8 character is skipped instead
+  of panicking while bucketing chart data.
+- Usage totals, token counters and the plugins progress bar saturate at their
+  maximum instead of overflowing on extreme provider or job values.
+- A duplicate turn reservation is ignored instead of tripping a debug
+  assertion, so a stale caller cannot replace the turn already being tracked.
 - The conversation stream now renders what it receives: the client keyed each
   token delta by its own placeholder turn id instead of the turn the server
   names in `USER_INPUT_ACCEPTED`, so every delta was discarded and the answer
