@@ -1,12 +1,13 @@
 //! Tool activity capture and the executor wrappers the host registers.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use norte::{CallId, FnExecutor, ToolArgs, ToolContext, ToolDeclaration, ToolOutput};
+use norte::{AnyFunction, CallId, FnExecutor, ToolArgs, ToolContext, ToolDeclaration, ToolOutput};
 
 /// The largest file the host snapshots for an edit preview.
 const EDIT_MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -154,6 +155,74 @@ where
             inner: declaration.executor,
             activity,
         }),
+    }
+}
+
+/// An erased tool whose output the host records for the renderer.
+///
+/// Plugin tools arrive as `Arc<dyn AnyFunction>`, so the typed
+/// [`recording_tool`] cannot wrap them. This mirrors it on the erased surface:
+/// every call delegates to the plugin and the result is kept under the call id
+/// until the engine's `ToolFinished` event is rendered.
+pub(super) struct RecordingFunction {
+    inner: Arc<dyn AnyFunction>,
+    activity: Arc<ToolActivity>,
+}
+
+impl RecordingFunction {
+    pub(super) fn new(inner: Arc<dyn AnyFunction>, activity: Arc<ToolActivity>) -> Self {
+        Self { inner, activity }
+    }
+}
+
+impl fmt::Debug for RecordingFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordingFunction")
+            .field("name", &self.inner.name())
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl AnyFunction for RecordingFunction {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters_schema(&self) -> &schemars::Schema {
+        self.inner.parameters_schema()
+    }
+
+    fn kind(&self) -> norte::ToolKind {
+        self.inner.kind()
+    }
+
+    fn declaration(&self) -> Option<serde_json::Value> {
+        self.inner.declaration()
+    }
+
+    async fn execute(
+        &self,
+        context: &ToolContext,
+        arguments: &serde_json::Value,
+    ) -> norte::Result<ToolOutput> {
+        let result = self.inner.execute(context, arguments).await;
+        if let Some(call_id) = context.call_id {
+            let output = match &result {
+                Ok(output) => output.clone(),
+                Err(error) => ToolOutput::error(error.to_string()),
+            };
+            self.activity
+                .outputs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(call_id, output);
+        }
+        result
     }
 }
 

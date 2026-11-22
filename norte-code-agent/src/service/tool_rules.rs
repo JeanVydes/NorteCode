@@ -27,7 +27,7 @@ use effects::journalled;
 use manage::ManageJobs;
 use plans::PlanTool;
 use sandbox::sandboxed_command;
-use tooling::recording_tool;
+use tooling::{RecordingFunction, recording_tool};
 use workspace::{Confined, PathKind, Workspace, confined};
 
 #[allow(clippy::wildcard_imports)]
@@ -426,6 +426,24 @@ impl Service {
                 continue;
             }
             tools.register(tool)?;
+        }
+
+        // Plugin tools are declared by the plugin and registered here, on the
+        // host side. They join the same registry as the built-ins, so the model
+        // sees one tool list and a call follows the same approval and audit path.
+        let plugin_tools: Vec<Arc<dyn AnyFunction>> = self
+            .plugin_tools
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for tool in plugin_tools {
+            if withheld(&disabled, tool.name()) {
+                continue;
+            }
+            tools.register(Arc::new(RecordingFunction::new(
+                tool,
+                Arc::clone(&self.activity),
+            )))?;
         }
         Ok(tools)
     }

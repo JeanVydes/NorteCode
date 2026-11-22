@@ -8545,6 +8545,57 @@ async fn the_shell_is_a_tool_and_no_rule_names_it() {
     assert!(shell.allowed);
     assert_eq!(shell.scope, RuleScope::Default);
 }
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+struct PluginEchoArgs {}
+
+struct PluginEcho;
+
+impl norte::ToolMetadata for PluginEcho {
+    const NAME: &'static str = "plugin_echo";
+    const DESCRIPTION: &'static str = "echo a message";
+}
+
+#[async_trait]
+impl FnExecutor<PluginEchoArgs, norte::ToolOutput> for PluginEcho {
+    async fn call(&self, _args: PluginEchoArgs) -> norte::Result<norte::ToolOutput> {
+        Ok(norte::ToolOutput::text("echo"))
+    }
+}
+
+fn plugin_echo() -> Arc<dyn norte::AnyFunction> {
+    Arc::new(norte::FunctionDeclaration::new(
+        "plugin_echo",
+        "echo a message",
+        Arc::new(PluginEcho),
+    ))
+}
+
+#[tokio::test]
+async fn a_plugin_tool_is_registered_beside_the_builtins() {
+    let service = service();
+    service.set_plugin_tools(vec![plugin_echo()]);
+    let statuses = service.tool_rules(None);
+    let echo = statuses
+        .iter()
+        .find(|status| status.name == "plugin_echo")
+        .expect("the plugin tool is registered");
+    assert!(echo.allowed);
+}
+
+#[tokio::test]
+async fn a_disabled_plugin_tool_is_not_registered() {
+    let mut config = config();
+    config.tools.disabled = vec!["plugin_echo".to_owned()];
+    let service = service_with(config);
+    service.set_plugin_tools(vec![plugin_echo()]);
+    let statuses = service.tool_rules(None);
+    assert!(
+        !statuses.iter().any(|status| status.name == "plugin_echo"),
+        "a denied plugin tool is absent from the registry"
+    );
+}
+
 #[tokio::test]
 async fn a_session_reasoning_override_survives_a_restart() {
     // `max` is not the configured default, so seeing it after the reopen is the

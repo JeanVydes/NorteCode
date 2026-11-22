@@ -205,6 +205,8 @@ pub struct Service {
     agent_profiles: RwLock<BTreeMap<String, Config>>,
     catalog: RwLock<Arc<Catalog>>,
     plugin_catalogue: RwLock<(Providers, Models)>,
+    /// Tools contributed by server-loaded plugins, registered per engine.
+    plugin_tools: RwLock<Vec<Arc<dyn norte::AnyFunction>>>,
     default_spec: RwLock<Option<ModelSpec>>,
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,

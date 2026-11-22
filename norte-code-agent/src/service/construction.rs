@@ -212,6 +212,7 @@ impl Service {
             agent_profiles: RwLock::new(agent_profiles),
             catalog: RwLock::new(catalog),
             plugin_catalogue: RwLock::new((Providers::default(), Models::default())),
+            plugin_tools: RwLock::new(Vec::new()),
             default_spec: RwLock::new(default_spec),
             store,
             blobs,
@@ -292,6 +293,17 @@ impl Service {
     /// merged view instead of silently dropping plugin providers and models.
     pub fn set_plugin_catalogue(&self, providers: Providers, models: Models) {
         *self.lock_plugin_catalogue_write() = (providers, models);
+    }
+
+    /// Supplies tools contributed by server-loaded plugins.
+    ///
+    /// The host builds and owns the plugin objects; the service only holds the
+    /// erased functions so each engine can register them beside the built-ins.
+    pub fn set_plugin_tools(&self, tools: Vec<Arc<dyn norte::AnyFunction>>) {
+        *self
+            .plugin_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = tools;
     }
 
     /// Builds a service over an in-memory store.

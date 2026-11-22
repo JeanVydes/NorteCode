@@ -154,6 +154,7 @@ async fn build_services(
     directory: Arc<dyn SessionDirectory>,
     offered: &Providers,
     offered_models: &Models,
+    plugin_tools: &[Arc<dyn norte::AnyFunction>],
 ) -> Result<HashMap<String, Arc<Service>>, Box<dyn std::error::Error>> {
     let mut services = HashMap::new();
     let profiles: BTreeMap<String, Agent> = agents
@@ -204,6 +205,7 @@ async fn build_services(
         )
         .with_agent_profiles(profiles.clone());
         service.set_plugin_catalogue(offered.clone(), offered_models.clone());
+        service.set_plugin_tools(plugin_tools.to_vec());
         service.install_subagent_runner();
         services.insert(agent.name, service);
     }
@@ -261,6 +263,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let agent_id = agent.name.clone();
     let mut plugins = Plugins::new();
     load_plugins(&mut plugins, None);
+    let plugin_tools = plugins.tools();
     let offered = plugins.catalogue();
     let created = ensure_catalog_files()?;
     if created.providers || created.models {
@@ -292,6 +295,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         directory,
         &offered_providers,
         &offered_models,
+        &plugin_tools,
     )
     .await?;
     migrate_pins_to_session_stats(&services, &database.with_file_name("pins")).await;
