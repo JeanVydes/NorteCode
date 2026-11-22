@@ -173,7 +173,7 @@ RAEP sessions use the RFC `job_turn_policy` session option instead: `always`
 | `shell_limits.allow_indefinite` | `true` | Grant `timeout_ms: 0` as an unbounded call; detached jobs use the same setting. |
 | `shell_limits.default_timeout_ms` | `120000` | Bound used when no time is asked for, or zero is asked for while indefinite runs are off. |
 | `shell_limits.max_timeout_ms` | `600000` | Ceiling for a requested bound; larger requests are clamped. |
-| `confinement.workspace_only` | `false` | Confine tool paths to the workspace. |
+| `confinement.workspace_only` | `true` | Confine tool paths to the workspace. |
 | `confinement.sandbox.enabled` | `false` | Wrap commands in the OS sandbox. |
 | `confinement.sandbox.network` | `false` | Allow network in the sandbox. |
 | `confinement.sandbox.writable` | `[]` | Extra writable roots. |

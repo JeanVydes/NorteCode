@@ -56,7 +56,7 @@ or fix.
     },
     "retry": {
       "max_attempts": 4,
-      "max_delay_ms": 5000,
+      "max_delay_ms": 60000,
       "backoff_ms": 5000
     },
     "reasoning": { "default": "auto" },
@@ -286,6 +286,7 @@ The CLI-only file contains:
 | `service_auth` | string or `null` | `null` | Raw bearer token. Leave `null` for an unauthenticated local service. |
 | `agent_id` | string | `"norte-code"` | Agent identifier sent during RAEP attachment. |
 | `verbosity` | `"low"`, `"medium"` or `"high"` | `"medium"` | `low` shows the answer alone, `medium` also shows that tools run and that the model is thinking, `high` adds reasoning, tool arguments and results. `--verbose` overrides it for one run. |
+| `queue_mode` | `"reject"`, `"queue"` or `"interrupt"` | `"queue"` | What a message typed while a turn runs does. `queue` steers it into the running turn, `interrupt` cancels that turn first. |
 | `diff_style` | `"unified"` or `"split"` | `"unified"` | How an `edit` call is drawn: a patch (`-`/`+`) or two columns before/after. |
 | `charts.contrast` | integer `0..=100` | `75` | Strength of the halftone dot ramp. |
 | `charts.density` | integer `0..=100` | `82` | Coverage of candidate dots in halftone charts. |

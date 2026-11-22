@@ -16,6 +16,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The configuration reference now matches the defaults in code for
+  `retry.max_delay_ms` and `confinement.workspace_only`, and documents
+  `queue_mode` in the CLI-only file table.
 - Browser automation is no longer built into the agent. `browser_use` now comes
   from the `essentials-plugin-browser` plugin, along with the Norte `norte-tools`
   implementation, and the `tools.screenshots` configuration block is gone.
