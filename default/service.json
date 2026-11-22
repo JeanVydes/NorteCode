@@ -24,6 +24,20 @@
         "max_delay_ms": 60000,
         "backoff_ms": 5000
       },
+      "provider_http": {
+        "connect_max_retries": 3,
+        "connect_timeout_ms": 10000,
+        "request_timeout_ms": 120000,
+        "stream_idle_timeout_ms": 300000
+      },
+      "delegation": {
+        "max_depth": 3,
+        "max_concurrent": 3,
+        "max_held_messages": 20
+      },
+      "mcp_limits": {
+        "request_timeout_ms": 60000
+      },
       "reasoning": {
         "default": "auto"
       },
@@ -45,6 +59,15 @@
       "tools": {
         "web_fetch": false,
         "command_max_model_bytes": 131072,
+        "ask_user_timeout_ms": 600000,
+        "verbose_tool_output_chars": 4000,
+        "read_limits": {
+          "max_file_bytes": 16777216,
+          "max_output_bytes": 65536,
+          "max_lines": 2000,
+          "max_matches": 200,
+          "max_line_width": 500
+        },
         "confinement": {
           "workspace_only": true,
           "sandbox": {
@@ -62,7 +85,18 @@
         "interop": true,
         "allow_scripts": false,
         "honor_allowed_tools": false,
-        "max_skills": 128
+        "max_skills": 128,
+        "limits": {
+          "max_skill_file_bytes": 1048576,
+          "max_body_bytes": 65536,
+          "default_resource_bytes": 262144,
+          "recommended_lines": 500,
+          "max_shebang_bytes": 4096,
+          "max_script_output_bytes": 1048576,
+          "max_script_model_bytes": 32768,
+          "default_script_timeout_ms": 120000,
+          "max_script_timeout_ms": 600000
+        }
       },
       "mcpServers": {},
       "default_subagent_delegation": "norte-code-subagent"
@@ -87,6 +121,20 @@
         "max_delay_ms": 60000,
         "backoff_ms": 5000
       },
+      "provider_http": {
+        "connect_max_retries": 3,
+        "connect_timeout_ms": 10000,
+        "request_timeout_ms": 120000,
+        "stream_idle_timeout_ms": 300000
+      },
+      "delegation": {
+        "max_depth": 3,
+        "max_concurrent": 3,
+        "max_held_messages": 20
+      },
+      "mcp_limits": {
+        "request_timeout_ms": 60000
+      },
       "reasoning": {
         "default": "auto"
       },
@@ -108,6 +156,15 @@
       "tools": {
         "web_fetch": false,
         "command_max_model_bytes": 131072,
+        "ask_user_timeout_ms": 600000,
+        "verbose_tool_output_chars": 4000,
+        "read_limits": {
+          "max_file_bytes": 16777216,
+          "max_output_bytes": 65536,
+          "max_lines": 2000,
+          "max_matches": 200,
+          "max_line_width": 500
+        },
         "confinement": {
           "workspace_only": true,
           "sandbox": {
@@ -125,10 +182,35 @@
         "interop": true,
         "allow_scripts": false,
         "honor_allowed_tools": false,
-        "max_skills": 128
+        "max_skills": 128,
+        "limits": {
+          "max_skill_file_bytes": 1048576,
+          "max_body_bytes": 65536,
+          "default_resource_bytes": 262144,
+          "recommended_lines": 500,
+          "max_shebang_bytes": 4096,
+          "max_script_output_bytes": 1048576,
+          "max_script_model_bytes": 32768,
+          "default_script_timeout_ms": 120000,
+          "max_script_timeout_ms": 600000
+        }
       },
       "mcpServers": {},
       "default_subagent_delegation": null
     }
-  ]
+  ],
+  "raep_limits": {
+    "replay_capacity": 2000,
+    "replay_bytes": 8388608,
+    "max_concurrent_jobs": 8,
+    "job_output_retention_s": 86400,
+    "idempotency_capacity": 4096,
+    "max_queued_inputs": 8,
+    "max_frame_bytes": 1048576,
+    "max_artifact_bytes": 16777216,
+    "max_export_bytes": 67108864,
+    "export_ttl_s": 3600,
+    "max_connections": 64,
+    "command_timeout_ms": 120000
+  }
 }

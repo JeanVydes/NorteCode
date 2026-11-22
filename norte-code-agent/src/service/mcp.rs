@@ -16,12 +16,6 @@ use norte_mcp::{
     ClientCapabilities, ClientOptions, Implementation, McpClient, RemoteTool, StdioTransport,
 };
 
-/// A deadline for one MCP request.
-///
-/// A server that hangs must not hang the turn: the same rule the rest of the
-/// host follows for anything it does not control.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// One connected server, with the tools it published.
 #[derive(Debug)]
 pub(super) struct McpServer {
@@ -85,6 +79,7 @@ impl McpServers {
     pub(super) async fn connect(
         configured: &BTreeMap<String, McpServerConfig>,
         root: &Path,
+        request_timeout: Duration,
     ) -> Self {
         let mut servers = Vec::new();
         let mut failures = Vec::new();
@@ -92,7 +87,7 @@ impl McpServers {
             if !config.enabled {
                 continue;
             }
-            match Self::connect_one(name, config, root).await {
+            match Self::connect_one(name, config, root, request_timeout).await {
                 Ok(server) => servers.push(server),
                 Err(reason) => failures.push((name.clone(), reason)),
             }
@@ -138,14 +133,16 @@ impl McpServers {
         name: &str,
         config: &McpServerConfig,
         root: &Path,
+        request_timeout: Duration,
     ) -> Result<McpServer, String> {
-        Self::connect_one(name, config, root).await
+        Self::connect_one(name, config, root, request_timeout).await
     }
 
     async fn connect_one(
         name: &str,
         config: &McpServerConfig,
         root: &Path,
+        request_timeout: Duration,
     ) -> Result<McpServer, String> {
         let transport = transport_for(config, root)?;
         let client = Arc::new(
@@ -159,7 +156,7 @@ impl McpServers {
                         extra: BTreeMap::new(),
                     },
                     capabilities: ClientCapabilities::default(),
-                    request_timeout: Some(REQUEST_TIMEOUT),
+                    request_timeout: Some(request_timeout),
                 },
             )
             .await

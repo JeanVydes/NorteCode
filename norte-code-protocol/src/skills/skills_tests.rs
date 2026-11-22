@@ -69,7 +69,11 @@ fn malformed_skills_are_skipped_with_a_warning() {
     );
     write_skill(&root, "Bad-Name", "name: Bad-Name\ndescription: x", "body");
     write_skill(&root, "empty", "name: empty\ndescription: \"\"", "body");
-    let registry = SkillRegistry::discover(std::slice::from_ref(&root), 16);
+    let registry = SkillRegistry::discover(
+        std::slice::from_ref(&root),
+        16,
+        SkillLimitsConfig::default(),
+    );
     assert!(registry.get("good").is_some());
     assert_eq!(registry.len(), 1);
     assert_eq!(registry.warnings().len(), 2);
@@ -87,7 +91,11 @@ fn a_later_root_shadows_an_earlier_one() {
         "name: same\ndescription: project",
         "project body",
     );
-    let registry = SkillRegistry::discover(&[user.clone(), project.clone()], 16);
+    let registry = SkillRegistry::discover(
+        &[user.clone(), project.clone()],
+        16,
+        SkillLimitsConfig::default(),
+    );
     assert_eq!(
         registry.get("same").map(|skill| skill.description.as_str()),
         Some("project")
@@ -130,7 +138,11 @@ fn the_prompt_order_puts_the_most_specific_root_first() {
     );
 
     // The workspace root is last, which makes it the most specific.
-    let registry = SkillRegistry::discover(&[user.clone(), project.clone()], 16);
+    let registry = SkillRegistry::discover(
+        &[user.clone(), project.clone()],
+        16,
+        SkillLimitsConfig::default(),
+    );
     let ordered: Vec<&str> = registry
         .skills_by_precedence()
         .iter()
@@ -176,7 +188,11 @@ fn the_prompt_budget_favours_the_workspace_skill() {
         "b",
     );
 
-    let registry = SkillRegistry::discover(&[user.clone(), project.clone()], 16);
+    let registry = SkillRegistry::discover(
+        &[user.clone(), project.clone()],
+        16,
+        SkillLimitsConfig::default(),
+    );
     let index: Vec<(String, String)> = registry
         .skills_by_precedence()
         .iter()
@@ -203,7 +219,9 @@ fn resources_cannot_escape_the_skill_root() {
     std::fs::create_dir_all(directory.join("references")).expect("references");
     std::fs::write(directory.join("references/REFERENCE.md"), "hello").expect("reference");
     std::fs::write(root.join("secret.txt"), "secret").expect("secret");
-    let skill = load_skill(&directory).expect("skill").0;
+    let skill = load_skill(&directory, &SkillLimitsConfig::default())
+        .expect("skill")
+        .0;
     assert_eq!(
         skill
             .read_resource("references/REFERENCE.md", 1024)
@@ -231,8 +249,9 @@ fn a_skill_file_cannot_symlink_outside_the_skill_root() {
     std::fs::create_dir_all(&directory).expect("skill dir");
     symlink(outside.join("SKILL.md"), directory.join("SKILL.md")).expect("symlink");
 
-    assert!(load_skill(&directory).is_err());
-    let registry = SkillRegistry::discover(std::slice::from_ref(&root), 8);
+    assert!(load_skill(&directory, &SkillLimitsConfig::default()).is_err());
+    let registry =
+        SkillRegistry::discover(std::slice::from_ref(&root), 8, SkillLimitsConfig::default());
     assert!(registry.is_empty());
     assert!(
         registry
@@ -267,7 +286,11 @@ async fn a_script_runs_without_a_shell_and_with_argv_entries() {
         "#!/bin/sh\nprintf '%s' \"$1\"\n",
     )
     .expect("script");
-    let registry = Arc::new(SkillRegistry::discover(std::slice::from_ref(&root), 8));
+    let registry = Arc::new(SkillRegistry::discover(
+        std::slice::from_ref(&root),
+        8,
+        SkillLimitsConfig::default(),
+    ));
     let tool = SkillScriptTool::new(registry, SkillScriptConfig::in_workspace(root.clone()));
     let output = tool
         .call(SkillScriptArgs {
@@ -317,7 +340,8 @@ fn a_resource_read_is_bounded() {
     );
     std::fs::create_dir_all(directory.join("references")).expect("references");
     std::fs::write(directory.join("references/big.txt"), "x".repeat(1024)).expect("resource");
-    let registry = SkillRegistry::discover(std::slice::from_ref(&root), 8);
+    let registry =
+        SkillRegistry::discover(std::slice::from_ref(&root), 8, SkillLimitsConfig::default());
     let skill = registry.get("bounded").expect("skill");
     let text = skill
         .read_resource("references/big.txt", 16)
@@ -335,7 +359,44 @@ fn a_huge_shebang_is_refused() {
     body.push_str(&"x".repeat(5_000));
     body.push('\n');
     std::fs::write(&script, body).expect("script");
-    let error = tools::interpreter(&script).expect_err("shebang must be bounded");
+    let error = tools::interpreter(&script, SkillLimitsConfig::default().max_shebang_bytes)
+        .expect_err("shebang must be bounded");
     assert!(error.contains("longer than"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn configured_limits_bound_discovery_and_script_capture() {
+    let root = temp_root("configured-limits");
+    let directory = write_skill(
+        &root,
+        "small",
+        "name: small\ndescription: A small skill.",
+        &"x".repeat(128),
+    );
+    let strict = SkillLimitsConfig {
+        max_skill_file_bytes: 32,
+        ..SkillLimitsConfig::default()
+    };
+    assert!(load_skill(&directory, &strict).is_err());
+    assert!(load_skill(&directory, &SkillLimitsConfig::default()).is_ok());
+    let registry = SkillRegistry::discover(std::slice::from_ref(&root), 8, strict);
+    assert!(registry.get("small").is_none());
+    assert_eq!(registry.limits().max_skill_file_bytes, 32);
+
+    let script = SkillScriptConfig::for_limits(
+        &root,
+        SkillLimitsConfig {
+            max_script_output_bytes: 99,
+            max_script_model_bytes: 11,
+            default_script_timeout_ms: 7_000,
+            max_script_timeout_ms: 9_000,
+            ..SkillLimitsConfig::default()
+        },
+    );
+    assert_eq!(script.max_output_bytes, 99);
+    assert_eq!(script.max_model_bytes, 11);
+    assert_eq!(script.timeout, std::time::Duration::from_millis(7_000));
+    assert_eq!(script.max_timeout_ms, 9_000);
     let _ = std::fs::remove_dir_all(root);
 }

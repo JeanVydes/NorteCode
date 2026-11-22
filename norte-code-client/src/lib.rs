@@ -17,6 +17,7 @@
 pub(crate) mod agent;
 pub mod api;
 pub(crate) mod canonical;
+pub mod config;
 pub(crate) mod decode;
 pub(crate) mod error;
 pub(crate) mod frame;

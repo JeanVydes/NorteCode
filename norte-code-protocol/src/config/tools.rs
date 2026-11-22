@@ -4,8 +4,16 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::{ReadLimitsConfig, SkillLimitsConfig};
+
 /// Default cap on the bytes of each command stream that reach the model.
 pub const DEFAULT_COMMAND_MAX_MODEL_BYTES: usize = 128 * 1024;
+
+/// Default time `ask_user` waits for an answer.
+pub const DEFAULT_ASK_USER_TIMEOUT_MS: u64 = 600_000;
+
+/// Default length of a verbose tool result shown to the client.
+pub const DEFAULT_VERBOSE_TOOL_OUTPUT_CHARS: usize = 4_000;
 
 /// Default bound for a shell call whose request asks for none.
 pub const DEFAULT_SHELL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -31,8 +39,14 @@ pub struct ToolsConfig {
     /// The tool still captures up to its own larger ceiling; this bounds only
     /// the text the model sees, eliding the middle with a marker.
     pub command_max_model_bytes: usize,
+    /// How long `ask_user` waits for a client answer.
+    pub ask_user_timeout_ms: u64,
+    /// Longest tool output the verbose client renderer shows.
+    pub verbose_tool_output_chars: usize,
     /// Runtime bounds for shell calls, detached jobs included.
     pub shell_limits: ShellLimitsConfig,
+    /// Size and output bounds for the `read` tool.
+    pub read_limits: ReadLimitsConfig,
     /// How far a tool may reach.
     pub confinement: ConfinementConfig,
     /// Policy for user-role messages plugins ask the host to add.
@@ -70,7 +84,10 @@ impl Default for ToolsConfig {
         Self {
             web_fetch: false,
             command_max_model_bytes: DEFAULT_COMMAND_MAX_MODEL_BYTES,
+            ask_user_timeout_ms: DEFAULT_ASK_USER_TIMEOUT_MS,
+            verbose_tool_output_chars: DEFAULT_VERBOSE_TOOL_OUTPUT_CHARS,
             shell_limits: ShellLimitsConfig::default(),
+            read_limits: ReadLimitsConfig::default(),
             confinement: ConfinementConfig::default(),
             plugin_messages: PluginMessagesConfig::default(),
             auto_turn_on_job_end: false,
@@ -207,6 +224,8 @@ pub struct SkillsConfig {
     pub honor_allowed_tools: bool,
     /// The largest number of valid skills kept.
     pub max_skills: usize,
+    /// Size and time bounds for skills and bundled scripts.
+    pub limits: SkillLimitsConfig,
 }
 
 impl Default for SkillsConfig {
@@ -218,6 +237,7 @@ impl Default for SkillsConfig {
             allow_scripts: false,
             honor_allowed_tools: false,
             max_skills: 128,
+            limits: SkillLimitsConfig::default(),
         }
     }
 }

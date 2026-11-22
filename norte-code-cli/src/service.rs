@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_TOKIO_WORKERS: usize = 4;
+use norte_code_client::config::{CliRuntimeConfig, ServiceLifecycleConfig};
 
 /// Environment the daemon needs before glibc creates its per-thread arenas.
 #[cfg(target_os = "linux")]
@@ -26,17 +26,21 @@ fn daemon_env_overrides() -> Vec<(&'static str, &'static str)> {
     Vec::new()
 }
 
-fn worker_count_from(override_value: Option<&str>, available: usize) -> usize {
+fn worker_count_from(
+    override_value: Option<&str>,
+    available: usize,
+    config: &ServiceLifecycleConfig,
+) -> usize {
     let requested = override_value
         .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TOKIO_WORKERS);
+        .unwrap_or(config.tokio_workers);
     requested.clamp(1, available.max(1))
 }
 
-fn worker_count() -> usize {
+fn worker_count(config: &ServiceLifecycleConfig) -> usize {
     let override_value = std::env::var("NORTE_CODE_TOKIO_WORKERS").ok();
     let available = thread::available_parallelism().map_or(1, |count| count.get());
-    worker_count_from(override_value.as_deref(), available)
+    worker_count_from(override_value.as_deref(), available, config)
 }
 
 #[cfg(test)]
@@ -66,6 +70,34 @@ fn pidfile_path() -> PathBuf {
 
 fn logfile_path() -> PathBuf {
     state_dir().join("server.log")
+}
+
+fn runtime_config() -> CliRuntimeConfig {
+    let fallback = CliRuntimeConfig::default();
+    let Some(path) = norte_code_protocol::config::user_cli_path() else {
+        return fallback;
+    };
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return fallback;
+    };
+    let config = match serde_json::from_str::<CliRuntimeConfig>(&raw) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!(
+                "  warning: could not parse client runtime config at {}: {error}; using defaults",
+                path.display()
+            );
+            return fallback;
+        }
+    };
+    if let Err(error) = config.validate() {
+        eprintln!(
+            "  warning: invalid client runtime config at {}: {error}; using defaults",
+            path.display()
+        );
+        return fallback;
+    }
+    config
 }
 
 pub(crate) fn service_url() -> String {
@@ -178,8 +210,9 @@ fn kill_pid(pid: i32, signal: i32) {
 ///
 /// Returns an error when the server cannot bind or start.
 pub fn serve() -> Result<(), String> {
+    let lifecycle = &runtime_config().service_lifecycle;
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_count())
+        .worker_threads(worker_count(lifecycle))
         .enable_all()
         .build()
         .map_err(|e| format!("could not start the runtime: {e}"))?;
@@ -189,6 +222,7 @@ pub fn serve() -> Result<(), String> {
 }
 
 pub(crate) fn up() -> Result<(), String> {
+    let lifecycle = &runtime_config().service_lifecycle;
     if cfg!(debug_assertions) {
         println!(
             "  warning: using a debug binary; build with `cargo build --release -p norte-code-cli` for lower memory use"
@@ -210,7 +244,8 @@ pub(crate) fn up() -> Result<(), String> {
     // Animated wait for readiness.
     let frames = output::spinner_frames();
     let start = Instant::now();
-    let timeout = Duration::from_secs(20);
+    let timeout = Duration::from_millis(lifecycle.startup_wait_ms);
+    let poll_interval = Duration::from_millis(lifecycle.startup_poll_ms);
     let mut frame_index = 0;
     let mut ready = false;
     while start.elapsed() < timeout {
@@ -224,7 +259,7 @@ pub(crate) fn up() -> Result<(), String> {
             ready = true;
             break;
         }
-        thread::sleep(Duration::from_millis(150));
+        thread::sleep(poll_interval);
         frame_index += 1;
     }
     // Clear the spinner line.
@@ -233,8 +268,8 @@ pub(crate) fn up() -> Result<(), String> {
 
     if !ready {
         return Err(format!(
-            "server did not become ready within {}s — check {}",
-            timeout.as_secs(),
+            "server did not become ready within {}ms, check {}",
+            timeout.as_millis(),
             log.display()
         ));
     }
@@ -249,6 +284,7 @@ pub(crate) fn up() -> Result<(), String> {
 }
 
 pub(crate) fn down() -> Result<(), String> {
+    let lifecycle = &runtime_config().service_lifecycle;
     let url = service_url();
     if !probe(&url) {
         println!("  {} service is not running", output::muted("○"));
@@ -261,13 +297,14 @@ pub(crate) fn down() -> Result<(), String> {
     };
 
     kill_pid(pid, 15); // SIGTERM
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_millis(lifecycle.stop_wait_ms);
+    let poll_interval = Duration::from_millis(lifecycle.stop_poll_ms);
     while pid_alive(pid) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(poll_interval);
     }
     if pid_alive(pid) {
         kill_pid(pid, 9); // SIGKILL
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(lifecycle.kill_settle_ms));
     }
     let _ = fs::remove_file(pidfile_path());
     println!("  {} service down", output::ok("✓"));

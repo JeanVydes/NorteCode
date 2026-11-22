@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 
+use norte_code_protocol::config::ProviderHttpConfig;
 use norte_code_wire::{Phase as ProtocolPhase, SessionKey};
 
 use crate::provider::ModelSpec as ProviderModelSpec;
@@ -141,6 +142,7 @@ impl Service {
                         norte_code_wire::catalog::WireSchema::OpenAI,
                     ),
                     headers: std::collections::BTreeMap::new(),
+                    http: ProviderHttpConfig::default(),
                 })
         });
         // A session can outlive the rest of the engine: it is nothing but a

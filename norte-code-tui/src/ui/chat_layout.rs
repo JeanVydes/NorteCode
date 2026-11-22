@@ -2,6 +2,7 @@
 
 use std::any::Any;
 
+use norte_code_client::config::RetentionConfig;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use serde::Serialize;
@@ -23,12 +24,18 @@ pub(crate) struct ChatLayout {
 
 impl ChatLayout {
     /// A fresh stream and detached rail in the given position.
+    #[cfg(test)]
     pub(crate) fn new(position: RailPosition) -> Self {
+        Self::with_retention(position, RetentionConfig::default())
+    }
+
+    /// A fresh stream with the host's retention limits and a detached rail.
+    pub(crate) fn with_retention(position: RailPosition, retention: RetentionConfig) -> Self {
         Self {
             position,
             children: vec![
                 node("rail", Rail::detached()),
-                node("stream", Transcript::new()),
+                node("stream", Transcript::with_retention(retention)),
             ],
         }
     }

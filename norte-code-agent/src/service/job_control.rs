@@ -38,6 +38,17 @@ impl Service {
             .get_for_session_with_retention(session_id, job_id)
             .map(|job| job_info(&job))
     }
+    /// Sets how many inputs may wait for a turn already in flight.
+    ///
+    /// Zero leaves the current bound in place; a session busy check must always
+    /// have a positive cap.
+    pub fn configure_input_limit(&self, max_queued_inputs: usize) {
+        if max_queued_inputs == 0 {
+            return;
+        }
+        self.max_queued_inputs
+            .store(max_queued_inputs, Ordering::Relaxed);
+    }
     /// Sets the limits applied to detached jobs owned by this service.
     pub fn configure_job_limits(&self, max_concurrent: usize, output_retention_s: u64) {
         self.jobs

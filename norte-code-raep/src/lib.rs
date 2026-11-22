@@ -148,14 +148,19 @@ async fn migrate_pins_to_session_stats(
     }
 }
 
+struct ServicePluginData<'a> {
+    catalogue: &'a Catalogue,
+    tools: &'a crate::plugin_display::PluginTools,
+}
+
 async fn build_services(
     agents: Vec<Agent>,
     catalog: Arc<Catalog>,
     session_store: Arc<dyn norte_code_protocol::Store>,
     blobs: Arc<dyn norte::BlobStore>,
     directory: Arc<dyn SessionDirectory>,
-    offered: &Catalogue,
-    plugin_tools: &crate::plugin_display::PluginTools,
+    plugins: &ServicePluginData<'_>,
+    max_queued_inputs: usize,
 ) -> Result<HashMap<String, Arc<Service>>, Box<dyn std::error::Error>> {
     let mut services = HashMap::new();
     let profiles: BTreeMap<String, Agent> = agents
@@ -207,15 +212,18 @@ async fn build_services(
         .with_agent_profiles(profiles.clone());
         service.set_plugin_catalogue(
             Providers {
-                providers: offered.providers.clone(),
+                providers: plugins.catalogue.providers.clone(),
             },
             Models {
-                models: offered.models.clone(),
+                models: plugins.catalogue.models.clone(),
             },
         );
-        service.set_plugin_tools(plugin_tools.functions.clone());
-        service.set_plugin_tool_origins(plugin_tools.origins.clone());
+        service.set_plugin_tools(plugins.tools.functions.clone());
+        service.set_plugin_tool_origins(plugins.tools.origins.clone());
         service.install_subagent_runner();
+        if max_queued_inputs > 0 {
+            service.configure_input_limit(max_queued_inputs);
+        }
         services.insert(agent.name, service);
     }
     Ok(services)
@@ -284,6 +292,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let service_config = ServiceConfig::load(user_config_path().as_deref(), Some(&project))?;
     let agent = service_config.default_agent()?;
     let agent_id = agent.name.clone();
+    let raep_limits = service_config.raep_limits;
     let (plugins, plugin_tools, plugin_host) = load_plugins_for_host();
     let offered = plugins.catalogue();
     let created = ensure_catalog_files()?;
@@ -302,14 +311,18 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let session_store: Arc<dyn norte_code_protocol::Store> = store.clone();
     let blobs: Arc<dyn norte::BlobStore> = store.clone();
     let directory: Arc<dyn SessionDirectory> = store;
+    let plugin_data = ServicePluginData {
+        catalogue: &offered,
+        tools: &plugin_tools,
+    };
     let services = build_services(
         install_file_key_store(service_config.agents),
         catalog,
         session_store,
         Arc::clone(&blobs),
         directory,
-        &offered,
-        &plugin_tools,
+        &plugin_data,
+        raep_limits.max_queued_inputs,
     )
     .await?;
     migrate_pins_to_session_stats(&services, &database.with_file_name("pins")).await;
@@ -330,13 +343,10 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
                 .collect::<HashMap<_, _>>()
         })
         .unwrap_or_default();
-    let host_config = HostConfig {
-        agent_id,
-        auth_token: std::env::var("NORTE_CODE_AUTH_TOKEN").ok(),
-        auth_principals,
-        allowed_origins: allowed_origins(),
-        ..HostConfig::default()
-    };
+    let mut host_config = HostConfig::from_limits(agent_id, &raep_limits);
+    host_config.auth_token = std::env::var("NORTE_CODE_AUTH_TOKEN").ok();
+    host_config.auth_principals = auth_principals;
+    host_config.allowed_origins = allowed_origins();
     let replay_log = ReplayLog::new(database.with_extension("replay"), host_config.replay_bytes);
     let upload_index = Arc::new(SqliteUploadIndex::open(
         database.with_extension("uploads.db"),

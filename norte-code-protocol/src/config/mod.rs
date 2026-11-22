@@ -16,26 +16,37 @@ mod agent;
 mod approvals;
 mod budget;
 mod cost;
+mod delegation;
 mod engine;
 mod error;
 mod interface;
 mod key;
 mod loading;
 mod mcp;
+mod mcp_limits;
 mod paths;
 mod plugins;
+mod provider_http;
+mod raep;
+mod read_limits;
 mod service;
+mod skill_limits;
 mod tools;
 
 pub use agent::Agent;
 pub use approvals::ApprovalsConfig;
 pub use budget::{BudgetConfig, BudgetsConfig};
 pub use cost::CostConfig;
+pub use delegation::{
+    DEFAULT_MAX_CONCURRENT_DELEGATES, DEFAULT_MAX_DELEGATION_DEPTH,
+    DEFAULT_MAX_HELD_DELEGATOR_MESSAGES, DelegationConfig,
+};
 pub use engine::{CompactionConfig, CompactionTrigger, ReasoningConfig, RetryConfig};
 pub use error::{ConfigError, Loaded};
 pub use interface::{ChartConfig, ChartDotSize, CliConfig, DiffStyle, LoadedCli, ServiceType};
 pub use key::ApiKey;
 pub use mcp::McpServerConfig;
+pub use mcp_limits::{DEFAULT_MCP_REQUEST_TIMEOUT_MS, McpLimitsConfig};
 pub(crate) use paths::atomic_write_with;
 pub use paths::{
     add_user_mcp_server, ensure_user_cli_config, ensure_user_service_config, forget_user_approval,
@@ -44,11 +55,19 @@ pub use paths::{
     user_config_path,
 };
 pub use plugins::{PluginPolicies, PluginPolicyConfig, allows_user_messages};
+pub use provider_http::{
+    DEFAULT_CONNECT_MAX_RETRIES, DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS,
+    DEFAULT_STREAM_IDLE_TIMEOUT_MS, ProviderHttpConfig,
+};
+pub use raep::RaepLimitsConfig;
+pub use read_limits::ReadLimitsConfig;
 pub use service::ServiceConfig;
+pub use skill_limits::SkillLimitsConfig;
 pub use tools::{
-    ConfinementConfig, DEFAULT_COMMAND_MAX_MODEL_BYTES, DEFAULT_PLUGIN_MESSAGE_MAX_BYTES,
-    DEFAULT_PLUGIN_MESSAGES_PER_TURN, DEFAULT_SHELL_DEFAULT_TIMEOUT_MS,
-    DEFAULT_SHELL_MAX_TIMEOUT_MS, MAX_SHELL_TIMEOUT_MS, PluginMessagesConfig, SandboxConfig,
+    ConfinementConfig, DEFAULT_ASK_USER_TIMEOUT_MS, DEFAULT_COMMAND_MAX_MODEL_BYTES,
+    DEFAULT_PLUGIN_MESSAGE_MAX_BYTES, DEFAULT_PLUGIN_MESSAGES_PER_TURN,
+    DEFAULT_SHELL_DEFAULT_TIMEOUT_MS, DEFAULT_SHELL_MAX_TIMEOUT_MS,
+    DEFAULT_VERBOSE_TOOL_OUTPUT_CHARS, MAX_SHELL_TIMEOUT_MS, PluginMessagesConfig, SandboxConfig,
     ShellLimitsConfig, SkillsConfig, ToolsConfig,
 };
 

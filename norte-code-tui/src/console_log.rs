@@ -1,19 +1,22 @@
 //! Bounded shell output for tool consoles.
 
+use norte_code_client::config::RetentionConfig;
 use terminalui::components::console::Console;
 
-const MAX_LINES: usize = 500;
-const KEEP_LINES: usize = 400;
 const VISIBLE_ROWS: usize = 6;
 
 /// Append a line, dropping the oldest output when a command floods the stream.
-pub(crate) fn push_line(console: &mut Console, line: impl Into<String>) {
+pub(crate) fn push_line(
+    console: &mut Console,
+    line: impl Into<String>,
+    retention: RetentionConfig,
+) {
     console.push_line(line);
-    if console.lines().len() < MAX_LINES {
+    if console.lines().len() < retention.console_max_lines {
         return;
     }
 
-    let skip = console.lines().len() - KEEP_LINES;
+    let skip = console.lines().len() - retention.console_keep_lines;
     let kept = console.lines()[skip..].to_vec();
     let command = console.command.clone();
     let status = console.status;

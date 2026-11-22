@@ -16,6 +16,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
+use crate::config::SkillLimitsConfig;
+
 /// The `skill` tool arguments.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -43,13 +45,17 @@ pub enum SkillAction {
 #[derive(Clone, Debug)]
 pub struct SkillTool {
     registry: Arc<super::SkillRegistry>,
+    max_body_bytes: usize,
 }
 
 impl SkillTool {
     /// A tool over `registry`.
     #[must_use]
     pub fn new(registry: Arc<super::SkillRegistry>) -> Self {
-        Self { registry }
+        Self {
+            max_body_bytes: registry.limits().max_body_bytes,
+            registry,
+        }
     }
 
     /// Turns the tool into a declaration the core registry accepts.
@@ -90,7 +96,7 @@ impl SkillTool {
                 super::validation::escape(&skill.root.display().to_string())
             );
         }
-        ToolOutput::text(super::validation::clip(&text, super::MAX_BODY_BYTES))
+        ToolOutput::text(super::validation::clip(&text, self.max_body_bytes))
     }
 
     fn activate(&self, session: Option<SessionId>, name: &str) -> ToolOutput {
@@ -110,7 +116,7 @@ impl SkillTool {
                         let _ = write!(text, "\n- {}", super::validation::escape(&resource));
                     }
                 }
-                ToolOutput::text(super::validation::clip(&text, super::MAX_BODY_BYTES))
+                ToolOutput::text(super::validation::clip(&text, self.max_body_bytes))
             }
             Err(message) => ToolOutput::error(message),
         }
@@ -179,9 +185,10 @@ impl SkillResourceTool {
     /// A tool over `registry`, with a bounded read.
     #[must_use]
     pub fn new(registry: Arc<super::SkillRegistry>) -> Self {
+        let max_bytes = registry.limits().default_resource_bytes;
         Self {
             registry,
-            max_bytes: super::DEFAULT_RESOURCE_BYTES,
+            max_bytes,
         }
     }
 
@@ -249,16 +256,23 @@ pub struct SkillScriptConfig {
     pub max_output_bytes: usize,
     /// The output that reaches the model, per stream.
     pub max_model_bytes: usize,
+    /// Longest timeout a call may ask for.
+    pub max_timeout_ms: u64,
+    /// Longest accepted shebang line for a bundled script.
+    pub max_shebang_bytes: usize,
 }
 
 impl Default for SkillScriptConfig {
     fn default() -> Self {
+        let defaults = SkillLimitsConfig::default();
         Self {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             path: std::env::var("PATH").ok(),
-            timeout: super::DEFAULT_SCRIPT_TIMEOUT,
-            max_output_bytes: super::MAX_SCRIPT_OUTPUT_BYTES,
-            max_model_bytes: super::MAX_SCRIPT_MODEL_BYTES,
+            timeout: std::time::Duration::from_millis(defaults.default_script_timeout_ms),
+            max_output_bytes: defaults.max_script_output_bytes,
+            max_model_bytes: defaults.max_script_model_bytes,
+            max_timeout_ms: defaults.max_script_timeout_ms,
+            max_shebang_bytes: defaults.max_shebang_bytes,
         }
     }
 }
@@ -270,6 +284,20 @@ impl SkillScriptConfig {
         Self {
             workspace_root: workspace_root.into(),
             ..Self::default()
+        }
+    }
+
+    /// Settings rooted at `workspace_root` with host-provided limits.
+    #[must_use]
+    pub fn for_limits(workspace_root: impl Into<PathBuf>, limits: SkillLimitsConfig) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            path: std::env::var("PATH").ok(),
+            timeout: std::time::Duration::from_millis(limits.default_script_timeout_ms),
+            max_output_bytes: limits.max_script_output_bytes,
+            max_model_bytes: limits.max_script_model_bytes,
+            max_timeout_ms: limits.max_script_timeout_ms,
+            max_shebang_bytes: limits.max_shebang_bytes,
         }
     }
 }
@@ -308,7 +336,7 @@ impl SkillScriptTool {
             .get(&args.skill)
             .ok_or_else(|| format!("unknown skill `{}`", args.skill))?;
         let script = skill.script_path(&args.script)?;
-        let (program, prefix) = interpreter(&script)?;
+        let (program, prefix) = interpreter(&script, self.config.max_shebang_bytes)?;
         let mut command = tokio::process::Command::new(&program);
         command
             .args(prefix)
@@ -328,7 +356,7 @@ impl SkillScriptTool {
         let timeout = args
             .timeout_ms
             .map_or(self.config.timeout, Duration::from_millis)
-            .min(super::MAX_SCRIPT_TIMEOUT);
+            .min(std::time::Duration::from_millis(self.config.max_timeout_ms));
         let mut child = command
             .spawn()
             .map_err(|error| format!("could not start `{program}`: {error}"))?;
@@ -451,19 +479,22 @@ fn render(bytes: &[u8], max_bytes: usize) -> String {
     text.trim_end().to_owned()
 }
 
-pub(super) fn interpreter(script: &Path) -> std::result::Result<(String, Vec<String>), String> {
+pub(super) fn interpreter(
+    script: &Path,
+    max_shebang_bytes: usize,
+) -> std::result::Result<(String, Vec<String>), String> {
     let file = std::fs::File::open(script)
         .map_err(|error| format!("could not read {}: {error}", script.display()))?;
     let mut first_line = Vec::new();
     std::io::BufReader::new(file)
-        .take(super::MAX_SHEBANG_BYTES as u64)
+        .take(u64::try_from(max_shebang_bytes).unwrap_or(u64::MAX))
         .read_until(b'\n', &mut first_line)
         .map_err(|error| format!("could not read {}: {error}", script.display()))?;
-    if first_line.len() == super::MAX_SHEBANG_BYTES && !first_line.ends_with(b"\n") {
+    if first_line.len() == max_shebang_bytes && !first_line.ends_with(b"\n") {
         return Err(format!(
             "`{}` has a shebang line longer than {} bytes",
             script.display(),
-            super::MAX_SHEBANG_BYTES
+            max_shebang_bytes
         ));
     }
     let first_line = String::from_utf8_lossy(&first_line);

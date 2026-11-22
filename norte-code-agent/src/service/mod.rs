@@ -64,7 +64,7 @@ mod workspace;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::runtime::Store;
@@ -90,7 +90,7 @@ use crate::telemetry::Telemetry;
 
 use self::session_record::{ChildSessionMetadata, SessionRecord};
 use self::steering::{Steered, Steering};
-use self::subagents::{MAX_DELEGATION_DEPTH, SubagentOutcome, SubagentRequest, SubagentRunner};
+use self::subagents::{SubagentOutcome, SubagentRequest, SubagentRunner};
 use approvals::ApprovalRules;
 use delegator::SharedChildren;
 use detach::DetachRegistry;
@@ -202,7 +202,7 @@ pub struct Service {
     ///
     /// One more is refused with `SessionBusy` (`ERROR SESSION_BUSY` on the
     /// wire) instead of growing `pending_steers` without bound.
-    max_queued_inputs: usize,
+    max_queued_inputs: AtomicUsize,
     config: RwLock<Config>,
     agent_profiles: RwLock<BTreeMap<String, Config>>,
     catalog: RwLock<Arc<Catalog>>,
@@ -430,7 +430,8 @@ impl Service {
         // limit. The child's depth is always one past its parent's, so a
         // child (depth >= 1) never sees `subagent`.
         disabled.extend(["subagent".to_owned()]);
-        if self.depth_of(parent) >= MAX_DELEGATION_DEPTH {
+        let max_depth = u32::try_from(self.delegation_limits().max_depth).unwrap_or(u32::MAX);
+        if self.depth_of(parent) >= max_depth {
             disabled.extend(["spawn_agent".to_owned()]);
         }
         disabled.sort();

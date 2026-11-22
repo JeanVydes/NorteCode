@@ -10,9 +10,7 @@ use norte_code_wire::{
 
 use crate::provider::ModelSpec as ProviderModelSpec;
 
-use super::session_record::{
-    ChildSessionMetadata, ChildTerminalState, MAX_HELD_DELEGATOR_MESSAGES, SessionRecord,
-};
+use super::session_record::{ChildSessionMetadata, ChildTerminalState, SessionRecord};
 use super::steering::Steered;
 use super::{Service, ServiceError};
 use crate::provider::ModelSpec;
@@ -149,14 +147,15 @@ impl Service {
         key: &SessionKey,
         text: String,
     ) -> Result<usize, ServiceError> {
+        let max_held = self.delegation_limits().max_held_messages;
         let (parent, held) = {
             let mut sessions = self.lock_sessions();
             let record = sessions
                 .get_mut(key)
                 .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            if record.delegator_queue.len() >= MAX_HELD_DELEGATOR_MESSAGES {
+            if record.delegator_queue.len() >= max_held {
                 return Err(ServiceError::Delegation(format!(
-                    "DELEGATOR_SUSPENDED: at most {MAX_HELD_DELEGATOR_MESSAGES} messages may be queued"
+                    "DELEGATOR_SUSPENDED: at most {max_held} messages may be queued"
                 )));
             }
             record.delegator_queue.push(text.clone());

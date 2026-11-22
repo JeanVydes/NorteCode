@@ -3,19 +3,26 @@
 //! Child modules see the service's private fields, so a domain owns its
 //! behaviour here while the state stays in one place.
 
+use std::time::Duration;
+
 use mcp::McpServers;
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
 impl Service {
+    fn mcp_request_timeout(&self) -> Duration {
+        Duration::from_millis(self.config().mcp_limits.request_timeout_ms)
+    }
+
     /// Connects the configured MCP servers, once, at startup.
     pub(super) async fn connect_mcp(&self) {
         let root = self.workspace_root.clone();
         // The servers are read before the first await: a `std` lock must not be
         // held across one.
         let configured = self.lock_config().mcp_servers.clone();
-        let connected = McpServers::connect(&configured, &root).await;
+        let request_timeout = self.mcp_request_timeout();
+        let connected = McpServers::connect(&configured, &root, request_timeout).await;
         for (name, reason) in &connected.failures {
             tracing::warn!(server = %name, %reason, "an MCP server could not be started");
         }
@@ -78,10 +85,11 @@ impl Service {
             Ok(servers) => servers.failed_to_retry(&configured),
             Err(_) => return 0,
         };
+        let request_timeout = self.mcp_request_timeout();
         let mut recovered = Vec::new();
         let mut still_failed = Vec::new();
         for (name, config) in pending {
-            match McpServers::connect_configured(&name, &config, &root).await {
+            match McpServers::connect_configured(&name, &config, &root, request_timeout).await {
                 Ok(server) => recovered.push(server),
                 Err(reason) => still_failed.push((name, reason)),
             }
@@ -110,7 +118,8 @@ impl Service {
             .read()
             .map(|servers| servers.active_by_name())
             .unwrap_or_default();
-        let mut connected = McpServers::connect(&configured, &root).await;
+        let request_timeout = self.mcp_request_timeout();
+        let mut connected = McpServers::connect(&configured, &root, request_timeout).await;
         for (name, reason) in &connected.failures {
             tracing::warn!(server = %name, %reason, "an MCP server could not be started");
         }

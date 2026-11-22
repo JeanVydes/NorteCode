@@ -12,8 +12,9 @@ use crate::keys::KeyStore;
 use super::loading::{invalid, merge, read_text, read_value, validate_pair};
 use super::{
     ApiKey, ApprovalsConfig, BudgetsConfig, CONFIG_VERSION, CliConfig, CompactionConfig, Config,
-    ConfigError, CostConfig, Loaded, MAX_SHELL_TIMEOUT_MS, McpServerConfig, PluginPolicies,
-    ReasoningConfig, RetryConfig, SkillsConfig, ToolsConfig,
+    ConfigError, CostConfig, DelegationConfig, Loaded, MAX_SHELL_TIMEOUT_MS, McpLimitsConfig,
+    McpServerConfig, PluginPolicies, ProviderHttpConfig, ReasoningConfig, RetryConfig,
+    SkillsConfig, ToolsConfig,
 };
 
 /// One server-owned agent definition.
@@ -58,6 +59,12 @@ pub struct Agent {
     pub compaction: CompactionConfig,
     /// Automatic retries for transient provider failures.
     pub retry: RetryConfig,
+    /// Transport policy for requests sent to provider adapters.
+    pub provider_http: ProviderHttpConfig,
+    /// Bounds on child sessions and their queued messages.
+    pub delegation: DelegationConfig,
+    /// Limits shared by every configured MCP server.
+    pub mcp_limits: McpLimitsConfig,
     /// The session's default reasoning setting.
     pub reasoning: ReasoningConfig,
     /// A system prompt override; `None` uses the built-in default.
@@ -124,6 +131,9 @@ impl Default for Agent {
             default_model: None,
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
+            provider_http: ProviderHttpConfig::default(),
+            delegation: DelegationConfig::default(),
+            mcp_limits: McpLimitsConfig::default(),
             reasoning: ReasoningConfig::default(),
             system_prompt: None,
             approvals: ApprovalsConfig::default(),
@@ -261,6 +271,15 @@ impl Agent {
     ///
     /// Returns [`ConfigError::Invalid`] naming the first field that is wrong.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_identity()?;
+        self.validate_runtime_limits()?;
+        self.validate_mcp_servers()?;
+        self.validate_session_limits()?;
+        self.validate_tools()?;
+        self.validate_budgets()
+    }
+
+    fn validate_identity(&self) -> Result<(), ConfigError> {
         if self.name.trim().is_empty() {
             return Err(invalid("name", "must not be empty"));
         }
@@ -280,7 +299,31 @@ impl Agent {
         if self.skills.max_skills == 0 {
             return Err(invalid("skills.max_skills", "must be at least 1"));
         }
-        self.validate_mcp_servers()?;
+        Ok(())
+    }
+
+    fn validate_runtime_limits(&self) -> Result<(), ConfigError> {
+        self.provider_http.validate()?;
+        self.delegation.validate()?;
+        self.mcp_limits.validate()?;
+        self.skills.limits.validate()?;
+        self.tools.read_limits.validate()?;
+        if !(1_000..=86_400_000).contains(&self.tools.ask_user_timeout_ms) {
+            return Err(invalid(
+                "tools.ask_user_timeout_ms",
+                "must be between 1000 and 86400000 milliseconds",
+            ));
+        }
+        if !(1..=100_000).contains(&self.tools.verbose_tool_output_chars) {
+            return Err(invalid(
+                "tools.verbose_tool_output_chars",
+                "must be between 1 and 100000 characters",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_session_limits(&self) -> Result<(), ConfigError> {
         if !(self.compaction.threshold > 0.0 && self.compaction.threshold <= 1.0) {
             return Err(invalid(
                 "compaction.threshold",
@@ -308,6 +351,10 @@ impl Agent {
                 "must be at most 600000 (ten minutes)",
             ));
         }
+        Ok(())
+    }
+
+    fn validate_tools(&self) -> Result<(), ConfigError> {
         if self
             .tools
             .confinement
@@ -346,6 +393,10 @@ impl Agent {
                 "must not exceed tools.shell_limits.max_timeout_ms",
             ));
         }
+        Ok(())
+    }
+
+    fn validate_budgets(&self) -> Result<(), ConfigError> {
         for (scope, budget) in [
             ("message", &self.budgets.message),
             ("session", &self.budgets.session),

@@ -1,5 +1,9 @@
 //! Protocol mapping, usage metrics and the budget layer.
 
+#[cfg(test)]
+#[path = "mapping_tests.rs"]
+mod tests;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -131,15 +135,12 @@ pub(super) async fn tool_result_index(
     Some(results)
 }
 
-/// The most tool output the wire carries for a verbose renderer.
-const TOOL_OUTPUT_LIMIT: usize = 4_000;
-
 /// Shortens a tool result on a character boundary.
-pub(super) fn shorten_tool_output(text: String) -> (String, bool) {
-    if text.chars().count() <= TOOL_OUTPUT_LIMIT {
+pub(super) fn shorten_tool_output(text: String, limit: usize) -> (String, bool) {
+    if text.chars().count() <= limit {
         return (text, false);
     }
-    let mut shortened: String = text.chars().take(TOOL_OUTPUT_LIMIT).collect();
+    let mut shortened: String = text.chars().take(limit).collect();
     shortened.push_str("\n… [truncated]");
     (shortened, true)
 }

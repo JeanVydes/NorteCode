@@ -59,6 +59,7 @@ mod toast_host;
 mod toast_host_tests;
 mod transcript;
 
+use norte_code_client::config::RetentionConfig;
 use terminalui::{Pane, Spacer};
 
 pub(crate) use chat_layout::ChatLayout;
@@ -131,10 +132,18 @@ fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn build_tree(model: &UiModel) -> Tree {
+    build_tree_with_retention(model, RetentionConfig::default())
+}
+
+pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionConfig) -> Tree {
     let theme = model.preferences.catalog.theme(&model.preferences.theme);
 
-    let chat = node("chat", ChatLayout::new(model.preferences.rail_position));
+    let chat = node(
+        "chat",
+        ChatLayout::with_retention(model.preferences.rail_position, retention),
+    );
 
     let middle = node(
         "middle",

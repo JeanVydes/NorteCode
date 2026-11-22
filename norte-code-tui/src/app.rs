@@ -7,6 +7,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
+use norte_code_client::config::RetentionConfig;
 use ratatui::style::Style;
 
 use crate::client::{ClientEvent, UiCommand, start};
@@ -68,8 +69,11 @@ pub(super) fn run() -> Result<(), crate::TuiError> {
 
     let mut model = UiModel::detached();
     let (config, mut commands, mut events) = attach_client(&mut model);
+    let retention = config
+        .as_ref()
+        .map_or_else(RetentionConfig::default, |config| config.retention);
 
-    let mut tree = ui::build_tree(&model);
+    let mut tree = ui::build_tree_with_retention(&model, retention);
     let mut metrics = Metrics::new();
     let mut frame_limiter = FrameLimiter::new();
     let mut overlay_clock = ui::OverlayClock::new();

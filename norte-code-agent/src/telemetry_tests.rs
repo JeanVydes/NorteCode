@@ -1,5 +1,6 @@
 use super::*;
 use futures_util::StreamExt;
+use norte_code_protocol::config::ProviderHttpConfig;
 
 struct Next;
 
@@ -41,6 +42,7 @@ async fn an_exhausted_stream_records_an_ok_row() {
         api_key: norte_code_protocol::config::ApiKey::new("test"),
         capabilities: norte::Capabilities::builder().build(),
         headers: std::collections::BTreeMap::new(),
+        http: ProviderHttpConfig::default(),
     };
     let layer = TelemetryLayer::new(Arc::clone(&telemetry), spec, true, false);
     let request = ModelRequest {
@@ -99,6 +101,7 @@ async fn cancelled_row(
         api_key: norte_code_protocol::config::ApiKey::new("test"),
         capabilities: norte::Capabilities::builder().build(),
         headers: std::collections::BTreeMap::new(),
+        http: ProviderHttpConfig::default(),
     };
     let layer = TelemetryLayer::new(Arc::clone(&telemetry), spec, false, false);
     let request = ModelRequest {

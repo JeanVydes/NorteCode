@@ -31,7 +31,7 @@ use norte::{
 };
 use norte_code_protocol::InMemoryStore;
 use norte_code_protocol::config::CompactionTrigger;
-use norte_code_protocol::config::{ApiKey, BudgetConfig, RetryConfig};
+use norte_code_protocol::config::{ApiKey, BudgetConfig, ProviderHttpConfig, RetryConfig};
 use norte_code_protocol::sqlite::RequestStatus;
 use norte_code_protocol::sqlite::SqliteStore;
 use norte_code_wire::catalog::WireSchema;
@@ -225,6 +225,7 @@ fn spec(model: &str) -> ModelSpec {
         auth: None,
         capabilities: norte_code_protocol::catalog::capabilities(entry, WireSchema::OpenAI),
         headers: std::collections::BTreeMap::new(),
+        http: ProviderHttpConfig::default(),
     }
 }
 
@@ -6128,6 +6129,15 @@ async fn skills_and_tools_are_listed_over_the_protocol() {
     ));
 }
 
+#[test]
+fn configured_skill_limits_reach_discovery() {
+    let mut config = config();
+    config.skills.limits.max_body_bytes = 12_345;
+    let workspace = std::env::current_dir().expect("working directory");
+    let registry = super::skills::discover_skills(&config, &workspace);
+    assert_eq!(registry.limits().max_body_bytes, 12_345);
+}
+
 #[tokio::test]
 async fn ask_user_parks_the_turn_until_the_client_answers() {
     let reference = ModelRef::new(
@@ -7004,6 +7014,69 @@ async fn a_read_through_an_escaping_symlink_is_denied_by_the_engine() {
 
     let _ = std::fs::remove_file(&link);
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn configured_read_limit_is_enforced_by_the_registered_tool() {
+    let path = std::env::current_dir()
+        .expect("working directory")
+        .join(format!("norte-read-limit-{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&path, "0123456789").expect("file");
+    let mut config = config();
+    config.tools.read_limits.max_file_bytes = 4;
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(
+                call,
+                "read",
+                &serde_json::json!({ "path": path.display().to_string() }),
+            )
+            .turn_text("done"),
+    );
+    let service = Arc::new(
+        Service::new(
+            config,
+            catalog(),
+            Some(spec("scripted")),
+            Arc::new(ScriptedFactory { model }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "read it".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            output: Vec::new(),
+            response_format: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+    let error = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            ServerEventKind::ToolFinished { error, .. } => error.clone(),
+            _ => None,
+        })
+        .expect("the read should have been attempted");
+    assert!(
+        error.contains('4'),
+        "the configured byte limit must reach the read tool: {error:?}"
+    );
+    let _ = std::fs::remove_file(&path);
 }
 
 /// The replay events of a stream, as `(role, text)` pairs.
@@ -9675,6 +9748,51 @@ async fn suspended_child_message_queue_is_bounded() {
             .await,
         Err(ServiceError::Delegation(message)) if message.contains("at most 20")
     ));
+}
+
+#[tokio::test]
+async fn configured_delegation_limit_bounds_held_messages() {
+    let mut config = config();
+    config.delegation.max_held_messages = 2;
+    let (service, _) = scripted_service_with_config(config, spec("scripted"), &["ok"]);
+    let session = service.start_session(None).await.expect("session");
+    service
+        .set_delegator_suspended(&session, true)
+        .await
+        .expect("suspend session");
+    service
+        .hold_delegator_message(&session, "first".to_owned())
+        .await
+        .expect("first message");
+    service
+        .hold_delegator_message(&session, "second".to_owned())
+        .await
+        .expect("second message");
+    assert!(matches!(
+        service
+            .hold_delegator_message(&session, "third".to_owned())
+            .await,
+        Err(ServiceError::Delegation(message)) if message.contains("at most 2")
+    ));
+}
+
+#[tokio::test]
+async fn input_queue_limit_can_be_configured_after_construction() {
+    let service = service();
+    service.configure_input_limit(3);
+    assert_eq!(
+        service
+            .max_queued_inputs
+            .load(std::sync::atomic::Ordering::Relaxed),
+        3
+    );
+    service.configure_input_limit(0);
+    assert_eq!(
+        service
+            .max_queued_inputs
+            .load(std::sync::atomic::Ordering::Relaxed),
+        3
+    );
 }
 
 #[tokio::test]

@@ -11,7 +11,9 @@ use norte_code_protocol::skills::{
     SkillResourceTool, SkillScriptConfig, SkillScriptTool, SkillTool,
 };
 use norte_code_protocol::tools::{AskUserTool, GrepTool, TodoTool, WebFetchTool};
-use norte_tools::{EditTool, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool};
+use norte_tools::{
+    EditTool, ReadLimits, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool,
+};
 
 use norte_code_wire::{PluginId, SessionKey};
 
@@ -277,7 +279,15 @@ impl Service {
     pub fn tools(&self, session: Option<&SessionKey>) -> Result<ToolRegistry, ServiceError> {
         let disabled = self.disabled_for(session);
         let mut tools = ToolRegistry::new();
-        self.register_tool(&mut tools, &disabled, ReadTool::new().into_declaration())?;
+        let read_limits = self.config().tools.read_limits;
+        let read = ReadTool::new().with_limits(ReadLimits {
+            max_file_bytes: usize::try_from(read_limits.max_file_bytes).unwrap_or(usize::MAX),
+            max_output_bytes: usize::try_from(read_limits.max_output_bytes).unwrap_or(usize::MAX),
+            max_lines: read_limits.max_lines,
+            max_matches: read_limits.max_matches,
+            max_line_width: read_limits.max_line_width,
+        });
+        self.register_tool(&mut tools, &disabled, read.into_declaration())?;
         self.register_tool(&mut tools, &disabled, WriteTool::new().into_declaration())?;
         self.register_tool(&mut tools, &disabled, EditTool::new().into_declaration())?;
         self.register_tool(
@@ -314,7 +324,7 @@ impl Service {
             Arc::clone(&self.detaches),
             Arc::clone(&self.children),
             Arc::clone(&self.job_host),
-            3,
+            self.config().delegation.max_concurrent,
         );
         self.register_tool(
             &mut tools,
@@ -332,6 +342,7 @@ impl Service {
         }
 
         if self.config().skills.enabled {
+            let limits = self.config().skills.limits;
             let skills = self.skills();
             self.register_tool(
                 &mut tools,
@@ -349,7 +360,7 @@ impl Service {
                     &disabled,
                     SkillScriptTool::new(
                         Arc::clone(&skills),
-                        SkillScriptConfig::in_workspace(&self.workspace_root),
+                        SkillScriptConfig::for_limits(self.workspace_root.clone(), limits),
                     )
                     .into_declaration(),
                 )?;

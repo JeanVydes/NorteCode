@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use norte_code_agent::Service;
+use norte_code_protocol::config::RaepLimitsConfig;
 use norte_code_wire::{ClientRequestKind, ServerEventKind, SessionKey};
 use raep_types::{AttachMode, Envelope, FrameType, StandardFrameType};
 use serde_json::Value;
@@ -25,6 +26,10 @@ fn env_limit(name: &str, default: usize) -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn usize_limit(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
 }
 
 mod agents;
@@ -1056,6 +1061,33 @@ impl Default for HostConfig {
             export_ttl_s: 3600,
             max_connections: env_limit("NORTE_CODE_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS),
             command_timeout_ms: 120_000,
+        }
+    }
+}
+
+impl HostConfig {
+    /// Builds a host configuration from the validated service limits.
+    ///
+    /// The replay capacity and connection count keep their legacy environment
+    /// overrides. Storage and auth fields keep their defaults for the caller
+    /// to replace.
+    #[must_use]
+    pub fn from_limits(agent_id: String, limits: &RaepLimitsConfig) -> Self {
+        Self {
+            agent_id,
+            replay_capacity: env_limit("NORTE_CODE_REPLAY_CAPACITY", limits.replay_capacity),
+            replay_bytes: limits.replay_bytes,
+            max_concurrent_jobs: limits.max_concurrent_jobs,
+            job_output_retention_s: limits.job_output_retention_s,
+            idempotency_capacity: limits.idempotency_capacity,
+            max_queued_inputs: limits.max_queued_inputs,
+            max_frame_bytes: limits.max_frame_bytes,
+            max_artifact_bytes: usize_limit(limits.max_artifact_bytes),
+            max_export_bytes: usize_limit(limits.max_export_bytes),
+            export_ttl_s: limits.export_ttl_s,
+            max_connections: env_limit("NORTE_CODE_MAX_CONNECTIONS", limits.max_connections),
+            command_timeout_ms: limits.command_timeout_ms,
+            ..Self::default()
         }
     }
 }

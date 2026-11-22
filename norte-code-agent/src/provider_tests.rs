@@ -192,3 +192,28 @@ fn the_label_is_the_reference_a_person_writes() {
     let spec = ModelSpec::from_entry(&Config::default(), &provider, &model, None).expect("spec");
     assert_eq!(spec.label(), "p/m");
 }
+
+#[test]
+fn a_spec_carries_the_configured_provider_transport_policy() {
+    let provider = provider("p", &[WireSchema::OpenAI]);
+    let model = model("m", "p");
+    let http = ProviderHttpConfig {
+        connect_max_retries: 1,
+        connect_timeout_ms: 1_234,
+        request_timeout_ms: 5_678,
+        stream_idle_timeout_ms: 9_012,
+    };
+    let config = Config {
+        provider_http: http,
+        ..Config::default()
+    };
+    let spec = ModelSpec::from_entry(&config, &provider, &model, None).expect("spec");
+    assert_eq!(spec.http.connect_max_retries, http.connect_max_retries);
+    assert_eq!(spec.http.connect_timeout_ms, http.connect_timeout_ms);
+    assert_eq!(spec.http.request_timeout_ms, http.request_timeout_ms);
+    assert_eq!(
+        spec.http.stream_idle_timeout_ms,
+        http.stream_idle_timeout_ms
+    );
+    assert!(VendorModels.build(&spec, &Capabilities::default()).is_ok());
+}

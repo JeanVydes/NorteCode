@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::loading::{invalid, merge, read_value};
-use super::{Agent, CONFIG_VERSION, ConfigError};
+use super::{Agent, CONFIG_VERSION, ConfigError, RaepLimitsConfig};
 
 /// Server configuration containing the available agents.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -18,6 +18,8 @@ pub struct ServiceConfig {
     pub default_agent: String,
     /// Agents exposed by the service.
     pub agents: Vec<Agent>,
+    /// Capacity and retention limits owned by the RAEP host.
+    pub raep_limits: RaepLimitsConfig,
 }
 
 impl Default for ServiceConfig {
@@ -26,6 +28,7 @@ impl Default for ServiceConfig {
             version: CONFIG_VERSION,
             default_agent: "norte-code".to_owned(),
             agents: vec![Agent::default()],
+            raep_limits: RaepLimitsConfig::default(),
         }
     }
 }
@@ -67,8 +70,22 @@ impl ServiceConfig {
             merge(&mut value, read_value(path)?);
         }
         let service: ServiceConfig = if value.get("agents").is_none() {
+            let raep_limits = value
+                .get("raep_limits")
+                .map(|raw| {
+                    serde_json::from_value(raw.clone()).map_err(|source| ConfigError::Parse {
+                        path: PathBuf::from("<service.json>"),
+                        source,
+                    })
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let mut agent_value = value;
+            if let Some(object) = agent_value.as_object_mut() {
+                object.remove("raep_limits");
+            }
             let agent: Agent =
-                serde_json::from_value(value).map_err(|source| ConfigError::Parse {
+                serde_json::from_value(agent_value).map_err(|source| ConfigError::Parse {
                     path: PathBuf::from("<service.json>"),
                     source,
                 })?;
@@ -76,6 +93,7 @@ impl ServiceConfig {
                 version: agent.version,
                 default_agent: agent.name.clone(),
                 agents: vec![agent],
+                raep_limits,
             }
         } else {
             serde_json::from_value(value).map_err(|source| ConfigError::Parse {
@@ -105,6 +123,7 @@ impl ServiceConfig {
         if self.agents.is_empty() {
             return Err(invalid("agents", "must contain at least one agent"));
         }
+        self.raep_limits.validate()?;
         let mut names = std::collections::BTreeSet::new();
         for agent in &self.agents {
             agent.validate()?;

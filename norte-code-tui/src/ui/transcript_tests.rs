@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use norte_code_client::config::RetentionConfig;
 use norte_code_wire::{HistoryItem, HistorySpeaker};
 use ratatui::layout::Rect;
 use terminalui::Outcome;
 
-use super::{Item, KEEP_ITEMS, MAX_ITEMS, NOTICE_PREFIX_CHARS, Tone, Transcript};
+use super::{Item, NOTICE_PREFIX_CHARS, Tone, Transcript};
 use crate::ui::scroll_drag::Scrollbar;
 
 fn scrollable_transcript() -> Transcript {
@@ -594,8 +595,9 @@ fn clearing_the_stream_drops_the_render_cache() {
 
 #[test]
 fn a_long_session_keeps_only_recent_items() {
+    let retention = RetentionConfig::default();
     let mut transcript = Transcript::new();
-    for index in 0..MAX_ITEMS + 25 {
+    for index in 0..retention.transcript_max_items + 25 {
         transcript.push(Item::Notice {
             text: format!("line {index}"),
             tone: Tone::Neutral,
@@ -603,9 +605,43 @@ fn a_long_session_keeps_only_recent_items() {
     }
 
     let count = transcript.items.len();
-    assert!((KEEP_ITEMS..=MAX_ITEMS).contains(&count), "count {count}");
+    assert!(
+        (retention.transcript_keep_items..=retention.transcript_max_items).contains(&count),
+        "count {count}"
+    );
     let last = transcript.items.last().expect("last item");
-    assert!(matches!(last, Item::Notice { text, .. } if text == "line 1024"));
+    assert!(matches!(
+        last,
+        Item::Notice { text, .. }
+            if *text == format!("line {}", retention.transcript_max_items + 24)
+    ));
+}
+
+#[test]
+fn a_long_session_trims_at_the_configured_limits() {
+    let retention = RetentionConfig {
+        transcript_max_items: 12,
+        transcript_keep_items: 4,
+        ..RetentionConfig::default()
+    };
+    let mut transcript = Transcript::with_retention(retention);
+    for index in 0..20 {
+        transcript.push(Item::Notice {
+            text: format!("line {index}"),
+            tone: Tone::Neutral,
+        });
+    }
+
+    assert_eq!(transcript.items.len(), 4);
+    let texts: Vec<_> = transcript
+        .items
+        .iter()
+        .map(|item| match item {
+            Item::Notice { text, .. } => text.as_str(),
+            _ => "unexpected item",
+        })
+        .collect();
+    assert_eq!(texts, ["line 16", "line 17", "line 18", "line 19"]);
 }
 
 #[test]
@@ -647,14 +683,18 @@ fn hit_testing_follows_the_rendered_scroll_offset() {
 
 #[test]
 fn replaying_a_long_history_is_bounded() {
+    let retention = RetentionConfig::default();
     let mut transcript = Transcript::new();
-    let items = (0..MAX_ITEMS + 25)
+    let items = (0..retention.transcript_max_items + 25)
         .map(|index| history_item(&index.to_string(), "user", "hello"))
         .collect();
     transcript.replace_history(items);
 
     let count = transcript.items.len();
-    assert!((KEEP_ITEMS..=MAX_ITEMS).contains(&count), "count {count}");
+    assert!(
+        (retention.transcript_keep_items..=retention.transcript_max_items).contains(&count),
+        "count {count}"
+    );
 }
 
 #[test]

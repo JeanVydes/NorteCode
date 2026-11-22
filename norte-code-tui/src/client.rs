@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use norte_code_client::config::ReconnectConfig;
 use norte_code_client::{AgentClient, EventStream, RemoteClient, RestClient};
 use norte_code_wire::UserInputPart;
 use norte_code_wire::{SessionKey, SessionSummary, UploadReceipt};
@@ -250,8 +251,6 @@ pub(crate) enum PluginOp {
         enabled: bool,
     },
 }
-
-const RETRY_BASE_MS: u64 = 400;
 
 /// Ask the host to cancel the running turn.
 async fn cancel_turn(
@@ -514,6 +513,7 @@ async fn connection(
     mut commands: Receiver<UiCommand>,
     events: Sender<ClientEvent>,
 ) {
+    let reconnect = config.reconnect;
     let client = match RemoteClient::new(
         config.service.url.clone(),
         config.service.token.as_deref(),
@@ -568,7 +568,7 @@ async fn connection(
     let _ = events.send(ClientEvent::Sessions(sessions)).await;
     let mut session = attach_shared(&client, &events, Box::new(fresh)).await;
     loop {
-        match stream_loop(&client, &api, &mut commands, &events, &session).await {
+        match stream_loop(&client, &api, &mut commands, &events, &session, &reconnect).await {
             StreamOutcome::Retry => return,
             StreamOutcome::Switch(summary) => {
                 session = attach_shared(&client, &events, summary).await;
@@ -797,12 +797,9 @@ async fn fetch_history(api: &Arc<RestClient>, session: &str, events: &Sender<Cli
     }
 }
 
-/// After this many consecutive failures or short-lived streams, surface a
-/// notice once; the reconnect keeps going in the background regardless.
-const GIVE_UP_ATTEMPTS: u32 = 3;
-/// A stream that stays up at least this long counts as healthy.
-const HEALTHY_STREAM: Duration = Duration::from_secs(10);
-const RETRY_MAX_MS: u64 = 5000;
+fn retry_delay(reconnect: &ReconnectConfig, attempt: u32) -> Duration {
+    Duration::from_millis((reconnect.retry_base_ms << attempt.min(6)).min(reconnect.retry_max_ms))
+}
 
 enum StreamOutcome {
     /// The stream closed; the caller should re-open it.
@@ -823,7 +820,9 @@ async fn stream_loop(
     commands: &mut Receiver<UiCommand>,
     events: &Sender<ClientEvent>,
     session: &SessionKey,
+    reconnect: &ReconnectConfig,
 ) -> StreamOutcome {
+    let healthy_stream = Duration::from_secs(reconnect.healthy_stream_s);
     let mut attempt = 0u32;
     let mut announced = false;
     let mut primed = false;
@@ -850,13 +849,13 @@ async fn stream_loop(
                     StreamOutcome::Switch(summary) => return StreamOutcome::Switch(summary),
                     StreamOutcome::Retry => {}
                 }
-                if opened_at.elapsed() >= HEALTHY_STREAM {
+                if opened_at.elapsed() >= healthy_stream {
                     attempt = 0;
                     announced = false;
                 } else {
                     attempt = attempt.saturating_add(1);
                 }
-                if attempt >= GIVE_UP_ATTEMPTS && !announced {
+                if attempt >= reconnect.give_up_attempts && !announced {
                     let _ = events
                         .send(ClientEvent::Detached {
                             reason: ClientError::unstable_stream(),
@@ -867,7 +866,7 @@ async fn stream_loop(
             }
             Err(error) => {
                 attempt = attempt.saturating_add(1);
-                if attempt >= GIVE_UP_ATTEMPTS && !announced {
+                if attempt >= reconnect.give_up_attempts && !announced {
                     let _ = events
                         .send(ClientEvent::Detached {
                             reason: ClientError::lost_stream(error),
@@ -877,8 +876,7 @@ async fn stream_loop(
                 }
             }
         }
-        let delay = (RETRY_BASE_MS << attempt.min(6)).min(RETRY_MAX_MS);
-        tokio::time::sleep(Duration::from_millis(delay)).await;
+        tokio::time::sleep(retry_delay(reconnect, attempt)).await;
     }
 }
 

@@ -34,11 +34,6 @@ use super::jobs::JobRegistry;
 use super::steering::{Steered, Steering};
 use super::subagent_views::{ChildResult, DelegatorAnswer};
 
-/// How deep delegation may nest (RFC 8.2.4). A child at this depth cannot
-/// spawn; the error names the limit, which is `BUDGET_EXCEEDED`-flavoured
-/// in the RAEP tool error registry.
-pub(super) const MAX_DELEGATION_DEPTH: u32 = 3;
-
 /// The child session id is the parent-visible name of a child: the
 /// `SessionKey` the service created for it, which is what `children_of`
 /// returns and what the delegating tools address.
@@ -473,11 +468,14 @@ impl FnExecutor<SubagentArgs, ToolOutput> for SubagentTool {
         // that cannot do anything.
         if let Some(service) = service_of(&self.service)
             && let Some(depth) = parent_key(&service, parent).map(|key| service.depth_of(&key))
-            && depth >= MAX_DELEGATION_DEPTH
         {
-            return Ok(ToolOutput::error(format!(
-                "BUDGET_EXCEEDED: maximum delegation depth ({MAX_DELEGATION_DEPTH}) reached at this session"
-            )));
+            let max_depth =
+                u32::try_from(service.delegation_limits().max_depth).unwrap_or(u32::MAX);
+            if depth >= max_depth {
+                return Ok(ToolOutput::error(format!(
+                    "BUDGET_EXCEEDED: maximum delegation depth ({max_depth}) reached at this session"
+                )));
+            }
         }
         if let Some(error) = invalid_spawn_args(&args) {
             return Ok(ToolOutput::error(error));

@@ -8,6 +8,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `service.json` now exposes the runtime limits that were previously hardcoded.
+  Agent blocks: `ask_user` timeout through `tools.ask_user_timeout_ms`, verbose
+  tool output through `tools.verbose_tool_output_chars`, `read`-only bounds
+  through `tools.read_limits`, MCP request timeout through `mcp_limits`,
+  delegation depth and queue size through `delegation`, provider connect timeout
+  and HTTP policy through `provider_http`, and skill and script bounds through
+  `skills.limits`. The service-wide `raep_limits` block configures RAEP replay,
+  concurrency, queue, frame, artifact, export, connection and command bounds.
+- `cli.json` now exposes client-owned timings: `service_lifecycle` for Tokio
+  workers and local service start or stop waits, `reconnect` for stream retry
+  backoff, and `retention` for transcript and console history. Probe timeouts,
+  attachment size and question or review prompt text remain fixed.
 - `tools.shell_limits` configures the shell's runtime bounds:
   `allow_indefinite` (default `true`), `default_timeout_ms` (default `120000`)
   and `max_timeout_ms` (default `600000`). Detached jobs report the same

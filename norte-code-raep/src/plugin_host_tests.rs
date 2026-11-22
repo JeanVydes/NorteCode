@@ -10,6 +10,7 @@ fn service() -> Arc<Service> {
         auth: None,
         capabilities: norte::Capabilities::builder().max_context(4096).build(),
         headers: std::collections::BTreeMap::new(),
+        http: norte_code_protocol::config::ProviderHttpConfig::default(),
     };
     Arc::new(
         Service::new(

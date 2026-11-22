@@ -138,7 +138,8 @@ impl Service {
                 } else {
                     let text = recorded.as_ref().and_then(output_text).or(fallback);
                     text.map_or((None, false), |text| {
-                        let (text, truncated) = shorten_tool_output(text);
+                        let limit = self.config().tools.verbose_tool_output_chars;
+                        let (text, truncated) = shorten_tool_output(text, limit);
                         (Some(text), truncated)
                     })
                 };

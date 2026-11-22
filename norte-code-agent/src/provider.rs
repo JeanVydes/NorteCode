@@ -14,10 +14,11 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use norte::anthropic::AnthropicMessages;
 use norte::gemini::GeminiGenerate;
-use norte::http::{AuthScheme, VendorProfile};
+use norte::http::{AuthScheme, HttpClient, TransportPolicy, VendorProfile};
 use norte::openai::{OpenAiChat, OpenAiResponses};
 use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId, WireFamily};
 
@@ -28,7 +29,7 @@ use norte_code_wire::catalog::{
     AuthKind, Model as CatalogModel, Provider as CatalogProvider, WireSchema,
 };
 
-use norte_code_protocol::config::{ApiKey, Config};
+use norte_code_protocol::config::{ApiKey, Config, ProviderHttpConfig};
 
 use crate::ServiceError;
 
@@ -62,6 +63,8 @@ pub struct ModelSpec {
     pub capabilities: Capabilities,
     /// The headers sent with every request to this provider.
     pub headers: BTreeMap<String, String>,
+    /// The transport policy this provider's adapter follows.
+    pub http: ProviderHttpConfig,
 }
 
 impl ModelSpec {
@@ -93,6 +96,7 @@ impl ModelSpec {
             auth: wire.auth,
             capabilities: norte_code_protocol::catalog::capabilities(model, wire.schema),
             headers: wire.headers.clone(),
+            http: config.provider_http,
         })
     }
 
@@ -218,7 +222,21 @@ impl ModelFactory for VendorModels {
             key,
             &spec.headers,
         )?;
-        build_with_profile(spec.schema, reference, profile, capabilities.clone())
+        let client = HttpClient::with_policy(TransportPolicy {
+            max_retries: spec.http.connect_max_retries,
+            base: Duration::from_millis(500),
+            max: Duration::from_secs(8),
+            connect_timeout: Duration::from_millis(spec.http.connect_timeout_ms),
+            request_timeout: Some(Duration::from_millis(spec.http.request_timeout_ms)),
+            stream_idle_timeout: Some(Duration::from_millis(spec.http.stream_idle_timeout_ms)),
+        })?;
+        build_with_profile(
+            spec.schema,
+            reference,
+            profile,
+            capabilities.clone(),
+            client,
+        )
     }
 }
 
@@ -274,14 +292,21 @@ fn build_with_profile(
     reference: ModelRef,
     profile: VendorProfile,
     capabilities: Capabilities,
+    client: HttpClient,
 ) -> Result<Arc<dyn Model>, ServiceError> {
     Ok(match schema {
-        WireSchema::OpenAI => Arc::new(OpenAiChat::new(reference, profile, capabilities)?),
-        WireSchema::Anthropic => {
-            Arc::new(AnthropicMessages::new(reference, profile, capabilities)?)
+        WireSchema::OpenAI => {
+            Arc::new(OpenAiChat::new(reference, profile, capabilities)?.with_client(client))
         }
-        WireSchema::Google => Arc::new(GeminiGenerate::new(reference, profile, capabilities)?),
-        WireSchema::Responses => Arc::new(OpenAiResponses::new(reference, profile, capabilities)?),
+        WireSchema::Anthropic => {
+            Arc::new(AnthropicMessages::new(reference, profile, capabilities)?.with_client(client))
+        }
+        WireSchema::Google => {
+            Arc::new(GeminiGenerate::new(reference, profile, capabilities)?.with_client(client))
+        }
+        WireSchema::Responses => {
+            Arc::new(OpenAiResponses::new(reference, profile, capabilities)?.with_client(client))
+        }
     })
 }
 

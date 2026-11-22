@@ -1,4 +1,5 @@
 use super::*;
+use norte_code_protocol::config::RaepLimitsConfig;
 use norte_code_wire::{MessageRole, ReplayedKind, ServerEvent};
 use raep_types::{SessionAttach, TurnId};
 
@@ -7,6 +8,52 @@ use std::collections::{HashMap, HashSet};
 
 use axum::{body::Body, http::Request};
 use tower::ServiceExt;
+
+#[test]
+fn host_config_from_limits_applies_service_and_env_limits() {
+    let limits = RaepLimitsConfig {
+        replay_capacity: 321,
+        replay_bytes: 4_096,
+        max_concurrent_jobs: 3,
+        job_output_retention_s: 42,
+        idempotency_capacity: 128,
+        max_queued_inputs: 5,
+        max_frame_bytes: 2_048,
+        max_artifact_bytes: 8_192,
+        max_export_bytes: 16_384,
+        export_ttl_s: 60,
+        max_connections: 7,
+        command_timeout_ms: 1_500,
+    };
+
+    let config = HostConfig::from_limits("configured-agent".to_owned(), &limits);
+
+    assert_eq!(config.agent_id, "configured-agent");
+    assert_eq!(
+        config.replay_capacity,
+        super::env_limit("NORTE_CODE_REPLAY_CAPACITY", limits.replay_capacity)
+    );
+    assert_eq!(config.replay_bytes, limits.replay_bytes);
+    assert_eq!(config.max_concurrent_jobs, limits.max_concurrent_jobs);
+    assert_eq!(config.job_output_retention_s, limits.job_output_retention_s);
+    assert_eq!(config.idempotency_capacity, limits.idempotency_capacity);
+    assert_eq!(config.max_queued_inputs, limits.max_queued_inputs);
+    assert_eq!(config.max_frame_bytes, limits.max_frame_bytes);
+    assert_eq!(
+        config.max_artifact_bytes,
+        usize::try_from(limits.max_artifact_bytes).expect("test artifact limit fits")
+    );
+    assert_eq!(
+        config.max_export_bytes,
+        usize::try_from(limits.max_export_bytes).expect("test export limit fits")
+    );
+    assert_eq!(config.export_ttl_s, limits.export_ttl_s);
+    assert_eq!(
+        config.max_connections,
+        super::env_limit("NORTE_CODE_MAX_CONNECTIONS", limits.max_connections)
+    );
+    assert_eq!(config.command_timeout_ms, limits.command_timeout_ms);
+}
 
 #[test]
 fn plugin_update_summary_reports_partial_failures() {
@@ -726,6 +773,7 @@ fn scripted_spec() -> norte_code_agent::ModelSpec {
             .output(norte::Modality::Text)
             .build(),
         headers: std::collections::BTreeMap::new(),
+        http: norte_code_protocol::config::ProviderHttpConfig::default(),
     }
 }
 

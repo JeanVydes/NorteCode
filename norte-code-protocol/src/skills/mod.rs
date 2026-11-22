@@ -23,31 +23,13 @@ use std::fmt::Write as _;
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
 use norte::{FnExecutor, SessionId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
-/// Largest `SKILL.md` accepted, before parsing.
-pub const MAX_SKILL_FILE_BYTES: usize = 1024 * 1024;
-/// Largest body returned by the `skill` tool.
-pub const MAX_BODY_BYTES: usize = 64 * 1024;
-/// Largest resource returned by `skill_resource` unless the host lowers it.
-pub const DEFAULT_RESOURCE_BYTES: usize = 256 * 1024;
-/// Recommended longest `SKILL.md` before the host warns.
-pub const RECOMMENDED_LINES: usize = 500;
-/// Longest shebang line accepted from a bundled script.
-const MAX_SHEBANG_BYTES: usize = 4096;
-/// Script output kept per stream.
-pub const MAX_SCRIPT_OUTPUT_BYTES: usize = 1024 * 1024;
-/// Script output that reaches the model, per stream.
-pub const MAX_SCRIPT_MODEL_BYTES: usize = 32 * 1024;
-/// Default script timeout.
-pub const DEFAULT_SCRIPT_TIMEOUT: Duration = Duration::from_secs(120);
-/// Longest script timeout a request may ask for.
-pub const MAX_SCRIPT_TIMEOUT: Duration = Duration::from_secs(600);
+use crate::config::SkillLimitsConfig;
 
 /// The roots discovery uses, in increasing precedence.
 ///
@@ -67,6 +49,7 @@ pub struct SkillRegistry {
     skills: BTreeMap<String, Skill>,
     warnings: Vec<SkillWarning>,
     active: Mutex<BTreeMap<SessionId, BTreeSet<String>>>,
+    limits: SkillLimitsConfig,
 }
 
 impl SkillRegistry {
@@ -76,11 +59,12 @@ impl SkillRegistry {
     /// is reported. A malformed skill is skipped with a warning; discovery never
     /// fails and never executes anything.
     #[must_use]
-    pub fn discover(roots: &[PathBuf], max_skills: usize) -> Self {
+    pub fn discover(roots: &[PathBuf], max_skills: usize, limits: SkillLimitsConfig) -> Self {
         let mut registry = Self {
             skills: BTreeMap::new(),
             warnings: Vec::new(),
             active: Mutex::new(BTreeMap::new()),
+            limits,
         };
         let limit = max_skills.max(1);
         let mut full = false;
@@ -119,7 +103,7 @@ impl SkillRegistry {
                         continue;
                     }
                 }
-                match load_skill(&path) {
+                match load_skill(&path, &registry.limits) {
                     Ok((skill, warning)) => {
                         if let Some(warning) = warning {
                             registry.warn(path.clone(), warning);
@@ -199,6 +183,12 @@ impl SkillRegistry {
     #[must_use]
     pub fn warnings(&self) -> &[SkillWarning] {
         &self.warnings
+    }
+
+    /// The bounds used while discovering these skills.
+    #[must_use]
+    pub fn limits(&self) -> SkillLimitsConfig {
+        self.limits
     }
 
     /// Marks a skill active for a session, returning the skill.
@@ -304,7 +294,10 @@ impl SkillRegistry {
 }
 
 /// Loads and validates one skill directory.
-fn load_skill(directory: &Path) -> std::result::Result<(Skill, Option<String>), String> {
+fn load_skill(
+    directory: &Path,
+    limits: &SkillLimitsConfig,
+) -> std::result::Result<(Skill, Option<String>), String> {
     let Some(directory_name) = directory.file_name().and_then(|name| name.to_str()) else {
         return Err("the skill directory name is not UTF-8".to_owned());
     };
@@ -316,9 +309,10 @@ fn load_skill(directory: &Path) -> std::result::Result<(Skill, Option<String>), 
     if !metadata.is_file() {
         return Err(format!("{} is not a regular file", file.display()));
     }
-    if metadata.len() > MAX_SKILL_FILE_BYTES as u64 {
+    if metadata.len() > u64::try_from(limits.max_skill_file_bytes).unwrap_or(u64::MAX) {
         return Err(format!(
-            "SKILL.md is larger than {MAX_SKILL_FILE_BYTES} bytes"
+            "SKILL.md is larger than {} bytes",
+            limits.max_skill_file_bytes
         ));
     }
     // A project can carry `SKILL.md -> /etc/passwd`. Discovery runs before the
@@ -332,19 +326,24 @@ fn load_skill(directory: &Path) -> std::result::Result<(Skill, Option<String>), 
     let source = std::fs::File::open(&canonical_file)
         .map_err(|error| format!("could not read {}: {error}", file.display()))?;
     source
-        .take(MAX_SKILL_FILE_BYTES as u64 + 1)
+        .take(
+            u64::try_from(limits.max_skill_file_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
         .read_to_string(&mut text)
         .map_err(|error| format!("could not read {}: {error}", file.display()))?;
-    if text.len() > MAX_SKILL_FILE_BYTES {
+    if text.len() > limits.max_skill_file_bytes {
         return Err(format!(
-            "SKILL.md is larger than {MAX_SKILL_FILE_BYTES} bytes"
+            "SKILL.md is larger than {} bytes",
+            limits.max_skill_file_bytes
         ));
     }
     let parsed = validation::parse_skill(&text, directory_name)?;
     let lines = parsed.body.lines().count();
-    let warning = (lines > RECOMMENDED_LINES).then(|| {
+    let warning = (lines > limits.recommended_lines).then(|| {
         format!(
-            "SKILL.md has {lines} lines; the specification recommends under {RECOMMENDED_LINES}, with detail in `references/`"
+            "SKILL.md has {lines} lines; the specification recommends under {}, with detail in `references/`", limits.recommended_lines
         )
     });
     Ok((

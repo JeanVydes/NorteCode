@@ -29,6 +29,36 @@ Its service settings are:
 | `agent_id` | string | `norte-code` | Agent identifier sent during RAEP attachment. |
 | `verbosity` | `low`, `medium` or `high` | `medium` | Output detail for the terminal client. |
 | `queue_mode` | `reject`, `queue` or `interrupt` | `queue` | What a message typed while a turn runs does. |
+| `service_lifecycle` | object | see below | Tokio workers and local service timings. |
+| `reconnect` | object | see below | Client reconnect backoff. |
+| `retention` | object | see below | Transcript and console retention. |
+
+The three runtime blocks are client-owned. Liveness and readiness probe
+timeouts stay fixed. Attachment size stays at 16 MiB and has no setting.
+Question and review prompt text has no character limit setting.
+
+| `service_lifecycle` key | Default | Meaning |
+| --- | --- | --- |
+| `tokio_workers` | `4` | Worker threads for a local service. `NORTE_CODE_TOKIO_WORKERS` wins when set. |
+| `startup_wait_ms` | `20000` | Time to wait for readiness. |
+| `startup_poll_ms` | `150` | Readiness check interval. |
+| `stop_wait_ms` | `10000` | Time to wait for graceful stop. |
+| `stop_poll_ms` | `100` | Process check interval while stopping. |
+| `kill_settle_ms` | `200` | Grace after a kill signal. |
+
+| `reconnect` key | Default | Meaning |
+| --- | --- | --- |
+| `retry_base_ms` | `400` | Delay before the first reconnect. |
+| `retry_max_ms` | `5000` | Largest reconnect delay. |
+| `give_up_attempts` | `3` | Failed attempts before reporting giving up. |
+| `healthy_stream_s` | `10` | Healthy stream time before resets are cleared. |
+
+| `retention` key | Default | Meaning |
+| --- | --- | --- |
+| `transcript_max_items` | `1000` | Largest transcript held in memory. |
+| `transcript_keep_items` | `800` | Transcript rows kept after a trim. |
+| `console_max_lines` | `500` | Largest console buffer. |
+| `console_keep_lines` | `400` | Console lines kept after a trim. |
 
 ## Service envelope and agents
 
@@ -37,6 +67,7 @@ Its service settings are:
 | `version` | integer | `1` | Schema revision. |
 | `default_agent` | string | `norte-code` | Agent selected for new attachments. |
 | `agents` | array | one agent | Named agent definitions. |
+| `raep_limits` | object | see below | Service host capacity and retention. |
 
 Each agent has a unique required `name`; `description`, `origin_url` and
 `author` are optional metadata. The RAEP server exposes all named agents, and
@@ -48,6 +79,9 @@ Each agent has a unique required `name`; `description`, `origin_url` and
 | `delegates` | array of agent ids | `[]` | Child profiles this agent may spawn. |
 | `compaction` | object | see below | Automatic compaction. |
 | `retry` | object | see below | Transient retry policy. |
+| `provider_http` | object | see below | Provider transport policy. |
+| `delegation` | object | see below | Child session bounds. |
+| `mcp_limits` | object | see below | Shared MCP request timeout. |
 | `reasoning` | object | `{"default":"auto"}` | Default reasoning setting. |
 | `system_prompt` | string or null | null | Base prompt replacement; `AGENTS.md` is appended after it. |
 | `approvals` | object | empty lists | Global allow/deny rules. |
@@ -85,6 +119,53 @@ Compaction uses the session's provider, model and effective reasoning.
 | `backoff_ms` | `5000` | First wait; doubles. |
 
 Only rate limits, overload, server errors and transport errors are retried.
+`retry` handles failures after a call. `provider_http` bounds the transport
+underneath the call; the two policies are separate.
+
+## `provider_http`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `connect_max_retries` | `3` | Attempts to establish a connection. |
+| `connect_timeout_ms` | `10000` | Deadline for one connection attempt. |
+| `request_timeout_ms` | `120000` | Deadline for the whole request. |
+| `stream_idle_timeout_ms` | `300000` | Silent stream timeout. |
+
+## `delegation`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `max_depth` | `3` | Deepest chain of child sessions. |
+| `max_concurrent` | `3` | Child sessions that may run at once. |
+| `max_held_messages` | `20` | Delegate queue size: parent messages held for a running child. |
+
+## `mcp_limits`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `request_timeout_ms` | `60000` | Deadline for MCP handshakes, listings and calls. |
+
+## `raep_limits`
+
+This block is service-wide and sits outside `agents`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `replay_capacity` | `2000` | Frames kept for replay. |
+| `replay_bytes` | `8388608` | Bytes retained across replay frames. |
+| `max_concurrent_jobs` | `8` | Jobs that may run at once. |
+| `job_output_retention_s` | `86400` | Seconds finished job output is kept. |
+| `idempotency_capacity` | `4096` | Turn request fingerprints kept. |
+| `max_queued_inputs` | `8` | Inputs waiting behind a running turn. |
+| `max_frame_bytes` | `1048576` | Largest accepted frame. |
+| `max_artifact_bytes` | `16777216` | Largest accepted uploaded artifact. |
+| `max_export_bytes` | `67108864` | Largest exported bundle. |
+| `export_ttl_s` | `3600` | Seconds a generated bundle can be downloaded. |
+| `max_connections` | `64` | Concurrent WebSocket and SSE clients. |
+| `command_timeout_ms` | `120000` | Deadline for handling one command. |
+
+`NORTE_CODE_REPLAY_CAPACITY` and `NORTE_CODE_MAX_CONNECTIONS` still override the
+matching fields when they are set to positive values.
 
 ## `reasoning`
 
@@ -125,7 +206,7 @@ also reports the allow-list for the session alongside the spawned children.
 
 The child starts with the task only. `context_mode: "summary"` adds a bounded,
 redacted excerpt of the parent's history. Children can spawn further children
-up to the host's maximum delegation depth. Child turns share the parent's
+up to `delegation.max_depth`. Child turns share the parent's
 budget ledger; separate budget-share reservation is not implemented.
 
 With `detach: true`, the child runs as a `job-N`; `manage_jobs` can inspect or
@@ -169,7 +250,14 @@ RAEP sessions use the RFC `job_turn_policy` session option instead: `always`
 | `web_fetch` | `false` | Register `web_fetch`. |
 | `auto_turn_on_job_end` | `false` | Start a turn when a detached shell or subagent finishes. |
 | `disabled` | `[]` | Tools a new session does not get, by model name; frozen at creation. |
-| `command_max_model_bytes` | `131072` | Bytes of each `shell` stream that reach the model; range `1024`–`1048576`. |
+| `command_max_model_bytes` | `131072` | Bytes of each `shell` stream that reach the model; range `1024` to `1048576`. |
+| `ask_user_timeout_ms` | `600000` | How long `ask_user` waits for an answer. |
+| `verbose_tool_output_chars` | `4000` | Longest tool output shown by the verbose renderer. |
+| `read_limits.max_file_bytes` | `16777216` | Largest file `read` opens. |
+| `read_limits.max_output_bytes` | `65536` | Largest text `read` returns. |
+| `read_limits.max_lines` | `2000` | Lines returned without a line range. |
+| `read_limits.max_matches` | `200` | Matches returned by a regex read. |
+| `read_limits.max_line_width` | `500` | Width at which a long line is cut. |
 | `shell_limits.allow_indefinite` | `true` | Grant `timeout_ms: 0` as an unbounded call; detached jobs use the same setting. |
 | `shell_limits.default_timeout_ms` | `120000` | Bound used when no time is asked for, or zero is asked for while indefinite runs are off. |
 | `shell_limits.max_timeout_ms` | `600000` | Ceiling for a requested bound; larger requests are clamped. |
@@ -177,6 +265,9 @@ RAEP sessions use the RFC `job_turn_policy` session option instead: `always`
 | `confinement.sandbox.enabled` | `false` | Wrap commands in the OS sandbox. |
 | `confinement.sandbox.network` | `false` | Allow network in the sandbox. |
 | `confinement.sandbox.writable` | `[]` | Extra writable roots. |
+
+`read_limits` applies to `read` only. `write` and `edit` keep their built-in
+limits.
 
 ## `skills`
 
@@ -188,6 +279,15 @@ RAEP sessions use the RFC `job_turn_policy` session option instead: `always`
 | `allow_scripts` | `false` | Register `skill_script`; outside the command sandbox. |
 | `honor_allowed_tools` | `false` | Let a skill pre-approve calls. |
 | `max_skills` | `128` | Maximum valid skills. |
+| `limits.max_skill_file_bytes` | `1048576` | Largest `SKILL.md` accepted. |
+| `limits.max_body_bytes` | `65536` | Largest body returned by `skill`. |
+| `limits.default_resource_bytes` | `262144` | Largest file returned by `skill_resource`. |
+| `limits.recommended_lines` | `500` | Line count before a warning. |
+| `limits.max_shebang_bytes` | `4096` | Longest accepted shebang line. |
+| `limits.max_script_output_bytes` | `1048576` | Script output kept per stream. |
+| `limits.max_script_model_bytes` | `32768` | Script output reaching the model per stream. |
+| `limits.default_script_timeout_ms` | `120000` | Timeout when a call asks for none. |
+| `limits.max_script_timeout_ms` | `600000` | Longest timeout a call may ask for. |
 
 ## `extensions`
 

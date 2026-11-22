@@ -2,8 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::Duration;
 
 use norte::http::{HttpClient, HttpMedia};
 use norte::{BlobStore, Layer, LayerStack, MediaAdapter, Model};
@@ -195,6 +196,7 @@ impl Service {
             compose_system_prompt(subagent_base, project.as_ref(), &skill_index);
         let questions = Arc::new(
             QuestionBroker::new()
+                .with_timeout(Duration::from_millis(config.tools.ask_user_timeout_ms))
                 .with_store(Arc::new(DirectoryQuestions::new(Arc::clone(&directory)))),
         );
         let effects = Arc::new(EffectJournal::new(Arc::clone(&directory)));
@@ -208,7 +210,7 @@ impl Service {
         let (delegation_sender, delegation_receiver) =
             tokio::sync::broadcast::channel::<ServerEvent>(256);
         let service = Self {
-            max_queued_inputs: 8,
+            max_queued_inputs: AtomicUsize::new(8),
             config: RwLock::new(config),
             agent_profiles: RwLock::new(agent_profiles),
             catalog: RwLock::new(catalog),

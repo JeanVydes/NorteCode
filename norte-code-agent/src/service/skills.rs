@@ -12,14 +12,14 @@ use super::{EventStream, Service};
 
 pub(super) fn discover_skills(config: &Config, workspace: &Path) -> SkillRegistry {
     if !config.skills.enabled {
-        return SkillRegistry::discover(&[], 1);
+        return SkillRegistry::discover(&[], 1, config.skills.limits);
     }
     let roots = norte_code_protocol::skills::discovery_roots(
         workspace,
         &config.skills.paths,
         config.skills.interop,
     );
-    SkillRegistry::discover(&roots, config.skills.max_skills)
+    SkillRegistry::discover(&roots, config.skills.max_skills, config.skills.limits)
 }
 
 /// Every API key already known, for redaction.

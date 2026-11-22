@@ -677,7 +677,7 @@ impl Service {
             let record = sessions
                 .get_mut(key)
                 .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            if record.pending_steers.len() >= self.max_queued_inputs {
+            if record.pending_steers.len() >= self.max_queued_inputs.load(Ordering::Relaxed) {
                 return Err(ServiceError::SessionBusy);
             }
             record.pending_steers.push(steered.clone());
@@ -737,7 +737,7 @@ impl Service {
             let record = sessions
                 .get_mut(&key)
                 .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            if record.pending_steers.len() >= self.max_queued_inputs {
+            if record.pending_steers.len() >= self.max_queued_inputs.load(Ordering::Relaxed) {
                 false
             } else {
                 record.pending_steers.push(steered.clone());

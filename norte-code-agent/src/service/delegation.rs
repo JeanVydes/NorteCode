@@ -8,6 +8,11 @@
 use super::*;
 
 impl Service {
+    /// The delegation bounds in force, shared by spawn and child-session paths.
+    pub(super) fn delegation_limits(&self) -> norte_code_protocol::config::DelegationConfig {
+        self.config().delegation
+    }
+
     /// Installs the runner the `subagent` tool asks, once the service
     /// exists as an `Arc`.
     ///

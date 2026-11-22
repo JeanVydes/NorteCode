@@ -59,16 +59,66 @@ or fix.
       "max_delay_ms": 60000,
       "backoff_ms": 5000
     },
+    "provider_http": {
+      "connect_max_retries": 3,
+      "connect_timeout_ms": 10000,
+      "request_timeout_ms": 120000,
+      "stream_idle_timeout_ms": 300000
+    },
+    "delegation": {
+      "max_depth": 3,
+      "max_concurrent": 3,
+      "max_held_messages": 20
+    },
+    "mcp_limits": {
+      "request_timeout_ms": 60000
+    },
     "reasoning": { "default": "auto" },
 
     "max_iterations": null,
     "extensions": {},
     "cost": { "show": true },
     "budgets": {},
-    "tools": {},
-    "skills": {},
+    "tools": {
+      "ask_user_timeout_ms": 600000,
+      "verbose_tool_output_chars": 4000,
+      "read_limits": {
+        "max_file_bytes": 16777216,
+        "max_output_bytes": 65536,
+        "max_lines": 2000,
+        "max_matches": 200,
+        "max_line_width": 500
+      }
+    },
+    "skills": {
+      "limits": {
+        "max_skill_file_bytes": 1048576,
+        "max_body_bytes": 65536,
+        "default_resource_bytes": 262144,
+        "recommended_lines": 500,
+        "max_shebang_bytes": 4096,
+        "max_script_output_bytes": 1048576,
+        "max_script_model_bytes": 32768,
+        "default_script_timeout_ms": 120000,
+        "max_script_timeout_ms": 600000
+      }
+    },
     "mcpServers": {}
-  }]
+  }],
+  "raep_limits": {
+    "replay_capacity": 2000,
+    "replay_bytes": 8388608,
+    "max_concurrent_jobs": 8,
+    "job_output_retention_s": 86400,
+    "idempotency_capacity": 4096,
+    "max_queued_inputs": 8,
+    "max_frame_bytes": 1048576,
+    "max_artifact_bytes": 16777216,
+    "max_export_bytes": 67108864,
+    "export_ttl_s": 3600,
+    "max_connections": 64,
+    "command_timeout_ms": 120000
+  }
 }
 ```
 
@@ -81,6 +131,10 @@ or fix.
 | `agents` | array | one default agent | Named server-owned agent definitions. |
 | `compaction` | object | see below | Automatic context compaction. |
 | `retry` | object | see below | Bounded retries for transient provider failures. |
+| `provider_http` | object per agent | see below | Transport policy for provider requests. |
+| `delegation` | object per agent | see below | Bounds for child sessions. |
+| `mcp_limits` | object per agent | see below | Shared MCP request timeout. |
+| `raep_limits` | object | see below | Service host capacity and retention limits. |
 | `reasoning` | object | see below | Default reasoning setting. |
 | `system_prompt` | string or `null` | `null` | Replaces the built-in base prompt. `AGENTS.md` is appended after it. |
 | `approvals` | object | `{"allow":[],"deny":[]}` | Tool-wide rules that outlive a session. |
@@ -238,6 +292,64 @@ retried. Quota, authentication and malformed requests fail immediately. A retry
 resumes the same session with no new input, so the user message is never
 appended twice.
 
+`retry` controls what happens after a provider call fails. `provider_http`
+controls the transport underneath each call. They are separate policies and
+are not added together.
+
+## `provider_http`
+
+This block is per agent and applies to every provider adapter used by it.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `connect_max_retries` | integer `0..=10` | `3` | Attempts made while establishing a connection. |
+| `connect_timeout_ms` | integer `1..=60000` | `10000` | Deadline for one connection attempt. |
+| `request_timeout_ms` | integer `1..=3600000` | `120000` | Deadline for the whole request. Must not be shorter than `connect_timeout_ms`. |
+| `stream_idle_timeout_ms` | integer `1..=3600000` | `300000` | Time a stream may send no bytes before it is treated as stuck. |
+
+## `delegation`
+
+This block is per agent and bounds the child sessions that agent can create.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `max_depth` | integer `1..=8` | `3` | Deepest chain of child sessions. |
+| `max_concurrent` | integer `1..=64` | `3` | Child sessions that may run at once. |
+| `max_held_messages` | integer `1..=1000` | `20` | Delegate queue size: parent messages held for a running child and replayed when it finishes. |
+
+The agent's `delegates` list still decides which profiles may be spawned. These
+limits only bound how many children run and how deep they go.
+
+## `mcp_limits`
+
+This block is per agent and is shared by every server in `mcpServers`.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `request_timeout_ms` | integer `1000..=600000` | `60000` | Deadline for a handshake, tool listing or tool call. |
+
+## `raep_limits`
+
+This block is service-wide, outside `agents`.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `replay_capacity` | integer `> 0` | `2000` | Frames kept for replay. |
+| `replay_bytes` | integer `> 0` | `8388608` | Bytes retained across replay frames. |
+| `max_concurrent_jobs` | integer `> 0` | `8` | Jobs that may run at once. |
+| `job_output_retention_s` | integer `> 0` | `86400` | Seconds finished job output is kept. |
+| `idempotency_capacity` | integer `> 0` | `4096` | Turn request fingerprints kept. |
+| `max_queued_inputs` | integer `> 0` | `8` | Inputs waiting behind a running turn. |
+| `max_frame_bytes` | integer `> 0` | `1048576` | Largest accepted frame. |
+| `max_artifact_bytes` | integer `> 0` | `16777216` | Largest accepted uploaded artifact. |
+| `max_export_bytes` | integer `> 0` | `67108864` | Largest exported bundle. |
+| `export_ttl_s` | integer `> 0` | `3600` | Seconds a generated bundle can be downloaded. |
+| `max_connections` | integer `> 0` | `64` | Concurrent WebSocket and SSE clients. |
+| `command_timeout_ms` | integer `1..=600000` | `120000` | Deadline for handling one command. |
+
+`NORTE_CODE_REPLAY_CAPACITY` and `NORTE_CODE_MAX_CONNECTIONS` still override the
+matching fields when they are set to positive values.
+
 ## `reasoning`
 
 `default` is `"auto"`, `"off"`, an effort name such as `"low"`, `"xhigh"` or
@@ -291,6 +403,38 @@ The CLI-only file contains:
 | `charts.contrast` | integer `0..=100` | `75` | Strength of the halftone dot ramp. |
 | `charts.density` | integer `0..=100` | `82` | Coverage of candidate dots in halftone charts. |
 | `charts.dot_size` | `"small"`, `"medium"` or `"large"` | `"medium"` | Character scale used by line, pie and radar charts. |
+| `service_lifecycle` | object | see below | Tokio workers and local service process timings. |
+| `reconnect` | object | see below | Client reconnect backoff. |
+| `retention` | object | see below | Client transcript and console retention. |
+
+The three runtime blocks are client-owned. They never change a model request.
+Liveness and readiness probe timeouts stay fixed and are not configurable.
+
+| `service_lifecycle` key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `tokio_workers` | integer `1..=1024` | `4` | Worker threads for a service started by this CLI. `NORTE_CODE_TOKIO_WORKERS` wins when set. The CLI clamps the result to available CPUs. |
+| `startup_wait_ms` | integer `> 0` | `20000` | Time to wait for the local service to report ready. |
+| `startup_poll_ms` | integer `> 0` | `150` | Interval between readiness checks. Must not exceed `startup_wait_ms`. |
+| `stop_wait_ms` | integer `> 0` | `10000` | Time to wait for a graceful stop. |
+| `stop_poll_ms` | integer `> 0` | `100` | Interval between process checks while stopping. Must not exceed `stop_wait_ms`. |
+| `kill_settle_ms` | integer `0..=10000` | `200` | Grace after sending a kill signal. |
+
+| `reconnect` key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `retry_base_ms` | integer `1..=60000` | `400` | Delay before the first reconnect. |
+| `retry_max_ms` | integer `1..=3600000` | `5000` | Largest delay between reconnects. Must be at least `retry_base_ms`. |
+| `give_up_attempts` | integer `1..=20` | `3` | Failed attempts before the client reports giving up. |
+| `healthy_stream_s` | integer `1..=3600` | `10` | Time a healthy stream must stay open before resets are cleared. |
+
+| `retention` key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `transcript_max_items` | integer `> 0` | `1000` | Largest number of transcript rows held in memory. |
+| `transcript_keep_items` | integer `> 0` | `800` | Rows kept after a trim. Must not exceed `transcript_max_items`. |
+| `console_max_lines` | integer `> 0` | `500` | Largest number of console lines held in memory. |
+| `console_keep_lines` | integer `> 0` | `400` | Lines kept after a trim. Must not exceed `console_max_lines`. |
+
+The attachment size stays at 16 MiB and has no setting. Question and review
+prompt text has no character limit setting.
 
 ## `tools`
 
@@ -299,6 +443,13 @@ The CLI-only file contains:
 | `web_fetch` | boolean | `false` | Register the `web_fetch` tool. |
 | `disabled` | array of strings | `[]` | Tools a new session does not get, by the name the model calls them. A tool named here is not registered at all: no schema, no request, no entry in the registry. Read when a session is created and kept for its life, because the declarations are part of the prompt prefix; editing the file changes what the next session gets. |
 | `command_max_model_bytes` | integer `1024..=1048576` | `131072` | Bytes of each `command` stream and summary that reach the model. The tool still captures up to its own larger ceiling; this bounds the text the model sees, eliding the middle with a marker. |
+| `ask_user_timeout_ms` | integer `1000..=86400000` | `600000` | How long `ask_user` waits for a client answer. |
+| `verbose_tool_output_chars` | integer `1..=100000` | `4000` | Longest tool output the verbose client renderer shows. |
+| `read_limits.max_file_bytes` | integer `> 0` | `16777216` | Largest file the `read` tool opens. |
+| `read_limits.max_output_bytes` | integer `> 0` | `65536` | Largest text `read` returns. Must not exceed `max_file_bytes`. |
+| `read_limits.max_lines` | integer `> 0` | `2000` | Lines returned by a read without a line range. |
+| `read_limits.max_matches` | integer `> 0` | `200` | Matches returned by a regex read. |
+| `read_limits.max_line_width` | integer `> 0` | `500` | Width at which a long line is cut, in characters. |
 | `shell_limits.allow_indefinite` | boolean | `true` | Whether a `shell` call asking for `timeout_ms: 0` runs without a bound. Off, the default bound is applied instead. Detached jobs use the same setting. |
 | `shell_limits.default_timeout_ms` | integer `1..=86400000` | `120000` | Bound applied when a `shell` call asks for none, or asks for zero while indefinite runs are off. |
 | `shell_limits.max_timeout_ms` | integer `1..=86400000` | `600000` | Ceiling for a `shell` call's requested bound. A larger request is clamped to it. |
@@ -306,6 +457,9 @@ The CLI-only file contains:
 | `confinement.sandbox.enabled` | boolean | `false` | Run `command` inside bubblewrap (Linux) or `sandbox-exec` (macOS). |
 | `confinement.sandbox.network` | boolean | `false` | Allow network access inside the sandbox. |
 | `confinement.sandbox.writable` | array of paths | `[]` | Extra writable directories besides the workspace. Relative paths resolve against the workspace; missing paths are ignored. |
+
+`read_limits` applies to the `read` tool only. `write` and `edit` keep their own
+built-in limits.
 
 On Linux the workspace and extras are writable, the rest of the filesystem is
 read-only, `/tmp` is a private tmpfs and the process tree gets new namespaces.
@@ -322,7 +476,8 @@ system isolation of one child process.
 Servers that speak the Model Context Protocol. An entry is either a local
 program over its standard input and output, or a remote Streamable HTTP endpoint.
 The block keeps the shape the rest of the ecosystem uses, so a configuration
-written for another client works here unchanged.
+written for another client works here unchanged. Handshakes, listings and tool
+calls all use the agent's `mcp_limits.request_timeout_ms`.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -386,6 +541,15 @@ with the reason.
 | `allow_scripts` | boolean | `false` | Register `skill_script`. Scripts are not covered by the command sandbox. |
 | `honor_allowed_tools` | boolean | `false` | Let a skill's `allowed-tools` pre-approve calls. |
 | `max_skills` | integer `>= 1` | `128` | Maximum number of valid skills kept. |
+| `limits.max_skill_file_bytes` | integer `> 0` | `1048576` | Largest `SKILL.md` accepted. |
+| `limits.max_body_bytes` | integer `> 0` | `65536` | Largest body returned by `skill`. Must not exceed `max_skill_file_bytes`. |
+| `limits.default_resource_bytes` | integer `> 0` | `262144` | Largest file returned by `skill_resource`. Must not exceed `max_skill_file_bytes`. |
+| `limits.recommended_lines` | integer `> 0` | `500` | Line count after which a skill reports a warning. |
+| `limits.max_shebang_bytes` | integer `> 0` | `4096` | Longest shebang line accepted from a bundled script. |
+| `limits.max_script_output_bytes` | integer `> 0` | `1048576` | Script output kept per stream. |
+| `limits.max_script_model_bytes` | integer `> 0` | `32768` | Script output that reaches the model per stream. Must not exceed `max_script_output_bytes`. |
+| `limits.default_script_timeout_ms` | integer `> 0` | `120000` | Timeout used when a script call asks for none. |
+| `limits.max_script_timeout_ms` | integer `> 0` | `600000` | Longest timeout a script call may ask for. Must be at least the default. |
 
 Skills are owned by the service. Changes to these keys take effect after
 `norte-code service restart`; `/refresh` only rereads the client's `cli.json`.

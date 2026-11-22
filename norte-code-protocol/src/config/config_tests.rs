@@ -604,3 +604,81 @@ fn a_host_store_answers_and_is_never_serialized() {
     let value = serde_json::to_value(&config).expect("serialize");
     assert!(value.get("keys").is_none(), "the store is not a file field");
 }
+
+#[test]
+fn runtime_limit_defaults_match_the_previous_hardcoded_values() {
+    let loaded = Config::from_json("{}").expect("config");
+    let config = loaded.config;
+    assert_eq!(config.tools.ask_user_timeout_ms, 600_000);
+    assert_eq!(config.tools.verbose_tool_output_chars, 4_000);
+    assert_eq!(config.tools.read_limits.max_file_bytes, 16 * 1024 * 1024);
+    assert_eq!(config.mcp_limits.request_timeout_ms, 60_000);
+    assert_eq!(config.provider_http.connect_max_retries, 3);
+    assert_eq!(config.provider_http.connect_timeout_ms, 10_000);
+    assert_eq!(config.provider_http.request_timeout_ms, 120_000);
+    assert_eq!(config.provider_http.stream_idle_timeout_ms, 300_000);
+    assert_eq!(config.delegation.max_depth, 3);
+    assert_eq!(config.delegation.max_concurrent, 3);
+    assert_eq!(config.delegation.max_held_messages, 20);
+    assert_eq!(config.skills.limits.max_skill_file_bytes, 1024 * 1024);
+    assert_eq!(config.skills.limits.default_script_timeout_ms, 120_000);
+}
+
+#[test]
+fn invalid_runtime_limits_name_the_offending_field() {
+    let error = Config::from_json(r#"{"tools":{"ask_user_timeout_ms":999}}"#)
+        .expect_err("ask_user timeout");
+    assert!(error.to_string().contains("tools.ask_user_timeout_ms"));
+    let error =
+        Config::from_json(r#"{"mcp_limits":{"request_timeout_ms":999}}"#).expect_err("mcp timeout");
+    assert!(error.to_string().contains("mcp_limits.request_timeout_ms"));
+    let error =
+        Config::from_json(r#"{"delegation":{"max_depth":0}}"#).expect_err("delegation depth");
+    assert!(error.to_string().contains("delegation.max_depth"));
+    let error = Config::from_json(r#"{"provider_http":{"request_timeout_ms":1000}}"#)
+        .expect_err("provider request timeout shorter than connect");
+    assert!(
+        error
+            .to_string()
+            .contains("provider_http.request_timeout_ms")
+    );
+    let error = Config::from_json(r#"{"tools":{"read_limits":{"max_output_bytes":33554432}}}"#)
+        .expect_err("read output larger than file");
+    assert!(
+        error
+            .to_string()
+            .contains("tools.read_limits.max_output_bytes")
+    );
+    let error = Config::from_json(
+        r#"{"skills":{"limits":{"default_script_timeout_ms":900000,"max_script_timeout_ms":600000}}}"#,
+    )
+    .expect_err("script timeout above maximum");
+    assert!(
+        error
+            .to_string()
+            .contains("skills.limits.default_script_timeout_ms")
+    );
+}
+
+#[test]
+fn service_json_reads_raep_limits() {
+    let service: ServiceConfig = serde_json::from_str(
+        r#"{
+            "version": 1,
+            "default_agent": "norte-code",
+            "agents": [{"name": "norte-code"}],
+            "raep_limits": {
+                "replay_capacity": 25,
+                "max_concurrent_jobs": 2,
+                "max_queued_inputs": 4,
+                "max_connections": 8,
+                "command_timeout_ms": 5000
+            }
+        }"#,
+    )
+    .expect("service");
+    service.validate().expect("valid limits");
+    assert_eq!(service.raep_limits.replay_capacity, 25);
+    assert_eq!(service.raep_limits.max_queued_inputs, 4);
+    assert_eq!(service.raep_limits.command_timeout_ms, 5_000);
+}

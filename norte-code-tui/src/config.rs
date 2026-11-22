@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use norte_code_client::config::{CliRuntimeConfig, ReconnectConfig, RetentionConfig};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -35,6 +36,16 @@ pub(crate) enum ConfigError {
         /// What the operating system said.
         #[source]
         source: io::Error,
+    },
+
+    /// The client runtime limits are outside the supported range.
+    #[error("invalid client runtime configuration at {path}: {source}")]
+    InvalidRuntime {
+        /// Where the file lives.
+        path: PathBuf,
+        /// What failed validation.
+        #[source]
+        source: norte_code_client::config::CliConfigError,
     },
 }
 
@@ -77,6 +88,12 @@ pub(crate) struct ClientConfig {
     /// Theme selection and custom themes.
     #[serde(default)]
     pub(crate) ui: UiConfig,
+    /// Reconnect backoff for a dropped event stream.
+    #[serde(default)]
+    pub(crate) reconnect: ReconnectConfig,
+    /// Transcript and console history limits.
+    #[serde(default)]
+    pub(crate) retention: RetentionConfig,
 }
 
 fn default_agent() -> String {
@@ -90,9 +107,10 @@ impl ClientConfig {
     /// missing the default local service is used.
     ///
     /// # Errors
-    /// Returns [`ConfigError::Json`] or [`ConfigError::Io`] when the file exists
-    /// but cannot be read; a missing file falls back to the default local
-    /// service, never to an error.
+    /// Returns [`ConfigError::Json`], [`ConfigError::Io`] or
+    /// [`ConfigError::InvalidRuntime`] when the file exists but cannot be used;
+    /// a missing file falls back to the default local service, never to an
+    /// error.
     pub(crate) fn load() -> Result<Self, ConfigError> {
         let path = config_path().unwrap_or_else(default_path);
         if !path.exists() {
@@ -103,14 +121,36 @@ impl ClientConfig {
                 },
                 agent_id: default_agent(),
                 ui: UiConfig::default(),
+                reconnect: ReconnectConfig::default(),
+                retention: RetentionConfig::default(),
             });
         }
         let raw = fs::read_to_string(&path).map_err(|source| ConfigError::Io {
             path: path.clone(),
             source,
         })?;
-        serde_json::from_str(&raw).map_err(|source| ConfigError::Json { path, source })
+        let config: Self = serde_json::from_str(&raw).map_err(|source| ConfigError::Json {
+            path: path.clone(),
+            source,
+        })?;
+        parse_runtime(&path, &raw)?;
+        Ok(config)
     }
+}
+
+fn parse_runtime(path: &Path, raw: &str) -> Result<CliRuntimeConfig, ConfigError> {
+    let config: CliRuntimeConfig =
+        serde_json::from_str(raw).map_err(|source| ConfigError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    config
+        .validate()
+        .map_err(|source| ConfigError::InvalidRuntime {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(config)
 }
 
 fn default_path() -> PathBuf {

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEventKind};
+use norte_code_client::config::RetentionConfig;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -27,8 +28,6 @@ use terminalui::{Context, InputEvent, Outcome, Theme, View};
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BLOCK_GAP: u16 = 1;
 const NOTICE_PREFIX_CHARS: usize = 11;
-const MAX_ITEMS: usize = 1000;
-const KEEP_ITEMS: usize = 800;
 
 /// Execution state of a tool block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -191,6 +190,8 @@ fn char_width(character: char) -> usize {
 pub(crate) struct Transcript {
     items: Vec<Item>,
     #[serde(skip)]
+    retention: RetentionConfig,
+    #[serde(skip)]
     first_visible: u16,
     #[serde(skip)]
     view_height: u16,
@@ -315,10 +316,16 @@ impl Default for Transcript {
 }
 
 impl Transcript {
-    /// Creates a bottom-pinned empty stream.
+    /// Creates a bottom-pinned empty stream with default retention.
     pub(crate) fn new() -> Self {
+        Self::with_retention(RetentionConfig::default())
+    }
+
+    /// Creates a bottom-pinned empty stream with the host's retention limits.
+    pub(crate) fn with_retention(retention: RetentionConfig) -> Self {
         Self {
             items: Vec::new(),
+            retention,
             first_visible: u16::MAX,
             view_height: 0,
             heights: Vec::new(),
@@ -375,10 +382,10 @@ impl Transcript {
     }
 
     fn trim_items(&mut self) {
-        if self.items.len() < MAX_ITEMS {
+        if self.items.len() < self.retention.transcript_max_items {
             return;
         }
-        let skip = self.items.len() - KEEP_ITEMS;
+        let skip = self.items.len() - self.retention.transcript_keep_items;
         self.items.drain(..skip);
         self.focused_item = self.focused_item.and_then(|item| item.checked_sub(skip));
         if let Some(menu) = self.menu.as_mut() {
@@ -435,7 +442,7 @@ impl Transcript {
                         }) = self.items.get_mut(index)
                     {
                         for line in item.content.lines() {
-                            crate::console_log::push_line(console, line.to_owned());
+                            crate::console_log::push_line(console, line.to_owned(), self.retention);
                         }
                     }
                 }
@@ -559,7 +566,7 @@ impl Transcript {
             } = item
                 && *id == call_id
             {
-                crate::console_log::push_line(console, line);
+                crate::console_log::push_line(console, line, self.retention);
                 self.dirty = true;
                 return true;
             }

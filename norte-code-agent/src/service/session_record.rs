@@ -13,8 +13,6 @@ use super::StoredSession;
 use super::session_stats::StoredStats;
 use super::steering::Steered;
 
-pub(super) const MAX_HELD_DELEGATOR_MESSAGES: usize = 20;
-
 /// The immutable conversation head reached when one turn finished.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(super) struct TurnBoundary {
