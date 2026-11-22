@@ -752,6 +752,30 @@ impl Transcript {
         false
     }
 
+    /// Flip the expansion of the shell output at `row`, when that row has one.
+    pub(crate) fn toggle_console_at(&mut self, row: u16) -> bool {
+        let theme = self.doc_theme.unwrap_or_default();
+        self.compute_heights(self.heights_width.max(1), theme);
+        let mut top = 0u16;
+        for (index, height) in self.heights.iter().enumerate() {
+            let end = top.saturating_add(*height);
+            if row >= top && row < end {
+                if let Some(Item::Tool {
+                    console: Some(console),
+                    ..
+                }) = self.items.get_mut(index)
+                {
+                    console.toggle_expanded();
+                    self.dirty = true;
+                    return true;
+                }
+                return false;
+            }
+            top = end;
+        }
+        false
+    }
+
     /// Paint one tool row with its diff or its live console underneath.
     fn paint_tool_item(
         item: &mut Item,
@@ -1079,6 +1103,7 @@ impl Transcript {
                     .saturating_sub(self.origin_y)
                     .saturating_add(self.first_visible);
                 let _ = self.toggle_reasoning_at(row);
+                let _ = self.toggle_console_at(row);
                 self.start_selection(true, pos)
             }
             MouseEventKind::Up(MouseButton::Left | MouseButton::Right) if self.dragging_thumb => {

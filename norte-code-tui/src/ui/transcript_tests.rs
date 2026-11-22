@@ -5,11 +5,21 @@ use std::sync::Arc;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use norte_code_client::config::RetentionConfig;
 use norte_code_wire::{HistoryItem, HistorySpeaker};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use terminalui::Outcome;
+use terminalui::components::console::Console;
 
 use super::{Item, NOTICE_PREFIX_CHARS, Tone, Transcript};
 use crate::ui::scroll_drag::Scrollbar;
+
+fn buffer_text(buffer: &Buffer, area: Rect) -> String {
+    (0..area.height)
+        .flat_map(|y| {
+            (0..area.width).map(move |x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+        })
+        .collect()
+}
 
 fn scrollable_transcript() -> Transcript {
     let mut transcript = Transcript::new();
@@ -330,6 +340,108 @@ fn replayed_shell_calls_keep_the_command_and_its_result() {
     assert_eq!(target.as_deref(), Some("echo hi"));
     let console = console.as_ref().expect("console");
     assert_eq!(console.lines(), &["hi".to_string()]);
+}
+
+#[test]
+fn clicking_shell_output_toggles_its_expansion() {
+    let mut transcript = Transcript::new();
+    let lines: Vec<String> = (0..12).map(|index| format!("row {index}")).collect();
+    transcript.push(Item::Tool {
+        call_id: "call-1".to_string(),
+        name: "shell".to_string(),
+        target: Some("echo hi".to_string()),
+        state: super::ToolState::Running,
+        meta: None,
+        diff: None,
+        console: Some(Box::new(Console::new("echo hi").set_lines(lines))),
+    });
+    assert!(!matches!(
+        transcript.items.first(),
+        Some(Item::Tool {
+            console: Some(console),
+            ..
+        }) if console.is_expanded()
+    ));
+
+    assert!(transcript.toggle_console_at(0));
+    assert!(matches!(
+        transcript.items.first(),
+        Some(Item::Tool {
+            console: Some(console),
+            ..
+        }) if console.is_expanded()
+    ));
+    assert!(transcript.toggle_console_at(0));
+    assert!(!matches!(
+        transcript.items.first(),
+        Some(Item::Tool {
+            console: Some(console),
+            ..
+        }) if console.is_expanded()
+    ));
+}
+
+#[test]
+fn expanded_shell_output_renders_every_retained_line() {
+    use terminalui::{Theme, Tree, node};
+
+    let mut transcript = Transcript::new();
+    let lines: Vec<String> = (0..12).map(|index| format!("row {index}")).collect();
+    transcript.push(Item::Tool {
+        call_id: "call-1".to_string(),
+        name: "shell".to_string(),
+        target: Some("echo hi".to_string()),
+        state: super::ToolState::Done,
+        meta: None,
+        diff: None,
+        console: Some(Box::new(
+            Console::new("echo hi").set_lines(lines).with_expanded(true),
+        )),
+    });
+
+    let area = Rect::new(0, 0, 60, 16);
+    let theme = Theme::default();
+    let mut tree = Tree::new(node("stream", transcript));
+    let mut buffer = Buffer::empty(area);
+    tree.render(area, &mut buffer, &theme);
+    let text = buffer_text(&buffer, area);
+    assert!(text.contains("row 0"), "got: {text}");
+    assert!(text.contains("row 11"), "got: {text}");
+    assert!(text.contains("12 lines"), "got: {text}");
+}
+
+#[test]
+fn shell_header_counts_new_output_as_it_arrives() {
+    use terminalui::{Theme, Tree, node};
+
+    let mut transcript = Transcript::new();
+    transcript.push(Item::Tool {
+        call_id: "call-1".to_string(),
+        name: "shell".to_string(),
+        target: Some("echo hi".to_string()),
+        state: super::ToolState::Running,
+        meta: None,
+        diff: None,
+        console: Some(Box::new(Console::new("echo hi"))),
+    });
+
+    let area = Rect::new(0, 0, 60, 8);
+    let theme = Theme::default();
+    let mut tree = Tree::new(node("stream", transcript));
+    let mut buffer = Buffer::empty(area);
+    tree.render(area, &mut buffer, &theme);
+    let text = buffer_text(&buffer, area);
+    assert!(text.contains("0 lines"), "got: {text}");
+
+    assert!(
+        tree.find_mut::<Transcript>("stream")
+            .expect("stream")
+            .append_console_line("call-1", "one".to_string())
+    );
+    let mut buffer = Buffer::empty(area);
+    tree.render(area, &mut buffer, &theme);
+    let text = buffer_text(&buffer, area);
+    assert!(text.contains("1 lines"), "got: {text}");
 }
 
 #[test]

@@ -22,10 +22,12 @@ pub(crate) fn push_line(
     let status = console.status;
     let state = console.state.clone();
     let style = console.style.clone();
+    let expanded = console.is_expanded();
 
     *console = Console::new(command)
         .set_lines(kept)
         .with_max_visible(VISIBLE_ROWS)
+        .with_expanded(expanded)
         .with_style(style);
     console.status = status;
     console.state.frame = state.frame;

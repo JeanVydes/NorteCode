@@ -40,6 +40,22 @@ fn trimming_keeps_the_command_status_and_spinner_state() {
 }
 
 #[test]
+fn trimming_keeps_expanded_output_expanded() {
+    let retention = RetentionConfig {
+        console_max_lines: 20,
+        console_keep_lines: 5,
+        ..RetentionConfig::default()
+    };
+    let mut console = Console::new("build").with_expanded(true);
+    for index in 0..20 {
+        push_line(&mut console, format!("line {index}"), retention);
+    }
+
+    assert!(console.is_expanded());
+    assert_eq!(console.lines().len(), 5);
+}
+
+#[test]
 fn configured_retention_decides_when_output_is_trimmed_and_how_much_survives() {
     let retention = RetentionConfig {
         console_max_lines: 20,

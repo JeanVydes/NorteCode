@@ -25,6 +25,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   and `max_timeout_ms` (default `600000`). Detached jobs report the same
   limits, and a request that asks for `timeout_ms: 0` runs without a bound
   unless the host turns it off.
+- Shell tool output blocks are expandable. The header shows a live line count,
+  and clicking the header or pressing Enter toggles between the compact window
+  and every retained line.
 
 ### Changed
 
