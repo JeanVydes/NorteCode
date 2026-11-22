@@ -48,6 +48,8 @@ pub(crate) struct PlanOverlay {
     #[serde(skip)]
     mode: Mode,
     #[serde(skip)]
+    selected: usize,
+    #[serde(skip)]
     response: String,
     #[serde(skip)]
     pending_action: Option<PlanReviewAction>,
@@ -83,6 +85,7 @@ impl PlanOverlay {
         self.body = Rect::new(0, 0, 0, 0);
         self.question = None;
         self.mode = Mode::Respond;
+        self.selected = 0;
         self.response.clear();
         self.pending_action = None;
         self.buttons.clear();
@@ -116,6 +119,7 @@ impl PlanOverlay {
         self.body = Rect::new(0, 0, 0, 0);
         self.question = None;
         self.mode = Mode::Respond;
+        self.selected = 0;
         self.response.clear();
         self.pending_action = None;
         self.buttons.clear();
@@ -125,6 +129,15 @@ impl PlanOverlay {
         self.pending_action = Some(action);
         self.mode = Mode::Respond;
         self.response.clear();
+    }
+
+    fn activate(&mut self, index: usize) {
+        self.selected = index;
+        match index {
+            0 => self.answer(PlanReviewAction::Accept),
+            1 => self.answer(PlanReviewAction::Decline),
+            _ => self.mode = Mode::Feedback,
+        }
     }
 
     fn submit_feedback(&mut self) {
@@ -174,11 +187,7 @@ impl PlanOverlay {
         if let Some(index) = self.button_at(mouse.column, mouse.row)
             && self.question.is_some()
         {
-            match index {
-                0 => self.answer(PlanReviewAction::Accept),
-                1 => self.answer(PlanReviewAction::Decline),
-                _ => self.mode = Mode::Feedback,
-            }
+            self.activate(index);
             return Outcome::Consumed;
         }
         let row = usize::from(mouse.row.saturating_sub(self.body.y));
@@ -235,16 +244,28 @@ impl PlanOverlay {
                 self.scroll_to(false, self.doc.lines.len());
                 Outcome::Consumed
             }
-            KeyCode::Char('a') | KeyCode::Enter if self.question.is_some() => {
-                self.answer(PlanReviewAction::Accept);
+            KeyCode::Left if self.question.is_some() => {
+                self.selected = self.selected.saturating_sub(1);
+                Outcome::Consumed
+            }
+            KeyCode::Right if self.question.is_some() => {
+                self.selected = (self.selected + 1).min(2);
+                Outcome::Consumed
+            }
+            KeyCode::Enter if self.question.is_some() => {
+                self.activate(self.selected);
+                Outcome::Consumed
+            }
+            KeyCode::Char('a') if self.question.is_some() => {
+                self.activate(0);
                 Outcome::Consumed
             }
             KeyCode::Char('d') if self.question.is_some() => {
-                self.answer(PlanReviewAction::Decline);
+                self.activate(1);
                 Outcome::Consumed
             }
             KeyCode::Char('f') if self.question.is_some() => {
-                self.mode = Mode::Feedback;
+                self.activate(2);
                 Outcome::Consumed
             }
             _ => Outcome::Ignored,

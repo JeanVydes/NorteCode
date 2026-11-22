@@ -35,7 +35,15 @@ impl PlanOverlay {
         let review = self.question.is_some();
         paint_header(buf, inner, theme, plan.content.lines().count(), review);
         document::paint(buf, inner, theme, &self.doc, &layout, self.scroll);
-        paint_buttons(buf, inner, theme, layout.footer, review, &mut self.buttons);
+        paint_buttons(
+            buf,
+            inner,
+            theme,
+            layout.footer,
+            review,
+            self.selected,
+            &mut self.buttons,
+        );
         paint_controls(
             buf,
             inner,
@@ -126,6 +134,7 @@ fn paint_buttons(
     theme: &Theme,
     y: u16,
     review: bool,
+    selected: usize,
     buttons: &mut Vec<(Rect, usize)>,
 ) {
     buttons.clear();
@@ -144,19 +153,19 @@ fn paint_buttons(
             rect.y,
             format!(" {label} "),
             usize::from(width),
-            button_style(theme, index, review),
+            button_style(theme, index, review, selected),
         );
         buttons.push((rect, index));
         x = x.saturating_add(width).saturating_add(2);
     }
 }
 
-fn button_style(theme: &Theme, index: usize, review: bool) -> Style {
+fn button_style(theme: &Theme, index: usize, review: bool, selected: usize) -> Style {
     let style = Style::default().add_modifier(Modifier::BOLD);
     if !review {
         return style.fg(theme.foreground).bg(theme.background);
     }
-    if index == 0 {
+    if index == selected {
         style.fg(theme.background).bg(theme.accent)
     } else {
         style.fg(theme.foreground).bg(theme.muted)
@@ -176,7 +185,7 @@ fn paint_controls(
     let text = if mode == Mode::Feedback {
         format!("{response}_")
     } else if review {
-        "a/Enter accept, d decline, f feedback, j/k scroll".to_owned()
+        "←/→ select, Enter confirm, a/d/f, j/k scroll".to_owned()
     } else {
         "Esc closes".to_owned()
     };
