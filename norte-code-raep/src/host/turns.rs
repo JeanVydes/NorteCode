@@ -1055,10 +1055,11 @@ impl NorteCodeRaepHost {
                 .map_or_else(|| session_id.to_owned(), |key| key.as_str().to_owned());
             if let ServerEventKind::TurnStarted { turn } = &event.kind {
                 let mut state = self.state.lock().await;
-                let client_turn_id =
-                    state.turns.take_pending(&event_session).unwrap_or_else(|| {
-                        TurnId::new(turn.to_string()).expect("numeric turn id is valid")
-                    });
+                let client_turn_id = match state.turns.take_pending(&event_session) {
+                    Some(id) => id,
+                    None => TurnId::new(turn.to_string())
+                        .map_err(|error| HostError::InvalidFrame(error.to_string()))?,
+                };
                 state.turns.set_alias(
                     &event_session,
                     *turn,
@@ -1435,7 +1436,11 @@ impl NorteCodeRaepHost {
                     name,
                 }
             }
-            _ => unreachable!("plugin request was checked before dispatch"),
+            other => {
+                return Err(HostError::InvalidFrame(format!(
+                    "UNSUPPORTED_REQUEST: {other:?}"
+                )));
+            }
         };
         self.emit_event(
             session_id,

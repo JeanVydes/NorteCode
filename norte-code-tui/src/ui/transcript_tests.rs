@@ -693,3 +693,21 @@ fn user_and_model_text_use_the_active_theme_foreground() {
         assert_eq!(cell.fg, theme.foreground, "contrast for {word}");
     }
 }
+
+#[test]
+fn an_oversized_block_height_saturates() {
+    let item = Item::User {
+        text: String::new(),
+        turn: None,
+    };
+
+    assert_eq!(
+        Transcript::item_height(
+            &item,
+            80,
+            crate::diff::DiffMode::Unified,
+            Some(usize::from(u16::MAX))
+        ),
+        u16::MAX
+    );
+}

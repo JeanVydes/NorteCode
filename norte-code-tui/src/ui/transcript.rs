@@ -643,16 +643,20 @@ impl Transcript {
         doc_lines: Option<usize>,
     ) -> u16 {
         match item {
-            Item::User { .. } | Item::Assistant { .. } => {
-                u16::try_from(doc_lines.unwrap_or(1)).unwrap_or(u16::MAX) + BLOCK_GAP
-            }
+            Item::User { .. } | Item::Assistant { .. } => u16::try_from(doc_lines.unwrap_or(1))
+                .unwrap_or(u16::MAX)
+                .saturating_add(BLOCK_GAP),
             Item::Notice { text, .. } | Item::Retry { text, .. } => {
                 let text_width = width.saturating_sub(2 + NOTICE_PREFIX_CHARS).max(1);
-                u16::try_from(wrap(text, text_width).len()).unwrap_or(u16::MAX) + BLOCK_GAP
+                u16::try_from(wrap(text, text_width).len())
+                    .unwrap_or(u16::MAX)
+                    .saturating_add(BLOCK_GAP)
             }
             Item::Reasoning { text, expanded } => {
                 if *expanded {
-                    u16::try_from(wrap(text, width).len() + 1).unwrap_or(u16::MAX) + BLOCK_GAP
+                    u16::try_from(wrap(text, width).len() + 1)
+                        .unwrap_or(u16::MAX)
+                        .saturating_add(BLOCK_GAP)
                 } else {
                     1 + BLOCK_GAP
                 }

@@ -29,6 +29,12 @@ fn defaults_are_valid() {
 }
 
 #[test]
+fn zero_keep_recent_is_rejected() {
+    let error = Config::from_json(r#"{"compaction":{"keep_recent":0}}"#).expect_err("config");
+    assert!(format!("{error}").contains("keep_recent"));
+}
+
+#[test]
 fn a_file_over_the_limit_is_refused_before_parsing() {
     let path = temp_file("0123456789");
     let error = read_limited(&path, 4).expect_err("file must be bounded");

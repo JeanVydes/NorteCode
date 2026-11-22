@@ -545,7 +545,11 @@ fn pinned_turn_indices(
 /// Where a verbatim suffix may start without orphaning tool results.
 pub(super) fn recent_start(messages: &[Message], keep: usize) -> usize {
     let mut start = messages.len().saturating_sub(keep);
-    while start > 0 && messages[start].role == Role::Tool {
+    while start > 0
+        && messages
+            .get(start)
+            .is_some_and(|message| message.role == Role::Tool)
+    {
         start -= 1;
     }
     start
@@ -633,3 +637,7 @@ pub(super) fn is_compaction_abort(event: &EngineEvent) -> bool {
 pub(super) fn is_compaction_message(message: &str) -> bool {
     message.contains(COMPACTION_SAFE_POINT)
 }
+
+#[cfg(test)]
+#[path = "compaction_tests.rs"]
+mod tests;

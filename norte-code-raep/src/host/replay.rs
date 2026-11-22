@@ -77,7 +77,10 @@ impl ReplayLog {
         let mut line = serde_json::to_vec(frame)
             .map_err(|error| HostError::Replay(format!("unserializable frame: {error}")))?;
         line.push(b'\n');
-        let _guard = self.lock.lock().expect("replay lock is not poisoned");
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = self.path(&session);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -124,7 +127,10 @@ impl ReplayLog {
     /// A log that cannot be read is an empty window, not an error: the
     /// client still gets a well-formed attach and reloads history.
     pub(crate) fn after(&self, session: &str, after: u64) -> ReplayWindow {
-        let _guard = self.lock.lock().expect("replay lock is not poisoned");
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = self.path(session);
         let Ok(file) = File::open(&path) else {
             return ReplayWindow {
@@ -154,7 +160,10 @@ impl ReplayLog {
 
     /// The last sequence the log holds for a session, if it has one.
     pub(crate) fn last_seq(&self, session: &str) -> Option<u64> {
-        let _guard = self.lock.lock().expect("replay lock is not poisoned");
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let file = File::open(self.path(session)).ok()?;
         let mut last = None;
         for line in BufReader::new(file).lines().map_while(Result::ok) {
@@ -169,7 +178,10 @@ impl ReplayLog {
 
     /// The frames and bytes the log currently holds, across sessions.
     pub(crate) fn total(&self) -> (u64, u64) {
-        let _guard = self.lock.lock().expect("replay lock is not poisoned");
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Ok(entries) = fs::read_dir(&self.root) else {
             return (0, 0);
         };
@@ -190,7 +202,14 @@ impl ReplayLog {
 
     /// Deletes a session's log, when the session is gone.
     pub(crate) fn remove(&self, session: &str) {
-        let _guard = self.lock.lock().expect("replay lock is not poisoned");
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = fs::remove_file(self.path(session));
     }
 }
+
+#[cfg(test)]
+#[path = "replay_tests.rs"]
+mod tests;

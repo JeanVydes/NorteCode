@@ -287,6 +287,9 @@ impl Agent {
                 "must be a fraction in (0, 1]",
             ));
         }
+        if self.compaction.keep_recent == 0 {
+            return Err(invalid("compaction.keep_recent", "must be at least 1"));
+        }
         if self.retry.max_attempts > 10 {
             return Err(invalid(
                 "retry.max_attempts",

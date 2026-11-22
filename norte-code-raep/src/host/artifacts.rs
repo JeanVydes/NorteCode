@@ -35,6 +35,16 @@ fn purge_expired_imports(state: &mut super::stores::HostState) {
     state.imports.retain(|_, import| import.expires_at > now);
 }
 
+fn first_session(
+    imported: &StoredImportPayload,
+) -> Result<&crate::bundle::BundleSession, HostError> {
+    imported
+        .manifest
+        .sessions
+        .first()
+        .ok_or_else(|| HostError::InvalidFrame("BUNDLE_INVALID: no sessions".to_owned()))
+}
+
 impl NorteCodeRaepHost {
     /// Stores an uploaded artifact.
     ///
@@ -403,7 +413,7 @@ impl NorteCodeRaepHost {
             import.path.clone()
         };
         let imported: StoredImportPayload = bundle_store::read_json(&path)?;
-        let source = &imported.manifest.sessions[0];
+        let source = first_session(&imported)?.clone();
         let usage_total = request
             .carry_usage
             .unwrap_or(true)
@@ -611,3 +621,7 @@ impl NorteCodeRaepHost {
         Ok(vec![started, finished])
     }
 }
+
+#[cfg(test)]
+#[path = "artifacts_tests.rs"]
+mod tests;
