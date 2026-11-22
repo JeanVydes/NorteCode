@@ -22,6 +22,8 @@ fn model_with_plugins() -> UiModel {
                 load_error: None,
                 source: Some("https://example.invalid/alpha".to_owned()),
                 package: None,
+                status: None,
+                banner: None,
             },
             PluginSummary {
                 name: "beta".to_owned(),
@@ -30,6 +32,8 @@ fn model_with_plugins() -> UiModel {
                 load_error: Some("was built against plugin interface 1".to_owned()),
                 source: None,
                 package: Some("beta".to_owned()),
+                status: None,
+                banner: None,
             },
         ],
         ..UiModel::default()
@@ -176,6 +180,8 @@ fn an_enabled_plugin_the_host_did_not_load_is_not_called_failed() {
             load_error: None,
             source: None,
             package: None,
+            status: None,
+            banner: None,
         }],
         ..UiModel::default()
     };

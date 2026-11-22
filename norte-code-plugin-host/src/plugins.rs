@@ -276,12 +276,33 @@ impl Plugins {
             .collect()
     }
 
+    /// The status fields paired with the name of the plugin that offered them.
+    ///
+    /// The host uses this to publish a display line beside the plugin it came
+    /// from, so a reader can tell which plugin wrote what.
+    #[must_use]
+    pub fn status_named(&self) -> Vec<(String, String)> {
+        self.loaded
+            .iter()
+            .filter_map(|plugin| plugin.status().map(|line| (plugin.name().to_owned(), line)))
+            .collect()
+    }
+
     /// The banner lines, in the order the plugins were loaded.
     #[must_use]
     pub fn banner(&self) -> Vec<String> {
         self.loaded
             .iter()
             .filter_map(|plugin| plugin.banner())
+            .collect()
+    }
+
+    /// The banner lines paired with the name of the plugin that offered them.
+    #[must_use]
+    pub fn banner_named(&self) -> Vec<(String, String)> {
+        self.loaded
+            .iter()
+            .filter_map(|plugin| plugin.banner().map(|line| (plugin.name().to_owned(), line)))
             .collect()
     }
 

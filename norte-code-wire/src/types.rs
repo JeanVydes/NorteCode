@@ -123,6 +123,12 @@ pub struct PluginInfo {
     /// The workspace package installed from that source, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
+    /// The status line this plugin contributed, when it offered one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// The banner line this plugin contributed, when it offered one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<String>,
 }
 
 /// One MCP server visible to the service.

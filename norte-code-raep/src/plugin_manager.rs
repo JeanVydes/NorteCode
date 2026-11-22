@@ -697,6 +697,8 @@ pub fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
             };
             let recorded = sources.get(&name);
             Some(norte_code_wire::PluginInfo {
+                status: crate::plugin_display::status_for(&name),
+                banner: crate::plugin_display::banner_for(&name),
                 name,
                 enabled: !disabled,
                 loaded,

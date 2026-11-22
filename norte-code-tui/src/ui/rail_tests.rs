@@ -127,6 +127,40 @@ fn the_rail_shows_todos_with_their_statuses() {
     assert!(text.contains(TODO_PENDING), "{text}");
 }
 
+#[test]
+fn the_rail_shows_plugin_status_and_banner_lines() {
+    let mut model = UiModel::detached();
+    model.plugins = vec![
+        norte_code_client::PluginSummary {
+            name: "catalog".to_owned(),
+            status: Some("catalog ready".to_owned()),
+            banner: Some("NORTE CATALOG".to_owned()),
+            ..Default::default()
+        },
+        norte_code_client::PluginSummary {
+            name: "style".to_owned(),
+            status: Some("style active".to_owned()),
+            banner: None,
+            ..Default::default()
+        },
+    ];
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    let rail = tree.find_mut::<Rail>("rail").expect("rail in tree");
+    rail.set_plugin_status(vec!["catalog ready".to_owned(), "style active".to_owned()]);
+    rail.set_plugin_banner(vec!["NORTE CATALOG".to_owned()]);
+    let area = Rect::new(0, 0, 100, 40);
+
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let text = painted_text(&buf, area);
+    assert!(text.contains("PLUGIN STATUS"), "{text}");
+    assert!(text.contains("catalog ready"), "{text}");
+    assert!(text.contains("style active"), "{text}");
+    assert!(text.contains("PLUGIN BANNER"), "{text}");
+    assert!(text.contains("NORTE CATALOG"), "{text}");
+}
+
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> terminalui::InputEvent {
     terminalui::InputEvent::from(Event::Mouse(MouseEvent {
         kind,

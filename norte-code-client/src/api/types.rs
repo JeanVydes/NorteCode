@@ -132,6 +132,12 @@ pub struct PluginSummary {
     /// The workspace package installed from that source, when recorded.
     #[serde(default)]
     pub package: Option<String>,
+    /// The status line this plugin contributed, when it offered one.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// The banner line this plugin contributed, when it offered one.
+    #[serde(default)]
+    pub banner: Option<String>,
 }
 
 /// The result of a plugin operation.

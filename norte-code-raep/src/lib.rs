@@ -13,6 +13,7 @@ mod commands;
 mod host;
 mod http;
 mod payloads;
+mod plugin_display;
 pub mod plugin_manager;
 
 pub use commands::AgentCommand;
@@ -264,6 +265,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let mut plugins = Plugins::new();
     load_plugins(&mut plugins, None);
     let plugin_tools = plugins.tools();
+    crate::plugin_display::capture(plugins.status_named(), plugins.banner_named());
     let offered = plugins.catalogue();
     let created = ensure_catalog_files()?;
     if created.providers || created.models {
