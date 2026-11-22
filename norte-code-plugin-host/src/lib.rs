@@ -9,7 +9,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub mod commands;
 pub mod plugins;
 
 pub use plugins::{PLUGIN_ABI_SYMBOL, PLUGIN_ABI_VERSION, Plugin, PluginContext, Plugins};

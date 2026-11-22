@@ -1577,9 +1577,11 @@ dependencies = [
 name = "norte-code-plugin-host"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "libloading",
- "norte-code-protocol",
+ "norte",
  "norte-code-wire",
+ "schemars",
  "serde",
  "serde_json",
 ]

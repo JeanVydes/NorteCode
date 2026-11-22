@@ -1,20 +1,19 @@
 # Plugins
 
 A plugin is a shared library (`.so` / `.dll` / `.dylib`) that adds things to
-Norte Code without changing it: slash commands, a status line field, a
-banner line, or providers and models in the catalogue. The
+Norte Code without changing it: tools the model can call, a status line field,
+a banner line, or providers and models in the catalogue. The
 [catalog-plugin](https://github.com/JeanVydes/catalog-plugin) is the
 ready-made example: it offers a catalogue so you do not write
 `providers.json` and `models.json` by hand.
 
 ## What a plugin can do
 
-One trait, five optional surfaces (all default to nothing):
+One trait, four optional surfaces (all default to nothing):
 
 | Surface | What it adds |
 | --- | --- |
-| `commands()` | Slash commands, parsed and completed like the built-in ones. |
-| `run()` | What a plugin command prints, as panel lines. |
+| `tools()` | Tools the host registers with the tool registry for the model. |
 | `status()` | One field on the status row under the conversation. |
 | `banner()` | One line of wordmark under the built-in one. |
 | `catalogue()` | Providers and models the catalogue knows for that run. |

@@ -1,9 +1,9 @@
 //! The plugin registry: what a plugin may add to a Norte Code client.
 //!
-//! A plugin is a box that is asked for things. It answers with **data** — a
-//! command to register, lines for a panel, a fragment of
-//! the wordmark — and the host draws it. That is the whole design, and
-//! everything else follows from it:
+//! A plugin is a box that is asked for things. It answers with **data** — tools
+//! to register, status lines, a wordmark fragment and catalogue entries — and
+//! the host draws or registers it. That is the whole design, and everything else
+//! follows from it:
 //!
 //! - A plugin **cannot** write to the terminal. It has no way to reach it, so
 //!   it cannot clear a line it does not own, leave the cursor somewhere, or
@@ -18,10 +18,9 @@
 //!
 //! | Where | What |
 //! | --- | --- |
-//! | The command registry | a command, with its arguments and its usage line |
-//! | A panel | lines over the interface, opened by a command |
-//! | The footer | a field on the status row |
-//! | The screen | a line of the wordmark, and the tagline under it |
+//! | The tool registry | tools the model can call, with their schemas and executors |
+//! | The sidebar | a status line and a line of the wordmark |
+//! | The catalogue | providers and models for this run |
 //!
 //! # What it cannot
 //!
@@ -44,7 +43,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::commands::{CommandSpec, Invocation};
+use norte::AnyFunction;
 use norte_code_wire::catalog::{Model, Provider};
 use norte_code_wire::{ContextUsage, SessionKey};
 
@@ -56,13 +55,14 @@ use norte_code_wire::{ContextUsage, SessionKey};
 /// against its own copy of this crate — so the version is a number both sides
 /// carry and the host refuses a plugin whose number is not its own.
 ///
-/// Bump it when the layout of [`PluginContext`], [`Plugin`] or [`PluginHost`]
-/// changes in a way an old plugin would not survive.
+/// The number stays at 1 while the interface is unreleased. A change to
+/// [`Plugin`] still requires every plugin to be rebuilt against this host,
+/// even when the number does not move. Bump it once the interface is released
+/// and a layout change would make an old plugin unsafe to load.
 ///
 /// The check is an exact match on purpose: a plugin built against another
 /// version is a plugin whose method table this host cannot call safely, so it
-/// is refused with the two numbers named rather than loaded on a guess. A
-/// plugin built against an older release must be rebuilt against this one.
+/// is refused with the two numbers named rather than loaded on a guess.
 pub const PLUGIN_ABI_VERSION: u32 = 1;
 
 /// The symbol a plugin exports to say which version it was built against.
@@ -81,22 +81,13 @@ pub trait Plugin: Send + Sync {
     /// The name the host reports it by, in `/plugins` and in an error.
     fn name(&self) -> &str;
 
-    /// The commands this plugin adds to the registry.
+    /// The tools this plugin adds to the tool registry.
     ///
-    /// They are parsed, completed and listed by the host exactly like its own:
-    /// a plugin's command is a command, and the difference is not visible to
-    /// whoever types it.
-    fn commands(&self) -> Vec<CommandSpec> {
+    /// The host registers each one with `ToolRegistry`, so a plugin tool has the
+    /// same schema, approval flow and audit record as a built-in tool. The
+    /// plugin builds the declarations; the host owns the registry.
+    fn tools(&self) -> Vec<Arc<dyn AnyFunction>> {
         Vec::new()
-    }
-
-    /// What a command of this plugin does, as lines for a panel.
-    ///
-    /// `Some(lines)` opens a panel; `None` means the command was not this
-    /// plugin's. The lines are plain text, and the host colours, wraps and
-    /// scrolls them: a plugin says what to read and not how it looks.
-    fn run(&self, _command: &Invocation) -> Option<Vec<String>> {
-        None
     }
 
     /// A field on the status row, under the conversation.
@@ -117,8 +108,8 @@ pub trait Plugin: Send + Sync {
 
     /// Receives the host context before the host asks anything of the plugin.
     ///
-    /// The host calls this once, before `commands`, `run`, `status`
-    /// or `banner`. A plugin stores whatever it wants from the context in its
+    /// The host calls this once, before `tools`, `status` or `banner`.
+    /// A plugin stores whatever it wants from the context in its
     /// own fields — the trait does not keep a copy. The host is passed as a
     /// [`PluginHost`] so this crate never names a concrete service type; the
     /// host that built the context implements it.
@@ -195,7 +186,7 @@ pub trait PluginHost: Send + Sync {
 /// The host is optional: the host passes what it has at the moment, and a
 /// plugin that needs something absent simply does without it. The plugin may
 /// keep the context — or any part of it — in its own fields and use it later,
-/// when the host asks it to run a command or redraw.
+/// when the host builds its tools or redraws.
 #[derive(Clone)]
 pub struct PluginContext {
     /// The host, which answers what the plugin may ask about the session.
@@ -263,24 +254,17 @@ impl Plugins {
         self.loaded.iter().map(|plugin| plugin.name()).collect()
     }
 
-    /// Every command every plugin adds.
+    /// Every tool every plugin adds, in load order.
+    ///
+    /// The host registers these with `ToolRegistry`, which rejects duplicate
+    /// names. Two plugins offering the same tool name is a conflict the host
+    /// reports, not one it hides.
     #[must_use]
-    pub fn commands(&self) -> Vec<CommandSpec> {
+    pub fn tools(&self) -> Vec<Arc<dyn AnyFunction>> {
         self.loaded
             .iter()
-            .flat_map(|plugin| plugin.commands())
+            .flat_map(|plugin| plugin.tools())
             .collect()
-    }
-
-    /// Asks every plugin to run a command, and takes the first answer.
-    ///
-    /// The first and not every one: two plugins claiming the same name is two
-    /// answers to one command, and the second would be answering a question
-    /// nobody asked it. The order is the order they were loaded in, which is
-    /// the order they were declared in.
-    #[must_use]
-    pub fn run(&self, command: &Invocation) -> Option<Vec<String>> {
-        self.loaded.iter().find_map(|plugin| plugin.run(command))
     }
 
     /// The status fields, in the order the plugins were loaded.
@@ -304,7 +288,7 @@ impl Plugins {
     /// Give every loaded plugin the same host context.
     ///
     /// Called after the service and session exist, so plugins can reach them
-    /// when they run a command or redraw.
+    /// when the host builds their tools or redraws.
     pub fn set_context_on_all(&mut self, ctx: &PluginContext) {
         for plugin in &mut self.loaded {
             plugin.set_context(ctx.clone());
