@@ -634,3 +634,40 @@ fn replaying_a_long_history_is_bounded() {
     let count = transcript.items.len();
     assert!((KEEP_ITEMS..=MAX_ITEMS).contains(&count), "count {count}");
 }
+
+#[test]
+fn user_and_model_text_use_the_active_theme_foreground() {
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Style;
+    use terminalui::{Tree, node};
+
+    use crate::theme::{ThemeCatalog, ThemeChoice, ThemeKind};
+
+    let mut transcript = Transcript::new();
+    transcript.push(Item::User {
+        turn: Some(1),
+        text: "userword".to_owned(),
+    });
+    transcript.push(Item::Assistant {
+        turn: Some(1),
+        text: "modelword".to_owned(),
+    });
+
+    let catalog = ThemeCatalog::default();
+    let theme = catalog.theme(&ThemeChoice::BuiltIn(ThemeKind::ByeRetina));
+    let area = Rect::new(0, 0, 60, 8);
+    let mut tree = Tree::new(node("stream", transcript));
+    let mut buf = Buffer::empty(area);
+    buf.set_style(area, Style::default().bg(theme.background));
+    tree.render(area, &mut buf, &theme);
+
+    for word in ["userword", "modelword"] {
+        let first = &word[..1];
+        let cell = buf
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == first)
+            .unwrap_or_else(|| panic!("no painted cell for {word}"));
+        assert_eq!(cell.fg, theme.foreground, "contrast for {word}");
+    }
+}

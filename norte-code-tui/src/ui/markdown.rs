@@ -71,11 +71,12 @@ struct Renderer<'a> {
 
 impl<'a> Renderer<'a> {
     fn new(width: u16, theme: &'a Theme) -> Self {
+        let base = Style::default().fg(theme.foreground);
         Self {
             lines: Vec::new(),
             line: Vec::new(),
-            style: Style::default(),
-            styles: Vec::new(),
+            style: base,
+            styles: vec![base],
             table: None,
             link: None,
             pending_links: Vec::new(),
@@ -290,7 +291,10 @@ impl<'a> Renderer<'a> {
     }
 
     fn end_style(&mut self) {
-        self.style = self.styles.pop().unwrap_or_default();
+        self.style = self
+            .styles
+            .pop()
+            .unwrap_or_else(|| Style::default().fg(self.theme.foreground));
     }
 
     fn line_width(&self) -> usize {
