@@ -207,6 +207,8 @@ pub enum SessionTitleSource {
     /// A person named it, with `/rename` or a create request.
     #[default]
     User,
+    /// A model named it from the session's first message.
+    Derived,
 }
 
 /// One session as `/sessions` lists it.

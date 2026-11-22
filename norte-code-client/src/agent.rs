@@ -149,6 +149,7 @@ pub fn into_session_info(summary: SessionSummary) -> norte_code_wire::SessionInf
     norte_code_wire::SessionInfo {
         session: norte_code_wire::SessionKey::new(summary.session_id),
         title: summary.title,
+        title_source: summary.title_source,
         provider: None,
         model: None,
         created_at: None,

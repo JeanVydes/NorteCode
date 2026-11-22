@@ -782,6 +782,12 @@ fn test_service<F: norte_code_agent::ModelFactory + 'static>(
     spec: Option<norte_code_agent::ModelSpec>,
     factory: F,
 ) -> Arc<Service> {
+    let reference = norte::ModelRef::new(
+        norte::ProviderId::new("test").expect("provider"),
+        norte::ModelId::new("title").expect("model"),
+    );
+    let title_model: Arc<dyn norte::Model> =
+        Arc::new(norte_testing::ScriptedModel::new(reference).turn_text("Generated title"));
     Arc::new(
         Service::new(
             norte_code_protocol::config::Config::default(),
@@ -792,7 +798,8 @@ fn test_service<F: norte_code_agent::ModelFactory + 'static>(
             Arc::new(norte::InMemoryBlobStore::new()),
             "system",
         )
-        .expect("service"),
+        .expect("service")
+        .with_title_model(title_model),
     )
 }
 

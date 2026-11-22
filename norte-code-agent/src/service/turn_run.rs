@@ -43,6 +43,14 @@ impl Service {
     ) -> Result<(), ServiceError> {
         let mut current_nid = nid;
         let mut input = input;
+        let mut pending_title = if turn == 1 {
+            input
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+        } else {
+            None
+        };
         let mut stats = self.stats(key, turn);
         let current_nid_cell = Arc::new(Mutex::new(current_nid));
         let q_tx = tx.clone();
@@ -156,6 +164,14 @@ impl Service {
                     }
                 };
                 let Some(event) = event else { break };
+                self.title_from_first_commit(
+                    &mut pending_title,
+                    &event,
+                    request_id,
+                    key,
+                    tx,
+                    cancellation,
+                );
                 if is_compaction_abort(&event) {
                     failure = Some(COMPACTION_SAFE_POINT.to_owned());
                 }

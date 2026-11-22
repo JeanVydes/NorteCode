@@ -10176,3 +10176,90 @@ fn send_message(session: Option<SessionKey>, text: &str) -> ClientRequestKind {
         replay: false,
     }
 }
+
+async fn wait_for_title(service: &Arc<Service>, key: &SessionKey) -> Option<String> {
+    for _ in 0..100 {
+        if let Some(title) = service.session_title(key) {
+            return Some(title);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    None
+}
+
+#[tokio::test]
+async fn the_first_message_gets_a_model_generated_title() {
+    let (service, _model) = scripted_service(spec("scripted"), &["first answer", "second answer"]);
+    let session = service.start_session(None).await.expect("session");
+    drain(
+        &service,
+        send_message(Some(session.clone()), "fix the redirect"),
+    )
+    .await;
+
+    let title = wait_for_title(&service, &session)
+        .await
+        .expect("a generated title");
+    assert_eq!(title, "Generated title");
+    let listed = service
+        .list_sessions()
+        .into_iter()
+        .find(|info| info.session == session)
+        .expect("listed session");
+    assert_eq!(
+        listed.title_source,
+        norte_code_wire::SessionTitleSource::Derived
+    );
+
+    drain(
+        &service,
+        send_message(Some(session.clone()), "another task"),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        service.session_title(&session).as_deref(),
+        Some(title.as_str())
+    );
+}
+
+#[tokio::test]
+async fn a_manual_title_is_not_replaced_by_a_generated_one() {
+    let (service, _model) = scripted_service(spec("scripted"), &["answer", "Generated title"]);
+    let session = service
+        .start_session(Some("Mine".to_owned()))
+        .await
+        .expect("session");
+    drain(
+        &service,
+        send_message(Some(session.clone()), "fix the redirect"),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(service.session_title(&session).as_deref(), Some("Mine"));
+    let listed = service
+        .list_sessions()
+        .into_iter()
+        .find(|info| info.session == session)
+        .expect("listed session");
+    assert_eq!(
+        listed.title_source,
+        norte_code_wire::SessionTitleSource::User
+    );
+}
+
+#[tokio::test]
+async fn a_blank_first_message_does_not_title_the_session() {
+    let (service, _model) = scripted_service(spec("scripted"), &["first answer", "second answer"]);
+    let session = service.start_session(None).await.expect("session");
+    drain(&service, send_message(Some(session.clone()), "   ")).await;
+    drain(
+        &service,
+        send_message(Some(session.clone()), "the real task"),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(service.session_title(&session), None);
+}

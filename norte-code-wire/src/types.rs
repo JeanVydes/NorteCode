@@ -138,6 +138,9 @@ pub struct SessionInfo {
     pub session: SessionKey,
     /// The label.
     pub title: Option<String>,
+    /// Who named the session.
+    #[serde(default)]
+    pub title_source: crate::SessionTitleSource,
     /// The provider that serves the model in use.
     ///
     /// Its own field and not half of a `provider/model` string: a model id may

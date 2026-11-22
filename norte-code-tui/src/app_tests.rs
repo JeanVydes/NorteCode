@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use norte_code_wire::{PluginId, ServerEventKind, SessionKey, UploadReceipt};
+use norte_code_wire::{PluginId, ServerEvent, ServerEventKind, SessionKey, UploadReceipt};
 use terminalui::{InputEvent, Theme, Tree, node};
 use tokio::sync::mpsc;
 
@@ -67,6 +67,39 @@ fn image_event() -> ClientEvent {
         },
         receipt: receipt(),
     }
+}
+
+#[test]
+fn a_session_renamed_event_updates_the_list_and_attached_title() {
+    let key = SessionKey::new("session_1");
+    let mut model = UiModel::detached();
+    model.active = Some(key.clone());
+    model.sessions = vec![norte_code_wire::SessionSummary {
+        session_id: key.to_string(),
+        ..Default::default()
+    }];
+    let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::default());
+    let mut tree = composer_tree(clipboard);
+    let mut commands = None;
+
+    fold(
+        &ServerEvent {
+            request_id: 1,
+            session: Some(key),
+            kind: ServerEventKind::SessionRenamed {
+                title: "Login redirect fix".to_owned(),
+            },
+        },
+        &mut tree,
+        &mut model,
+        &mut commands,
+    );
+
+    assert_eq!(
+        model.sessions[0].title.as_deref(),
+        Some("Login redirect fix")
+    );
+    assert_eq!(model.attached_title.as_deref(), Some("Login redirect fix"));
 }
 
 #[test]

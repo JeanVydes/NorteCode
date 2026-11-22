@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
-use norte_code_wire::{Budget, Phase as ProtocolPhase, Reasoning, SessionKey};
+use norte_code_wire::{Budget, Phase as ProtocolPhase, Reasoning, SessionKey, SessionTitleSource};
 
 use crate::provider::ModelSpec as ProviderModelSpec;
 
@@ -52,6 +52,7 @@ pub(super) struct ChildSessionMetadata {
 pub(super) struct SessionRecord {
     pub(super) id: norte::SessionId,
     pub(super) title: Option<String>,
+    pub(super) title_source: SessionTitleSource,
     pub(super) spec: Option<ProviderModelSpec>,
     /// Agent profile selected when this session was created.
     ///
@@ -183,6 +184,7 @@ pub(super) fn record_from(
     SessionRecord {
         id: entry.north,
         title: entry.title,
+        title_source: entry.title_source,
         spec,
         agent_profile: stats.agent_profile,
         pending_provider: stats.pending_provider,

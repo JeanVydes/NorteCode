@@ -67,6 +67,9 @@ pub(in crate::app) fn fold(
         ServerEventKind::SessionTodos { todos } => {
             model.todos.clone_from(todos);
         }
+        ServerEventKind::SessionRenamed { title } => {
+            fold_session_renamed(event.session.as_ref(), title, model);
+        }
         kind @ (ServerEventKind::PluginMessageInjected { .. }
         | ServerEventKind::PluginMessageRejected { .. }) => {
             fold_plugin_message_event(kind, tree);
@@ -83,7 +86,6 @@ pub(in crate::app) fn fold(
         | ServerEventKind::SessionCreated { .. }
         | ServerEventKind::SessionList { .. }
         | ServerEventKind::SessionDeleted
-        | ServerEventKind::SessionRenamed { .. }
         | ServerEventKind::SessionForked { .. }
         | ServerEventKind::ChildSessionStarted { .. }
         | ServerEventKind::ChildSessionUpdated { .. }
@@ -114,6 +116,24 @@ pub(in crate::app) fn fold(
         | ServerEventKind::OutputPartStarted { .. }
         | ServerEventKind::OutputPartFinished { .. }
         | ServerEventKind::SecretSaved { .. } => {}
+    }
+}
+
+fn fold_session_renamed(
+    session: Option<&norte_code_wire::SessionKey>,
+    title: &str,
+    model: &mut UiModel,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    for summary in &mut model.sessions {
+        if summary.session_id == session.as_str() {
+            summary.title = Some(title.to_owned());
+        }
+    }
+    if model.active.as_ref() == Some(session) {
+        model.attached_title = Some(title.to_owned());
     }
 }
 

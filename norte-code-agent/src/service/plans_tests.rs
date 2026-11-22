@@ -1,12 +1,13 @@
 use super::*;
 use norte_code_protocol::sqlite::{InMemoryDirectory, SessionDirectory};
-use norte_code_wire::Phase;
+use norte_code_wire::{Phase, SessionTitleSource};
 
 fn stored_session(session: SessionId, key: &str) -> StoredSession {
     StoredSession {
         key: key.to_owned(),
         north: session,
         title: None,
+        title_source: SessionTitleSource::User,
         provider: "test".to_owned(),
         model: "test-model".to_owned(),
         created_at: chrono::Utc::now(),

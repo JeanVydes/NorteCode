@@ -70,9 +70,6 @@ pub enum ServiceError {
     /// A delegation operation could not be completed.
     #[error("delegation: {0}")]
     Delegation(String),
-    /// A session could not be named after its first message.
-    #[error("name: {0}")]
-    Name(String),
     /// The feature exists on the wire but is not built yet.
     #[error("not implemented yet: {0}")]
     Unsupported(&'static str),

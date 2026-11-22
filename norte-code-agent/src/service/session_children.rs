@@ -219,6 +219,7 @@ impl Service {
             .map(|(key, record)| SessionInfo {
                 session: key.clone(),
                 title: record.title.clone(),
+                title_source: record.title_source,
                 provider: record.spec.as_ref().map(|s| s.provider.clone()),
                 model: record.spec.as_ref().map(|s| s.model.clone()),
                 created_at: Some(record.created_at.to_rfc3339()),
@@ -246,41 +247,9 @@ impl Service {
                 .get_mut(key)
                 .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
             record.title = Some(title.to_owned());
+            record.title_source = norte_code_wire::SessionTitleSource::User;
         }
         self.persist(key).await
-    }
-
-    /// Names the session after the first message it holds, truncated.
-    ///
-    /// The automatic title is the first user message cut to 32 characters, set
-    /// once; this is the same rule, asked again for a session that has no title
-    /// yet. Nothing is sent to a model.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServiceError::Name`] when the session is unknown, its history
-    /// cannot be read, or it holds no user message to name it after.
-    pub async fn retitle_session(&self, key: &SessionKey) -> Result<String, ServiceError> {
-        let (nid, spec, _) = self.require_record(key)?;
-        let spec = spec.ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-        let history = self.engine(&spec, Some(key))?.history(nid).await?;
-        let first = history
-            .iter()
-            .find(|message| message.role == norte::Role::User)
-            .map(norte::Message::text)
-            .filter(|text| !text.trim().is_empty())
-            .ok_or_else(|| {
-                ServiceError::Name("the session has no message to be named after".to_owned())
-            })?;
-        let title: String = first.trim().chars().take(32).collect::<String>();
-        let title = title.trim_end().to_owned();
-        if title.is_empty() {
-            return Err(ServiceError::Name(
-                "the first message names nothing".to_owned(),
-            ));
-        }
-        self.rename(key, &title).await?;
-        Ok(title)
     }
 
     /// Forgets the session and its row.

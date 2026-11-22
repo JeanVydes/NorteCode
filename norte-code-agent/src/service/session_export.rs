@@ -3,7 +3,7 @@
 use chrono::Utc;
 
 use norte_code_protocol::config::ProviderHttpConfig;
-use norte_code_wire::{Phase as ProtocolPhase, SessionKey};
+use norte_code_wire::{Phase as ProtocolPhase, SessionKey, SessionTitleSource};
 
 use crate::provider::ModelSpec as ProviderModelSpec;
 
@@ -180,6 +180,7 @@ impl Service {
         let record = SessionRecord {
             id: session.id,
             title,
+            title_source: SessionTitleSource::User,
             spec: stored_spec,
             pending_provider: None,
             pending_model: None,
@@ -382,6 +383,7 @@ impl Service {
         let record = SessionRecord {
             id: imported.id,
             title,
+            title_source: SessionTitleSource::User,
             spec: Some(spec),
             agent_profile,
             pending_provider: None,

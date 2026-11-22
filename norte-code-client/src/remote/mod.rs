@@ -8,7 +8,7 @@ mod session_cache;
 mod stream;
 mod turns;
 
-use norte_code_wire::{ClientRequest, ServerEvent};
+use norte_code_wire::{ClientRequest, ServerEvent, SessionTitleSource};
 use raep_types::{ClientInfo, Envelope, FrameType, SessionAttach, StandardFrameType, TurnId};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
@@ -429,6 +429,7 @@ impl RemoteClient {
                             norte_code_wire::SessionInfo {
                                 session: key.clone(),
                                 title: title.clone(),
+                                title_source: SessionTitleSource::User,
                                 provider: None,
                                 model: None,
                                 created_at: None,

@@ -42,6 +42,24 @@ use super::skills::{collect_secrets, discover_skills};
 use super::steering::{Steering, SteeringInterceptor};
 use super::tooling::{ToolActivity, edit_source};
 
+#[cfg(test)]
+#[allow(clippy::unnecessary_wraps)]
+fn default_title_model() -> Option<Arc<dyn Model>> {
+    let reference = norte::ModelRef::new(
+        norte::ProviderId::new("test").expect("provider"),
+        norte::ModelId::new("title").expect("model"),
+    );
+    Some(
+        Arc::new(norte_testing::ScriptedModel::new(reference).turn_text("Generated title"))
+            as Arc<dyn Model>,
+    )
+}
+
+#[cfg(not(test))]
+fn default_title_model() -> Option<Arc<dyn Model>> {
+    None
+}
+
 impl Service {
     /// Builds a service with an in-memory session directory.
     ///
@@ -152,6 +170,13 @@ impl Service {
         self
     }
 
+    /// Uses `model` for internal title requests instead of the session's model.
+    #[must_use]
+    pub fn with_title_model(mut self, model: Arc<dyn Model>) -> Self {
+        self.title_model = Some(model);
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build(
         config: Config,
@@ -222,6 +247,7 @@ impl Service {
             store,
             blobs,
             factory,
+            title_model: default_title_model(),
             system_prompt,
             subagent_system_prompt,
             project_path,
@@ -379,7 +405,22 @@ impl Service {
         compaction: Option<Arc<CompactionGate>>,
         max_iterations: Option<usize>,
     ) -> Result<Harness, ServiceError> {
-        let model: Arc<dyn Model> = self.factory.build(spec, &spec.capabilities)?;
+        self.engine_with_budget_and_model(spec, key, budget, compaction, max_iterations, None)
+    }
+
+    pub(super) fn engine_with_budget_and_model(
+        &self,
+        spec: &ModelSpec,
+        key: Option<&SessionKey>,
+        budget: Option<Arc<Mutex<BudgetBook>>>,
+        compaction: Option<Arc<CompactionGate>>,
+        max_iterations: Option<usize>,
+        model: Option<Arc<dyn Model>>,
+    ) -> Result<Harness, ServiceError> {
+        let model: Arc<dyn Model> = match model {
+            Some(model) => model,
+            None => self.factory.build(spec, &spec.capabilities)?,
+        };
         // The adapter is what turns a `Blob` back into bytes on the way out. A
         // message may carry media the client stored: a pasted image: and the
         // wire only takes inline bytes or a URL, so without this the part

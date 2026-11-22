@@ -20,7 +20,7 @@ use crate::store::{Commit, Node, Session, Store};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use norte::{BlobId, BlobStore, CallId, Error, NodeId, Result, SessionId};
-use norte_code_wire::Phase;
+use norte_code_wire::{Phase, SessionTitleSource};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -50,6 +50,9 @@ pub struct StoredSession {
     /// The user-visible title, when one was set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Who named the session.
+    #[serde(default)]
+    pub title_source: SessionTitleSource,
     /// The provider that served the session.
     ///
     /// It has a column of its own: a provider and a model are two facts, and a
@@ -1229,6 +1232,7 @@ impl SessionDirectory for SqliteStore {
                         key,
                         north: north.parse()?,
                         title,
+                        title_source: extra.title_source,
                         provider,
                         model,
                         created_at: created_at.parse().map_err(|error: chrono::ParseError| {

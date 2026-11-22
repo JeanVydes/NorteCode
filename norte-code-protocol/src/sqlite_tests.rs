@@ -1,6 +1,6 @@
 use super::*;
 use norte::{CallId, Message};
-use norte_code_wire::Phase as NortePhase;
+use norte_code_wire::{Phase as NortePhase, SessionTitleSource};
 
 #[tokio::test]
 async fn costs_round_trip_and_replace_by_request_index() {
@@ -87,6 +87,7 @@ async fn interrupted_streaming_sessions_become_idle() {
             key: "session".to_owned(),
             north: SessionId::new(),
             title: None,
+            title_source: SessionTitleSource::User,
             provider: "provider".to_owned(),
             model: "model".to_owned(),
             created_at: Utc::now(),
@@ -281,6 +282,7 @@ async fn the_directory_round_trips_sessions_and_questions() {
         key: "abc".to_owned(),
         north: SessionId::new(),
         title: Some("first".to_owned()),
+        title_source: SessionTitleSource::User,
         provider: "openai".to_owned(),
         model: "gpt".to_owned(),
         created_at: Utc::now(),
@@ -386,6 +388,7 @@ async fn seed_conversation(store: &SqliteStore, key: &str, north: SessionId) -> 
             key: key.to_owned(),
             north,
             title: Some(key.to_owned()),
+            title_source: SessionTitleSource::User,
             provider: "openai".to_owned(),
             model: "gpt".to_owned(),
             created_at: Utc::now(),
@@ -570,6 +573,7 @@ async fn a_session_stored_before_the_directory_field_still_loads() {
         key: "older".to_owned(),
         north: SessionId::new(),
         title: None,
+        title_source: SessionTitleSource::User,
         provider: "openai".to_owned(),
         model: "gpt".to_owned(),
         created_at: Utc::now(),

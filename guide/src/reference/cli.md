@@ -142,7 +142,7 @@ as soon as it starts with `/`; anything else is a message.
 | `/mcp [list\|enable\|disable] [SERVER]` | List the MCP servers, or switch one. |
 | `/jobs [list\|check\|stop] [ID]` | Background jobs: list, inspect, or stop one. |
 | `/connection [list\|add\|remove] [PROVIDER]` | List, add or remove a saved provider key. |
-| `/rename [TITLE]` | Name the session; bare recomputes from the first message. |
+| `/rename [TITLE]` | Name the session. An untitled session is named from its first message by a model. |
 | `/debug` | Paths, model, catalogue, tools, servers. Never keys or URLs. |
 | `/telemetry` | Request ledger: this session, and every provider. |
 | `/menu`, `/back` | Every provider and its models, the session's own marked. |

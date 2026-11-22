@@ -2,7 +2,6 @@
 
 use crate::payloads::payload;
 use norte_code_agent::Service;
-use norte_code_wire::SessionTitleSource;
 use norte_code_wire::{ClientRequestKind, SessionKey};
 use raep_types::{AttachMode, Envelope, SessionAttach, StandardFrameType};
 use serde_json::Value;
@@ -167,7 +166,7 @@ impl NorteCodeRaepHost {
         payload(norte_code_wire::SessionSummary {
             session_id: info.session.as_str().to_owned(),
             title: info.title.clone(),
-            title_source: SessionTitleSource::User,
+            title_source: info.title_source,
             labels: BTreeMap::new(),
             pinned: false,
             archived: false,
@@ -621,11 +620,13 @@ fn by_recent_first(sessions: &mut [norte_code_wire::SessionInfo]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use norte_code_wire::SessionTitleSource;
 
     fn info(updated_at: Option<&str>, created_at: &str) -> norte_code_wire::SessionInfo {
         norte_code_wire::SessionInfo {
             session: norte_code_wire::SessionKey::new("session-1"),
             title: None,
+            title_source: SessionTitleSource::User,
             reasoning: None,
             provider: None,
             model: None,

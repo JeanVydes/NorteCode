@@ -93,8 +93,9 @@ Each agent has a unique required `name`; `description`, `origin_url` and
 | `tools` | object | see below | Web fetch, output cap and sandbox. |
 | `skills` | object | see below | Skill discovery and scripts. |
 
-Session titles are not configured: a new session's title is its first user
-message truncated to 32 characters, written once.
+Session titles are not configured: an untitled session is named by a one-shot
+internal model request on its first user message. A title chosen by the user is
+never replaced.
 
 Keys resolve from the provider's `environment_keys` (first set and
 non-blank wins), then `secrets.json` beside the config (mode 0600). There

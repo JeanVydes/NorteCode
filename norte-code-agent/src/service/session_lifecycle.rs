@@ -172,6 +172,7 @@ impl Service {
             key: key.to_string(),
             north: record.id,
             title: record.title.clone(),
+            title_source: record.title_source,
             model: record
                 .spec
                 .as_ref()

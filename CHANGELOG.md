@@ -28,6 +28,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - Shell tool output blocks are expandable. The header shows a live line count,
   and clicking the header or pressing Enter toggles between the compact window
   and every retained line.
+- An untitled session gets its name from a one-shot internal model request on
+  the first user message. The answer is parsed into a short plain title, saved
+  with a `derived` title source, and published as `SessionRenamed`. A title the
+  user chose is never replaced.
 
 ### Fixed
 
@@ -42,6 +46,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Session titles are no longer copied from the first user message. The old
+  extractive helper and its `name` error are gone; naming is model-generated.
 - The configuration reference now matches the defaults in code for
   `retry.max_delay_ms` and `confinement.workspace_only`, and documents
   `queue_mode` in the CLI-only file table.

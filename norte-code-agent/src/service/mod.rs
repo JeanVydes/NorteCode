@@ -44,6 +44,7 @@ mod session_record;
 mod session_rewind;
 mod session_state;
 mod session_stats;
+mod session_titles;
 mod skill_catalog;
 mod skills;
 mod steering;
@@ -217,6 +218,9 @@ pub struct Service {
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,
     factory: Arc<dyn ModelFactory>,
+    /// A fixed model for title requests in tests. Production builds the title
+    /// model from the session's own spec.
+    title_model: Option<Arc<dyn norte::Model>>,
     system_prompt: String,
     subagent_system_prompt: String,
     project_path: Option<PathBuf>,
