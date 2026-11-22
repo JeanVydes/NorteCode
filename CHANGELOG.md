@@ -43,6 +43,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   items render into a scratch buffer and only their visible rows are blitted.
 - The thinking indicator no longer paints over transcript rows when the view is
   scrolled away from the tail.
+- An untitled session now gets a name with reasoning models that consume their
+  whole output budget on thinking. The title request leaves room for reasoning
+  tokens instead of always returning empty.
 
 ### Changed
 
