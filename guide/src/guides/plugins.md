@@ -45,26 +45,46 @@ A plugin cannot register tools itself, change approval rules, edit prompts or
 configuration, or remove built-in tools. It only declares data, and the host
 decides what to do with it.
 
-## Planned user messages and ABI 2
+## Plugin user messages
 
-A future ABI may let a plugin ask the host to add a user-role message to a
-conversation. The plugin will not write history itself. It will attach a
-reserved `norte_code.host_effects` envelope to `ToolOutput.structured`. The host
-will remove that envelope before the result is stored, shown or sent to a model,
-then validate the request against global and per-plugin switches before
-committing a message.
+A plugin can ask the host to add a user-role message to a conversation. The
+plugin never writes history itself. It attaches a reserved
+`norte_code.host_effects` envelope to `ToolOutput.structured`. The host removes
+that envelope before the result is stored, shown or sent to a model, then
+validates the request against global and per-plugin switches before committing
+a message.
 
-Only text and media parts will be accepted. The host will check model
-modalities, convert inline media to blobs and record provenance as a
-`Part::Extension` in the `norte-code/plugin-message` namespace. A plugin without
-explicit permission will have its envelope discarded. A tool that wants to use
-this envelope must return a `ToolOutput` from a `ToolDeclaration`, because a
-`FunctionDeclaration` wraps the result again and hides the envelope from the
-host.
+Only text and media parts are accepted. The host checks model modalities,
+converts inline media to blobs and records provenance as a `Part::Extension` in
+the `norte-code/plugin-message` namespace. A plugin without explicit permission
+has its envelope discarded, and the host reports the refusal as a
+`plugin_message_rejected` event. A tool that wants to use this envelope must
+return a `ToolOutput` from a `ToolDeclaration`, because a `FunctionDeclaration`
+wraps the result again and hides the envelope from the host.
 
-This is a contract change, so it belongs to ABI 2. ABI 1 plugins keep working
-as they do today and are not recompiled by this note. The current service does
-not inject plugin messages.
+The browser plugin wraps its tool so a screenshot also produces a PNG message
+draft. The tool result still reports only the byte count, and the host drops the
+image when the model has no image input. This stays off until an agent opts in:
+
+```json
+{
+  "tools": {
+    "plugin_messages": {
+      "enabled": true,
+      "allow_media": true,
+      "max_messages_per_turn": 1,
+      "max_bytes": 1048576
+    }
+  },
+  "plugins": {
+    "browser": { "allow_user_messages": true }
+  }
+}
+```
+
+The envelope lives in `ToolOutput.structured`, which already crosses the plugin
+boundary, so the host supports it under ABI 1. Older plugins that never attach
+an envelope keep working unchanged.
 
 ## Loading and lifecycle
 
