@@ -46,6 +46,9 @@ pub(in crate::app) fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) 
         if rail.session.as_deref() != session {
             rail.set_session(session.map(str::to_owned));
         }
+        if rail.title != model.attached_title {
+            rail.set_title(model.attached_title.clone());
+        }
         let model_id = model.active_model.as_ref().map(|model| model.id.as_str());
         if rail.model.as_deref() != model_id {
             rail.model = model_id.map(str::to_owned);

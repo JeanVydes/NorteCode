@@ -46,6 +46,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - An untitled session now gets a name with reasoning models that consume their
   whole output budget on thinking. The title request leaves room for reasoning
   tokens instead of always returning empty.
+- The rail shows the session title once one is known, falling back to the session
+  id before that. A `SessionRenamed` event now reaches the rail immediately.
 
 ### Changed
 

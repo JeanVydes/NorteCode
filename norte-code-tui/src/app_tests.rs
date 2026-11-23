@@ -103,6 +103,37 @@ fn a_session_renamed_event_updates_the_list_and_attached_title() {
 }
 
 #[test]
+fn a_session_renamed_event_reaches_the_rail() {
+    let key = SessionKey::new("session_1");
+    let mut model = UiModel::detached();
+    model.active = Some(key.clone());
+    let mut tree = ui::build_tree(&model);
+    let mut commands = None;
+
+    fold(
+        &ServerEvent {
+            request_id: 1,
+            session: Some(key),
+            kind: ServerEventKind::SessionRenamed {
+                title: "Login redirect fix".to_owned(),
+            },
+        },
+        &mut tree,
+        &mut model,
+        &mut commands,
+    );
+    sync_chrome(&mut tree, &model);
+
+    assert_eq!(
+        tree.find::<ui::Rail>("rail")
+            .expect("rail")
+            .title
+            .as_deref(),
+        Some("Login redirect fix")
+    );
+}
+
+#[test]
 fn ctrl_c_copies_the_composer_selection_without_quitting() {
     let clipboard = Arc::new(FakeClipboard::default());
     let shared: Arc<dyn Clipboard> = clipboard.clone();

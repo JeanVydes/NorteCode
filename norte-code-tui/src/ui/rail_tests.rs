@@ -49,6 +49,23 @@ fn a_session_without_a_window_marks_it_unknown() {
 }
 
 #[test]
+fn the_rail_shows_the_session_title_instead_of_its_id() {
+    let model = UiModel::detached();
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    let rail = tree.find_mut::<Rail>("rail").expect("rail in tree");
+    rail.set_session(Some("session-123".to_owned()));
+    rail.set_title(Some("Login redirect fix".to_owned()));
+    let area = Rect::new(0, 0, 100, 40);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+
+    let text = painted_text(&buf, area);
+    assert!(text.contains("Login redirect fix"), "{text}");
+    assert!(!text.contains("session-123"), "{text}");
+}
+
+#[test]
 fn the_compact_button_takes_a_focus_slot() {
     let model = UiModel::detached();
     let tree = build_tree(&model);

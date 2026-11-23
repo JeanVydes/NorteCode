@@ -102,6 +102,8 @@ pub(crate) struct Rail {
     pub(crate) attachment: SessionAttachmentState,
     /// The session id, when one exists.
     pub(crate) session: Option<String>,
+    /// The session title, when the host reported one.
+    pub(crate) title: Option<String>,
     /// The provider id, when the host reported one.
     pub(crate) provider: Option<String>,
     /// The model id, when the host reported one.
@@ -142,6 +144,7 @@ impl Rail {
         Self {
             attachment: SessionAttachmentState::Disconnected,
             session: None,
+            title: None,
             provider: None,
             model: None,
             context: ContextUsage::default(),
@@ -166,6 +169,11 @@ impl Rail {
     /// Replace the session shown; `None` clears the id line.
     pub(crate) fn set_session(&mut self, session: Option<String>) {
         self.session = session;
+    }
+
+    /// Replace the title shown; `None` falls back to the session id.
+    pub(crate) fn set_title(&mut self, title: Option<String>) {
+        self.title = title;
     }
 
     /// The context the gauge currently reports.
@@ -591,7 +599,14 @@ impl View for Rail {
         let mut y = 0u16;
 
         if inner.width >= 10 {
-            y = paint_session(&mut scratch, content, y, self.session.as_deref(), theme);
+            y = paint_session(
+                &mut scratch,
+                content,
+                y,
+                self.session.as_deref(),
+                self.title.as_deref(),
+                theme,
+            );
             y = paint_model(
                 &mut scratch,
                 content,
@@ -681,6 +696,7 @@ fn paint_session(
     inner: Rect,
     y: u16,
     session: Option<&str>,
+    title: Option<&str>,
     theme: &Theme,
 ) -> u16 {
     let dim = Style::default().fg(theme.muted).bg(theme.background);
@@ -688,8 +704,8 @@ fn paint_session(
     buf.set_stringn(inner.x + 1, y, SESSION, 7, dim.add_modifier(Modifier::BOLD));
     let y = y + 1;
     let usable = usize::from(inner.width.saturating_sub(2));
-    if let Some(session) = session {
-        let chars: Vec<char> = session.chars().collect();
+    if let Some(label) = title.or(session) {
+        let chars: Vec<char> = label.chars().collect();
         let first: String = chars.iter().take(usable).collect();
         buf.set_stringn(
             inner.x + 1,
