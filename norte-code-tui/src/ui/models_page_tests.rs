@@ -61,6 +61,13 @@ fn shift_delete() -> InputEvent {
     )))
 }
 
+fn shift_backspace() -> InputEvent {
+    InputEvent::from(Event::Key(key_event_with_modifiers(
+        KeyCode::Backspace,
+        KeyModifiers::SHIFT,
+    )))
+}
+
 #[test]
 fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
     let mut tree = Tree::new(node("models", page_with_keys()));
@@ -144,4 +151,43 @@ fn plain_delete_is_left_to_the_text_input() {
         Outcome::Ignored
     );
     assert!(matches!(page.mode, Mode::Listing));
+}
+
+#[test]
+fn shift_backspace_opens_the_same_confirmation() {
+    let mut tree = Tree::new(node("models", page_with_keys()));
+    tree.focus("models");
+    tree.handle_event(&shift_backspace());
+
+    assert!(matches!(
+        tree.find::<ModelsPage>("models").map(|page| page.mode.clone()),
+        Some(Mode::ConfirmDelete { provider }) if provider == "openrouter"
+    ));
+}
+
+#[test]
+fn backspace_with_an_empty_filter_keeps_the_selection() {
+    let mut page = page_with_keys();
+    page.selected = 1;
+
+    assert_eq!(
+        page.handle_key(&key_event(KeyCode::Backspace)),
+        Outcome::Ignored
+    );
+    assert_eq!(page.selected, 1);
+    assert!(matches!(page.mode, Mode::Listing));
+}
+
+#[test]
+fn backspace_with_filter_text_still_edits_the_filter() {
+    let mut page = page_with_keys();
+    page.filter.push_str("open");
+    page.selected = 1;
+
+    assert_eq!(
+        page.handle_key(&key_event(KeyCode::Backspace)),
+        Outcome::Consumed
+    );
+    assert_eq!(page.filter, "ope");
+    assert_eq!(page.selected, 0);
 }

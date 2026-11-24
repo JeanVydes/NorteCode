@@ -38,6 +38,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `Shift+Delete` opens the provider key confirmation even when the terminal
+  reports it as `Shift+Backspace`. Backspace with an empty filter no longer
+  jumps to the first provider.
 - The key overlay shows the full `cancel` and `save` button labels again.
   Horizontal stacks now reserve each child's measured width instead of one cell.
 - Long shell output lines wrap at the console width instead of being cut off.

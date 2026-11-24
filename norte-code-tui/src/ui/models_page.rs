@@ -432,17 +432,19 @@ impl ModelsPage {
                     self.activate();
                     return Outcome::Consumed;
                 }
-                KeyCode::Delete if key.modifiers == KeyModifiers::SHIFT => {
+                KeyCode::Delete | KeyCode::Backspace if key.modifiers == KeyModifiers::SHIFT => {
                     if let Some(provider) = self.selected_provider() {
                         self.open_delete(&provider);
                     }
                     return Outcome::Consumed;
                 }
                 KeyCode::Backspace => {
-                    self.filter.pop();
-                    self.selected = 0;
-                    self.clamp_view();
-                    return Outcome::Consumed;
+                    if self.filter.pop().is_some() {
+                        self.selected = 0;
+                        self.clamp_view();
+                        return Outcome::Consumed;
+                    }
+                    return Outcome::Ignored;
                 }
                 KeyCode::Esc => {
                     if self.filter.is_empty() {
