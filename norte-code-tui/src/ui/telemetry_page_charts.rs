@@ -10,7 +10,7 @@ use terminalui::components::linechart::LineChart;
 use terminalui::{Context, Theme};
 
 use crate::telemetry::{ChartInterval, short_label};
-use crate::telemetry_series::series;
+use crate::telemetry_series::{chart_window as compute_chart_window, series};
 
 use super::{
     CHART_GAP, CHART_ROWS, CHART_SLOT, CHART_TITLES, LINE_AXIS_WIDTH, TelemetryPage, TelemetryView,
@@ -89,7 +89,6 @@ impl TelemetryPage {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub(super) fn chart_window(&self, width: u16) -> (usize, usize) {
         let Some(chart) = self
             .children
@@ -102,11 +101,7 @@ impl TelemetryPage {
         if total == 0 {
             return (0, 0);
         }
-        let cell_width = (2.0 * chart.state.x_zoom).round().clamp(1.0, 16.0) as u16;
-        let plot_width = width.saturating_sub(11).max(1);
-        let visible = usize::from(plot_width / cell_width).max(1);
-        let end = total.saturating_sub(chart.state.scroll_back).max(1);
-        (end.saturating_sub(visible), end)
+        compute_chart_window(total, chart.state.x_zoom, width, chart.state.scroll_back)
     }
 
     pub(super) fn sync_line_window(&mut self, window: (usize, usize)) {

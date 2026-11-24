@@ -30,8 +30,7 @@ pub(in crate::app) fn drain_sessions_actions(
                 if let Some(commands) = commands.as_ref() {
                     let _ = commands.try_send(UiCommand::OpenSession { session });
                 }
-                model.tab = Tab::Chat;
-                ui::sync_views(tree, model);
+                switch_to_chat(tree, model);
             }
             ui::SessionsAction::Rename { session, title } => {
                 if let Some(commands) = commands.as_ref() {
@@ -69,6 +68,10 @@ fn create_session(
     if let Some(commands) = commands {
         let _ = commands.try_send(UiCommand::CreateSession { title: None });
     }
+    switch_to_chat(tree, model);
+}
+
+fn switch_to_chat(tree: &mut terminalui::Tree, model: &mut UiModel) {
     model.tab = Tab::Chat;
     ui::sync_views(tree, model);
 }

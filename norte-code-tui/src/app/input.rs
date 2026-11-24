@@ -4,6 +4,8 @@
 mod key;
 #[path = "input/modals.rs"]
 mod modals;
+#[path = "input/navigation.rs"]
+mod navigation;
 #[path = "input/palette.rs"]
 mod palette;
 #[path = "input/selectors.rs"]
@@ -32,6 +34,7 @@ use selectors::{drain_tab_request, sync_selectors};
 
 pub(in crate::app) use key::{apply_key_intent, handle_key, open_key_prompt, set_model};
 pub(in crate::app) use modals::drain_plan_requests;
+pub(in crate::app) use navigation::{digit_switches_tab, toggle_list_focus};
 
 /// How input events are folded into the model.
 pub(in crate::app) fn poll_event(
@@ -91,17 +94,6 @@ pub(in crate::app) fn cycle_theme(tree: &mut terminalui::Tree, model: &mut UiMod
     ui::sync_theme(tree, model);
 }
 
-fn telemetry_rankings_focused(tree: &terminalui::Tree) -> bool {
-    tree.find::<ui::TelemetryPage>("telemetry")
-        .is_some_and(ui::TelemetryPage::is_leaderboard_focused)
-}
-
-pub(in crate::app) fn digit_switches_tab(tree: &terminalui::Tree, model: &UiModel) -> bool {
-    model.tab != Tab::Chat
-        && model.tab != Tab::Models
-        && !(model.tab == Tab::Telemetry && telemetry_rankings_focused(tree))
-}
-
 pub(in crate::app) fn scroll_page(tree: &mut terminalui::Tree, tab: Tab, delta: isize) {
     if tab == Tab::Telemetry {
         if let Some(page) = tree.find_mut::<ui::TelemetryPage>("telemetry") {
@@ -109,24 +101,6 @@ pub(in crate::app) fn scroll_page(tree: &mut terminalui::Tree, tab: Tab, delta: 
         }
     } else if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
         stream.scroll(delta);
-    }
-}
-
-pub(in crate::app) fn toggle_list_focus(tree: &mut terminalui::Tree, tab: Tab) {
-    // The tree would spend Tab moving focus between the charts and pagers;
-    // here it switches the page between its two lists.
-    match tab {
-        Tab::Telemetry => {
-            if let Some(page) = tree.find_mut::<ui::TelemetryPage>("telemetry") {
-                page.toggle_focus();
-            }
-        }
-        Tab::Settings => {
-            if let Some(page) = tree.find_mut::<ui::SettingsPage>("settings") {
-                page.toggle_focus();
-            }
-        }
-        Tab::Chat | Tab::Sessions | Tab::Models => {}
     }
 }
 

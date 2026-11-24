@@ -2,7 +2,7 @@
 
 use norte_code_wire::{TelemetryRecord, TelemetryReport};
 
-use super::{ChartInterval, MAX_CHART_BUCKETS, series};
+use super::{ChartInterval, MAX_CHART_BUCKETS, chart_window, series};
 
 fn record(stamp: &str, cost: f64, input: u64, output: u64, read: u64) -> TelemetryRecord {
     TelemetryRecord {
@@ -117,4 +117,15 @@ fn hour_and_day_group_finer_stamps() {
     ]);
     assert_eq!(series(Some(&data), ChartInterval::Hour).buckets.len(), 2);
     assert_eq!(series(Some(&data), ChartInterval::Day).buckets.len(), 1);
+}
+
+#[test]
+fn chart_window_clamps_and_scrolls() {
+    assert_eq!(chart_window(0, 1.0, 40, 0), (0, 0));
+    let (start, end) = chart_window(10, 1.0, 40, 0);
+    assert!(end >= start);
+    assert!(end <= 10);
+    let (start2, end2) = chart_window(10, 1.0, 40, 3);
+    assert!(end2 <= 7);
+    assert!(start2 <= end2);
 }

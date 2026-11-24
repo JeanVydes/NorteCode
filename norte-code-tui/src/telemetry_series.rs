@@ -141,6 +141,26 @@ pub(crate) fn series(
     }
 }
 
+/// Compute the visible time window of the stacked charts from the bucket
+/// count, the candle chart's zoom and scroll position. Pure, so the
+/// arithmetic can be checked without a rendered tree.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub(crate) fn chart_window(
+    total: usize,
+    x_zoom: f64,
+    width: u16,
+    scroll_back: usize,
+) -> (usize, usize) {
+    if total == 0 {
+        return (0, 0);
+    }
+    let cell_width = (2.0 * x_zoom).round().clamp(1.0, 16.0) as u16;
+    let plot_width = width.saturating_sub(11).max(1);
+    let visible = usize::from(plot_width / cell_width).max(1);
+    let end = total.saturating_sub(scroll_back).max(1);
+    (end.saturating_sub(visible), end)
+}
+
 #[cfg(test)]
 #[path = "telemetry_series_tests.rs"]
 mod tests;

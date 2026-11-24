@@ -108,6 +108,12 @@ pub(crate) struct TelemetryPage {
     #[serde(skip)]
     line_window: Option<(usize, usize)>,
     /// Reused composition surface for the stacked charts.
+    ///
+    /// The charts are painted into this off-screen buffer first and then
+    /// blitted row by row into the real frame, because the three charts
+    /// share one vertical scroll offset and are taller than the visible
+    /// area. Composing off-screen avoids redrawing and keeps the scroll
+    /// blit a single slice copy.
     #[serde(skip)]
     chart_page: Buffer,
     /// Trailing year of burned tokens, bucketed by calendar day.
