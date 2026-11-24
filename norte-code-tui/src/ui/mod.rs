@@ -1,6 +1,11 @@
 //! The view tree: header, rail, stream, composer, status strip, pages.
 
 mod app_frame;
+#[path = "chart_renderer.rs"]
+mod chart_renderer;
+#[cfg(test)]
+#[path = "chart_renderer_tests.rs"]
+mod chart_renderer_tests;
 mod chat_layout;
 mod command_palette;
 #[cfg(test)]

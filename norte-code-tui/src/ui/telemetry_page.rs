@@ -43,12 +43,12 @@ const SESSION_PAGE: usize = 4;
 const REQUEST_PAGE: usize = 6;
 /// Newest records exposed to the paginated lists and rankings.
 pub(crate) const MAX_RECORD_WINDOW: usize = 1_000;
-const CHART_SLOT: u16 = 18;
-const CHART_GAP: u16 = 2;
-const CHART_ROWS: u16 = CHART_SLOT * 3 + CHART_GAP * 2;
+pub(crate) const CHART_SLOT: u16 = 18;
+pub(crate) const CHART_GAP: u16 = 2;
+pub(crate) const CHART_ROWS: u16 = CHART_SLOT * 3 + CHART_GAP * 2;
 /// Month labels plus the seven weekday rows of the usage heatmap.
 const HEATMAP_ROWS: u16 = 8;
-const LINE_AXIS_WIDTH: u16 = 9;
+pub(crate) const LINE_AXIS_WIDTH: u16 = 9;
 const CHART_TITLES: [&str; 3] = [
     "cost · cumulative usd",
     "tokens · in + out",

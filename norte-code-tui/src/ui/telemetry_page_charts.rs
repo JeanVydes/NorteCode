@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use terminalui::components::candlechart::CandleChart;
 use terminalui::components::linechart::LineChart;
 use terminalui::{Context, Theme};
@@ -12,9 +12,8 @@ use terminalui::{Context, Theme};
 use crate::telemetry::{ChartInterval, short_label};
 use crate::telemetry_series::{chart_window as compute_chart_window, series};
 
-use super::{
-    CHART_GAP, CHART_ROWS, CHART_SLOT, CHART_TITLES, LINE_AXIS_WIDTH, TelemetryPage, TelemetryView,
-};
+use super::{CHART_GAP, CHART_ROWS, CHART_SLOT, CHART_TITLES, TelemetryPage, TelemetryView};
+use crate::ui::chart_renderer::{blit_rows, paint_slot_title, paint_time_labels};
 
 #[derive(Clone, Copy, Debug)]
 struct ChartSlotLayout {
@@ -138,34 +137,6 @@ impl TelemetryPage {
         self.line_window = Some(window);
     }
 
-    pub(super) fn paint_time_labels(
-        labels: &[String],
-        page: &mut Buffer,
-        y: u16,
-        width: u16,
-        window: (usize, usize),
-        theme: &Theme,
-    ) {
-        let (start, end) = window;
-        if start == end {
-            return;
-        }
-        let plot_width = width.saturating_sub(LINE_AXIS_WIDTH).max(1);
-        let last = end.saturating_sub(start).saturating_sub(1);
-        let style = Style::default().fg(theme.muted);
-        for index in (start..end).step_by(10) {
-            let Some(label) = labels.get(index) else {
-                continue;
-            };
-            let relative = index.saturating_sub(start);
-            let column = relative
-                .checked_mul(usize::from(plot_width.saturating_sub(1)))
-                .and_then(|value| value.checked_div(last))
-                .map_or(0, |value| u16::try_from(value).unwrap_or(0));
-            page.set_stringn(column, y, label, 5, style);
-        }
-    }
-
     pub(super) fn scroll_chart_history(&mut self, delta: isize) {
         let Some(chart) = self
             .children
@@ -200,18 +171,8 @@ impl TelemetryPage {
 
     fn paint_chart_slot(&mut self, layout: ChartSlotLayout, cx: &mut Context, theme: &Theme) {
         let page = &mut self.chart_page;
-        let bold = Style::default()
-            .fg(theme.foreground)
-            .bg(theme.background)
-            .add_modifier(Modifier::BOLD);
-        page.set_stringn(0, layout.y, layout.title, layout.title.len(), bold);
+        let body = paint_slot_title(page, layout.y, layout.area.width, layout.title, theme);
         let body_y = layout.y + 1;
-        let body = Rect {
-            x: 0,
-            y: body_y,
-            width: layout.area.width,
-            height: CHART_SLOT - 1,
-        };
         if let Some(child) = self.children.get_mut(layout.index) {
             child.view.render(body, page, cx, theme);
         }
@@ -229,7 +190,7 @@ impl TelemetryPage {
             };
         }
         if layout.index > 0 {
-            Self::paint_time_labels(
+            paint_time_labels(
                 &self.bucket_labels,
                 page,
                 body_y + CHART_SLOT - 2,
@@ -244,32 +205,6 @@ impl TelemetryPage {
             width: layout.area.width,
             height: CHART_SLOT - 1,
         });
-    }
-
-    pub(super) fn blit_chart_rows(page: &Buffer, buf: &mut Buffer, area: Rect, offset: u16) {
-        let inside = u32::from(area.x) >= u32::from(buf.area.x)
-            && u32::from(area.y) >= u32::from(buf.area.y)
-            && u32::from(area.x) + u32::from(area.width)
-                <= u32::from(buf.area.x) + u32::from(buf.area.width)
-            && u32::from(area.y) + u32::from(area.height)
-                <= u32::from(buf.area.y) + u32::from(buf.area.height);
-        if !inside {
-            return;
-        }
-        let stride = usize::from(buf.area.width);
-        let left = usize::from(area.x - buf.area.x);
-        let top = usize::from(area.y - buf.area.y);
-        let width = usize::from(area.width);
-        for row in 0..area.height {
-            let source = usize::from(row.saturating_add(offset));
-            if source >= usize::from(CHART_ROWS) {
-                break;
-            }
-            let target = (top + usize::from(row)) * stride + left;
-            let origin = source * width;
-            buf.content[target..target + width]
-                .clone_from_slice(&page.content[origin..origin + width]);
-        }
     }
 
     pub(super) fn paint_charts(
@@ -303,7 +238,7 @@ impl TelemetryPage {
             };
             self.paint_chart_slot(layout, cx, theme);
         }
-        Self::blit_chart_rows(&self.chart_page, buf, area, offset);
+        blit_rows(&self.chart_page, buf, area, offset);
         self.chart_scroll.paint(area, buf, theme, CHART_ROWS);
     }
 }
