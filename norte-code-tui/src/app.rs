@@ -59,6 +59,13 @@ enum InputKind {
     Other,
 }
 
+/// Borrowed state shared by the per-frame helpers.
+struct FrameContext<'a> {
+    tree: &'a mut terminalui::Tree,
+    metrics: &'a mut Metrics,
+    model: &'a UiModel,
+}
+
 /// Entry point. `run` renders the north star until the user quits.
 ///
 /// # Errors
@@ -111,19 +118,15 @@ pub(super) fn run() -> Result<(), crate::TuiError> {
         if overlay_clock.due(now, model.preferences.debug.enabled()) {
             redraw = true;
         }
-        prepare_debug(
-            &mut tree,
-            &mut metrics,
-            &model,
-            events.as_ref(),
-            now,
-            animating,
-        );
+        let mut frame = FrameContext {
+            tree: &mut tree,
+            metrics: &mut metrics,
+            model: &model,
+        };
+        prepare_debug(&mut frame, events.as_ref(), now, animating);
         draw_if_needed(
             &mut session,
-            &mut tree,
-            &model,
-            &mut metrics,
+            &mut frame,
             &mut frame_limiter,
             now,
             &mut redraw,
@@ -195,45 +198,45 @@ fn attach_client(
 }
 
 fn prepare_debug(
-    tree: &mut terminalui::Tree,
-    metrics: &mut Metrics,
-    model: &UiModel,
+    frame: &mut FrameContext<'_>,
     events: Option<&tokio::sync::mpsc::Receiver<ClientEvent>>,
     now: Instant,
     animating: bool,
 ) {
-    let debug = model.preferences.debug.enabled();
+    let debug = frame.model.preferences.debug.enabled();
     if debug {
-        metrics.sample_process(now);
+        frame.metrics.sample_process(now);
     }
     let queued = events.map_or(0, tokio::sync::mpsc::Receiver::len);
-    let snapshot = metrics.snapshot(now, queued, animating);
-    sync_debug_overlay(tree, &snapshot, debug);
+    let snapshot = frame.metrics.snapshot(now, queued, animating);
+    sync_debug_overlay(frame.tree, &snapshot, debug);
 }
 
 fn draw_if_needed(
     session: &mut TerminalSession,
-    tree: &mut terminalui::Tree,
-    model: &UiModel,
-    metrics: &mut Metrics,
+    frame: &mut FrameContext<'_>,
     frame_limiter: &mut FrameLimiter,
     now: Instant,
     redraw: &mut bool,
 ) -> io::Result<()> {
-    if (!*redraw && !animating(tree, model)) || !frame_limiter.allow(now) {
-        metrics.frame_skipped();
+    if (!*redraw && !animating(frame.tree, frame.model)) || !frame_limiter.allow(now) {
+        frame.metrics.frame_skipped();
         return Ok(());
     }
-    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let theme = frame
+        .model
+        .preferences
+        .catalog
+        .theme(&frame.model.preferences.theme);
     let draw_started = Instant::now();
-    session.terminal().draw(|frame| {
-        let area = frame.area();
-        frame
+    session.terminal().draw(|draw_frame| {
+        let area = draw_frame.area();
+        draw_frame
             .buffer_mut()
             .set_style(area, Style::default().bg(theme.background));
-        tree.render(area, frame.buffer_mut(), &theme);
+        frame.tree.render(area, draw_frame.buffer_mut(), &theme);
     })?;
-    metrics.frame_drawn(now, draw_started.elapsed());
+    frame.metrics.frame_drawn(now, draw_started.elapsed());
     *redraw = false;
     Ok(())
 }
