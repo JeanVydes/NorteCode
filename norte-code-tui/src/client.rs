@@ -526,7 +526,7 @@ pub(crate) fn start(config: ClientConfig) -> (Sender<UiCommand>, Receiver<Client
 /// Owns the connection; driven by commands from the interface.
 async fn connection(
     config: ClientConfig,
-    mut commands: Receiver<UiCommand>,
+    commands: Receiver<UiCommand>,
     events: Sender<ClientEvent>,
 ) {
     let reconnect = config.reconnect;
@@ -583,14 +583,49 @@ async fn connection(
     };
     let _ = events.send(ClientEvent::Sessions(sessions)).await;
     let mut session = attach_shared(&client, &events, Box::new(fresh)).await;
+    let (session_tx, session_rx) = tokio::sync::watch::channel(session.clone());
+    let (outcome_tx, mut outcome_rx) = mpsc::channel(8);
+    let command_client = Arc::clone(&client);
+    let command_api = Arc::clone(&api);
+    let command_events = events.clone();
+    let command_task = tokio::spawn(async move {
+        let mut session_rx = session_rx;
+        let mut commands = commands;
+        while let Some(command) = commands.recv().await {
+            let active = session_rx.borrow_and_update().clone();
+            if let Some(outcome) = apply_command(
+                command,
+                &active,
+                &command_client,
+                &command_api,
+                &command_events,
+            )
+            .await
+                && outcome_tx.send(outcome).await.is_err()
+            {
+                break;
+            }
+        }
+    });
     loop {
-        match stream_loop(&client, &api, &mut commands, &events, &session, &reconnect).await {
-            StreamOutcome::Retry => return,
+        let outcome = stream_loop(
+            &client,
+            &api,
+            &mut outcome_rx,
+            &events,
+            &session,
+            &reconnect,
+        )
+        .await;
+        match outcome {
+            StreamOutcome::Retry => break,
             StreamOutcome::Switch(summary) => {
                 session = attach_shared(&client, &events, summary).await;
+                let _ = session_tx.send(session.clone());
             }
         }
     }
+    command_task.abort();
 }
 
 /// Largest attachment the client will read before asking the host to store it.
@@ -830,7 +865,7 @@ enum StreamOutcome {
 async fn stream_loop(
     client: &Arc<RemoteClient>,
     api: &Arc<RestClient>,
-    commands: &mut Receiver<UiCommand>,
+    outcomes: &mut Receiver<StreamOutcome>,
     events: &Sender<ClientEvent>,
     session: &SessionKey,
     reconnect: &ReconnectConfig,
@@ -849,16 +884,7 @@ async fn stream_loop(
                     primed = true;
                 }
                 let opened_at = std::time::Instant::now();
-                match Box::pin(drive_stream(
-                    &mut stream,
-                    commands,
-                    events,
-                    client,
-                    api,
-                    session,
-                ))
-                .await
-                {
+                match Box::pin(drive_stream(&mut stream, outcomes, events)).await {
                     StreamOutcome::Switch(summary) => return StreamOutcome::Switch(summary),
                     StreamOutcome::Retry => {}
                 }
@@ -1056,18 +1082,19 @@ async fn apply_command(
     None
 }
 
+/// Pump events from the stream while command outcomes arrive on a separate
+/// channel. Command handling happens in its own task so a slow HTTP call
+/// never stalls the stream: events keep being forwarded as they arrive
+/// instead of piling up in the socket and landing all at once.
 async fn drive_stream(
     stream: &mut EventStream,
-    commands: &mut Receiver<UiCommand>,
+    outcomes: &mut Receiver<StreamOutcome>,
     events: &Sender<ClientEvent>,
-    client: &Arc<RemoteClient>,
-    api: &Arc<RestClient>,
-    session: &SessionKey,
 ) -> StreamOutcome {
     loop {
         tokio::select! {
-            Some(command) = commands.recv() => {
-                if let Some(outcome) = apply_command(command, session, client, api, events).await {
+            outcome = outcomes.recv() => {
+                if let Some(outcome) = outcome {
                     return outcome;
                 }
             }
