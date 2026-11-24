@@ -167,3 +167,35 @@ fn settings_fill_unpainted_cells_with_the_selected_theme() {
     assert_eq!(preference_gap, theme.background);
     assert_eq!(plugin_padding, theme.background);
 }
+
+#[test]
+fn plugin_marker_shows_check_when_enabled_and_x_when_disabled() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Settings;
+    model.plugins = vec![
+        PluginSummary {
+            name: "on-plugin".to_owned(),
+            enabled: true,
+            loaded: true,
+            ..PluginSummary::default()
+        },
+        PluginSummary {
+            name: "off-plugin".to_owned(),
+            enabled: false,
+            loaded: true,
+            ..PluginSummary::default()
+        },
+    ];
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    sync_views(&mut tree, &model);
+    refresh_views(&mut tree, &model);
+    let area = Rect::new(0, 0, 80, 40);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+    let text = (0..area.height)
+        .map(|y| row_text(&buf, area, y))
+        .collect::<String>();
+    assert!(text.contains("✓ on-plugin"), "{text}");
+    assert!(text.contains("x off-plugin"), "{text}");
+}

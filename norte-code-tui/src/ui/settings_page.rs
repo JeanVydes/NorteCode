@@ -237,7 +237,7 @@ impl SettingsPage {
             .iter()
             .enumerate()
             .map(|(index, plugin)| {
-                let marker = if plugin.enabled { "x" } else { "-" };
+                let marker = if plugin.enabled { "✓" } else { "x" };
                 let status = if plugin.loaded {
                     ""
                 } else if plugin.enabled {
