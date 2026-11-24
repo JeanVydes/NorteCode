@@ -194,12 +194,27 @@ fn reasoning_blocks_toggle_with_clicks() {
 }
 
 #[test]
-fn reasoning_deltas_merge_into_one_block_per_turn() {
+fn consecutive_reasoning_deltas_merge_into_one_block() {
     let mut transcript = Transcript::new();
-    transcript.push(Item::User {
-        turn: None,
-        text: "run several tools".to_string(),
-    });
+    transcript.push_reasoning_text("I should ");
+    transcript.push_reasoning_text("explore the repo.");
+    let thoughts: Vec<_> = transcript
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Reasoning { text, .. } = item {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(thoughts, vec!["I should explore the repo."]);
+}
+
+#[test]
+fn reasoning_after_text_or_a_tool_starts_a_new_block() {
+    let mut transcript = Transcript::new();
     transcript.push_reasoning_text("I should ");
     transcript.push_assistant_text("ok ", None);
     transcript.push(Item::Tool {
@@ -223,7 +238,7 @@ fn reasoning_deltas_merge_into_one_block_per_turn() {
             }
         })
         .collect();
-    assert_eq!(thoughts, vec!["I should explore the repo."]);
+    assert_eq!(thoughts, vec!["I should ", "explore the repo."]);
 }
 
 #[test]
