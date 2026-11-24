@@ -5,7 +5,7 @@
 //! does not, shows only the models that match. Providers with nothing
 //! matching are hidden. Enter on a provider toggles its models; Enter on a
 //! model selects it, asking for the provider's key first when there is no
-//! key on disk or in the environment. Shift+Space asks to remove the
+//! key on disk or in the environment. Shift+Down asks to remove the
 //! selected provider's saved key after a confirmation.
 
 use std::any::Any;
@@ -401,6 +401,12 @@ impl ModelsPage {
                     self.clamp_view();
                     return Outcome::Consumed;
                 }
+                KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
+                    if let Some(provider) = self.selected_provider() {
+                        self.open_delete(&provider);
+                    }
+                    return Outcome::Consumed;
+                }
                 KeyCode::Down | KeyCode::Char('j') => {
                     let last = self.rows().len().saturating_sub(1);
                     self.selected = (self.selected + 1).min(last);
@@ -426,12 +432,6 @@ impl ModelsPage {
                 KeyCode::End => {
                     self.selected = self.rows().len().saturating_sub(1);
                     self.clamp_view();
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char(' ') if key.modifiers == KeyModifiers::SHIFT => {
-                    if let Some(provider) = self.selected_provider() {
-                        self.open_delete(&provider);
-                    }
                     return Outcome::Consumed;
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => {

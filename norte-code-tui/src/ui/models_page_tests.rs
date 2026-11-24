@@ -54,9 +54,9 @@ fn input(code: KeyCode) -> InputEvent {
     InputEvent::from(Event::Key(key_event(code)))
 }
 
-fn shift_space() -> InputEvent {
+fn shift_down() -> InputEvent {
     InputEvent::from(Event::Key(key_event_with_modifiers(
-        KeyCode::Char(' '),
+        KeyCode::Down,
         KeyModifiers::SHIFT,
     )))
 }
@@ -65,7 +65,7 @@ fn shift_space() -> InputEvent {
 fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_space());
+    tree.handle_event(&shift_down());
 
     assert!(matches!(
         tree.find::<ModelsPage>("models").map(|page| page.mode.clone()),
@@ -93,7 +93,7 @@ fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
 fn cancelling_the_key_dialog_leaves_the_key_alone() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_space());
+    tree.handle_event(&shift_down());
     assert!(tree.focus("delete_key_cancel"));
     tree.handle_event(&input(KeyCode::Enter));
 
@@ -113,7 +113,7 @@ fn cancelling_the_key_dialog_leaves_the_key_alone() {
 fn the_confirmation_names_the_provider() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_space());
+    tree.handle_event(&shift_down());
 
     let area = Rect::new(0, 0, 80, 24);
     let mut buf = ratatui::buffer::Buffer::empty(area);
@@ -147,17 +147,28 @@ fn plain_delete_is_left_to_the_text_input() {
 }
 
 #[test]
-fn shift_space_does_not_type_into_the_filter() {
-    let mut tree = Tree::new(node("models", page_with_keys()));
+fn shift_down_does_not_move_the_selection() {
+    let mut page = page_with_keys();
+    page.selected = 1;
+    let mut tree = Tree::new(node("models", page));
     tree.focus("models");
-    tree.handle_event(&shift_space());
+    tree.handle_event(&shift_down());
 
     let page = tree.find::<ModelsPage>("models").expect("page");
-    assert_eq!(page.filter, "");
+    assert_eq!(page.selected, 1);
     assert!(matches!(
         page.mode,
-        Mode::ConfirmDelete { ref provider } if provider == "openrouter"
+        Mode::ConfirmDelete { ref provider } if provider == "anthropic"
     ));
+}
+
+#[test]
+fn plain_down_still_moves_the_selection() {
+    let mut page = page_with_keys();
+
+    page.handle_key(&key_event(KeyCode::Down));
+
+    assert_eq!(page.selected, 1);
 }
 
 #[test]
