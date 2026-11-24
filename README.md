@@ -93,9 +93,9 @@ updating, removing, enabling or disabling.
 
 Selecting a model in the TUI checks the provider's `environment_keys`, then
 `secrets.json`. If no key is available, a prompt asks for one; it is saved
-to `secrets.json` (mode 0600) and the model switch continues. Press Delete
-(or Backspace) on a model or provider to remove its stored key; a key held
-only by an environment variable is refused with the name of that variable.
+to `secrets.json` (mode 0600) and the model switch continues. Press
+Shift+Delete on a model or provider to remove its stored key after a
+confirmation. Environment variables stay set.
 
 ## License
 

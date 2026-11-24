@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use ratatui::layout::Rect;
-use terminalui::{InputEvent, Theme, Tree, node};
+use terminalui::{InputEvent, Outcome, Theme, Tree, node};
 
 use super::{Mode, ModelsAction, ModelsData, ModelsPage};
 
@@ -37,24 +37,35 @@ fn page_with_keys() -> ModelsPage {
     page
 }
 
-fn key_event(code: KeyCode) -> KeyEvent {
+fn key_event_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent {
         code,
-        modifiers: KeyModifiers::NONE,
+        modifiers,
         kind: KeyEventKind::Press,
         state: KeyEventState::empty(),
     }
+}
+
+fn key_event(code: KeyCode) -> KeyEvent {
+    key_event_with_modifiers(code, KeyModifiers::NONE)
 }
 
 fn input(code: KeyCode) -> InputEvent {
     InputEvent::from(Event::Key(key_event(code)))
 }
 
+fn shift_delete() -> InputEvent {
+    InputEvent::from(Event::Key(key_event_with_modifiers(
+        KeyCode::Delete,
+        KeyModifiers::SHIFT,
+    )))
+}
+
 #[test]
 fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&input(KeyCode::Delete));
+    tree.handle_event(&shift_delete());
 
     assert!(matches!(
         tree.find::<ModelsPage>("models").map(|page| page.mode.clone()),
@@ -82,7 +93,7 @@ fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
 fn cancelling_the_key_dialog_leaves_the_key_alone() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&input(KeyCode::Delete));
+    tree.handle_event(&shift_delete());
     assert!(tree.focus("delete_key_cancel"));
     tree.handle_event(&input(KeyCode::Enter));
 
@@ -102,7 +113,7 @@ fn cancelling_the_key_dialog_leaves_the_key_alone() {
 fn the_confirmation_names_the_provider() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&input(KeyCode::Delete));
+    tree.handle_event(&shift_delete());
 
     let area = Rect::new(0, 0, 80, 24);
     let mut buf = ratatui::buffer::Buffer::empty(area);
@@ -122,4 +133,15 @@ fn typing_d_still_filters_the_catalogue() {
     let mut page = page_with_keys();
     page.handle_key(&key_event(KeyCode::Char('d')));
     assert_eq!(page.filter, "d");
+}
+
+#[test]
+fn plain_delete_is_left_to_the_text_input() {
+    let mut page = page_with_keys();
+
+    assert_eq!(
+        page.handle_key(&key_event(KeyCode::Delete)),
+        Outcome::Ignored
+    );
+    assert!(matches!(page.mode, Mode::Listing));
 }

@@ -71,7 +71,7 @@ pub(crate) const KEY_FIELD_LABEL: &str = "key";
 pub(crate) const KEY_REQUIRED: &str = "a key is required";
 pub(crate) const KEY_SAVE: &str = "save";
 pub(crate) const KEY_SAVING: &str = "saving key...";
-pub(crate) const MODELS_KEY_HINT: &str = "Enter expands, Del removes the saved key";
+pub(crate) const MODELS_KEY_HINT: &str = "Enter expands, Shift+Delete removes the saved key";
 pub(crate) const DELETE_KEY_TITLE: &str = "delete provider key";
 
 pub(crate) fn delete_key_question(provider: &str) -> String {

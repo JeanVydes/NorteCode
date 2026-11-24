@@ -5,8 +5,8 @@
 //! does not, shows only the models that match. Providers with nothing
 //! matching are hidden. Enter on a provider toggles its models; Enter on a
 //! model selects it, asking for the provider's key first when there is no
-//! key on disk or in the environment. Delete asks to remove the selected
-//! provider's saved key after a confirmation.
+//! key on disk or in the environment. Shift+Delete asks to remove the
+//! selected provider's saved key after a confirmation.
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -432,7 +432,7 @@ impl ModelsPage {
                     self.activate();
                     return Outcome::Consumed;
                 }
-                KeyCode::Delete => {
+                KeyCode::Delete if key.modifiers == KeyModifiers::SHIFT => {
                     if let Some(provider) = self.selected_provider() {
                         self.open_delete(&provider);
                     }
