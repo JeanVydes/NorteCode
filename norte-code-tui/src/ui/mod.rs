@@ -54,11 +54,11 @@ mod telemetry_page;
 #[cfg(test)]
 #[path = "telemetry_page_tests.rs"]
 mod telemetry_page_tests;
-mod text;
 mod toast_host;
 #[cfg(test)]
 #[path = "toast_host_tests.rs"]
 mod toast_host_tests;
+mod text;
 mod transcript;
 
 use norte_code_client::config::RetentionConfig;
@@ -81,9 +81,9 @@ pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::{Rail, RailPosition};
 pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
+pub(crate) use text::clip;
 pub(crate) use settings_page::SettingsPage;
 pub(crate) use telemetry_page::TelemetryPage;
-pub(crate) use text::clip;
 pub(crate) use toast_host::ToastHost;
 pub(crate) use transcript::{Item, MessageAction, Tone, ToolState, Transcript, parse_turn};
 

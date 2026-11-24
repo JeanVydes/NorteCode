@@ -1,6 +1,7 @@
 //! Shared fixtures and helpers for the TUI tests.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use norte_code_client::config::ReconnectConfig;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use terminalui::{InputEvent, Theme, Tree};
@@ -68,4 +69,13 @@ pub(crate) fn key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
 
 pub(crate) fn input_event(code: KeyCode, modifiers: KeyModifiers) -> InputEvent {
     InputEvent::from(Event::Key(key_event(code, modifiers)))
+}
+
+pub(crate) fn reconnect_config(retry_base_ms: u64, retry_max_ms: u64) -> ReconnectConfig {
+    ReconnectConfig {
+        retry_base_ms,
+        retry_max_ms,
+        give_up_attempts: 3,
+        healthy_stream_s: 10,
+    }
 }

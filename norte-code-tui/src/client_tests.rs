@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use norte_code_client::RestClient;
-use norte_code_client::config::ReconnectConfig;
 use norte_code_wire::SessionKey;
 use tokio::sync::mpsc;
 
@@ -32,12 +31,7 @@ async fn a_refused_send_reports_send_failed() {
 
 #[test]
 fn retry_delay_doubles_from_the_configured_base_and_stops_at_the_configured_cap() {
-    let reconnect = ReconnectConfig {
-        retry_base_ms: 700,
-        retry_max_ms: 4_000,
-        give_up_attempts: 3,
-        healthy_stream_s: 10,
-    };
+    let reconnect = crate::test_support::reconnect_config(700, 4_000);
 
     assert_eq!(retry_delay(&reconnect, 0), Duration::from_millis(700));
     assert_eq!(retry_delay(&reconnect, 1), Duration::from_millis(1_400));
@@ -47,12 +41,7 @@ fn retry_delay_doubles_from_the_configured_base_and_stops_at_the_configured_cap(
 
 #[test]
 fn retry_delay_never_shifts_past_the_sixth_attempt() {
-    let reconnect = ReconnectConfig {
-        retry_base_ms: 100,
-        retry_max_ms: 100_000,
-        give_up_attempts: 3,
-        healthy_stream_s: 10,
-    };
+    let reconnect = crate::test_support::reconnect_config(100, 100_000);
 
     assert_eq!(retry_delay(&reconnect, 6), Duration::from_millis(6_400));
     assert_eq!(retry_delay(&reconnect, 20), Duration::from_millis(6_400));
