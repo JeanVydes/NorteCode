@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers};
 use terminalui::{InputEvent, Outcome, Tree, node};
 
 use super::{Mode, ModelsAction, ModelsData, ModelsPage, ProviderKeyStatus};
@@ -27,28 +27,8 @@ fn page_with_keys() -> ModelsPage {
     page
 }
 
-fn key_event_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-    KeyEvent {
-        code,
-        modifiers,
-        kind: KeyEventKind::Press,
-        state: KeyEventState::empty(),
-    }
-}
-
-fn key_event(code: KeyCode) -> KeyEvent {
-    key_event_with_modifiers(code, KeyModifiers::NONE)
-}
-
-fn input(code: KeyCode) -> InputEvent {
-    InputEvent::from(Event::Key(key_event(code)))
-}
-
 fn ctrl_d() -> InputEvent {
-    InputEvent::from(Event::Key(key_event_with_modifiers(
-        KeyCode::Char('d'),
-        KeyModifiers::CONTROL,
-    )))
+    crate::test_support::input_event(KeyCode::Char('d'), KeyModifiers::CONTROL)
 }
 
 #[test]
@@ -68,7 +48,10 @@ fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
             .is_empty()
     );
 
-    tree.handle_event(&input(KeyCode::Enter));
+    tree.handle_event(&crate::test_support::input_event(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ));
     let actions = tree
         .find_mut::<ModelsPage>("models")
         .expect("page")
@@ -83,8 +66,14 @@ fn cancelling_the_key_dialog_leaves_the_key_alone() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
     tree.handle_event(&ctrl_d());
-    tree.handle_event(&input(KeyCode::Left));
-    tree.handle_event(&input(KeyCode::Enter));
+    tree.handle_event(&crate::test_support::input_event(
+        KeyCode::Left,
+        KeyModifiers::NONE,
+    ));
+    tree.handle_event(&crate::test_support::input_event(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ));
 
     let actions = tree
         .find_mut::<ModelsPage>("models")
@@ -108,12 +97,18 @@ fn arrow_keys_move_between_the_delete_buttons() {
         tree.find::<ModelsPage>("models").expect("page").focus_id(),
         Some("delete_key_confirm")
     );
-    tree.handle_event(&input(KeyCode::Left));
+    tree.handle_event(&crate::test_support::input_event(
+        KeyCode::Left,
+        KeyModifiers::NONE,
+    ));
     assert_eq!(
         tree.find::<ModelsPage>("models").expect("page").focus_id(),
         Some("delete_key_cancel")
     );
-    tree.handle_event(&input(KeyCode::Right));
+    tree.handle_event(&crate::test_support::input_event(
+        KeyCode::Right,
+        KeyModifiers::NONE,
+    ));
     assert_eq!(
         tree.find::<ModelsPage>("models").expect("page").focus_id(),
         Some("delete_key_confirm")
@@ -125,7 +120,10 @@ fn escape_cancels_the_delete_dialog() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
     tree.handle_event(&ctrl_d());
-    tree.handle_event(&input(KeyCode::Esc));
+    tree.handle_event(&crate::test_support::input_event(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    ));
 
     let page = tree.find_mut::<ModelsPage>("models").expect("page");
     assert!(matches!(page.mode, Mode::Listing));
@@ -148,7 +146,10 @@ fn the_confirmation_names_the_provider() {
 #[test]
 fn typing_d_still_filters_the_catalogue() {
     let mut page = page_with_keys();
-    page.handle_key(&key_event(KeyCode::Char('d')));
+    page.handle_key(&crate::test_support::key_event(
+        KeyCode::Char('d'),
+        KeyModifiers::NONE,
+    ));
     assert_eq!(page.filter, "d");
 }
 
@@ -186,7 +187,10 @@ fn plain_delete_is_left_to_the_text_input() {
     let mut page = page_with_keys();
 
     assert_eq!(
-        page.handle_key(&key_event(KeyCode::Delete)),
+        page.handle_key(&crate::test_support::key_event(
+            KeyCode::Delete,
+            KeyModifiers::NONE
+        )),
         Outcome::Ignored
     );
     assert!(matches!(page.mode, Mode::Listing));
@@ -213,7 +217,7 @@ fn ctrl_delete_also_opens_the_confirmation() {
     let mut page = page_with_keys();
 
     assert_eq!(
-        page.handle_key(&key_event_with_modifiers(
+        page.handle_key(&crate::test_support::key_event(
             KeyCode::Delete,
             KeyModifiers::CONTROL,
         )),
@@ -229,7 +233,10 @@ fn ctrl_delete_also_opens_the_confirmation() {
 fn plain_down_still_moves_the_selection() {
     let mut page = page_with_keys();
 
-    page.handle_key(&key_event(KeyCode::Down));
+    page.handle_key(&crate::test_support::key_event(
+        KeyCode::Down,
+        KeyModifiers::NONE,
+    ));
 
     assert_eq!(page.selected, 1);
 }
@@ -238,7 +245,10 @@ fn plain_down_still_moves_the_selection() {
 fn plain_space_still_activates_the_selection() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&input(KeyCode::Char(' ')));
+    tree.handle_event(&crate::test_support::input_event(
+        KeyCode::Char(' '),
+        KeyModifiers::NONE,
+    ));
 
     let actions = tree
         .find_mut::<ModelsPage>("models")
@@ -255,7 +265,10 @@ fn backspace_with_an_empty_filter_keeps_the_selection() {
     page.selected = 1;
 
     assert_eq!(
-        page.handle_key(&key_event(KeyCode::Backspace)),
+        page.handle_key(&crate::test_support::key_event(
+            KeyCode::Backspace,
+            KeyModifiers::NONE
+        )),
         Outcome::Ignored
     );
     assert_eq!(page.selected, 1);
@@ -269,7 +282,10 @@ fn backspace_with_filter_text_still_edits_the_filter() {
     page.selected = 1;
 
     assert_eq!(
-        page.handle_key(&key_event(KeyCode::Backspace)),
+        page.handle_key(&crate::test_support::key_event(
+            KeyCode::Backspace,
+            KeyModifiers::NONE
+        )),
         Outcome::Consumed
     );
     assert_eq!(page.filter, "ope");

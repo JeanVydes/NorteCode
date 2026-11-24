@@ -1,8 +1,11 @@
 //! Shared fixtures and helpers for the TUI tests.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use terminalui::{Theme, Tree};
+use terminalui::{InputEvent, Theme, Tree};
+
+use crossterm::event::Event;
 
 pub(crate) fn model_info(provider: &str, id: &str) -> norte_code_wire::ModelInfo {
     norte_code_wire::ModelInfo {
@@ -52,4 +55,17 @@ pub(crate) fn provider_key_status(
             .map(|key| (*key).to_owned())
             .collect(),
     }
+}
+
+pub(crate) fn key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::empty(),
+    }
+}
+
+pub(crate) fn input_event(code: KeyCode, modifiers: KeyModifiers) -> InputEvent {
+    InputEvent::from(Event::Key(key_event(code, modifiers)))
 }

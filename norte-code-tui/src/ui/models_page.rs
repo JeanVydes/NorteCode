@@ -549,35 +549,27 @@ impl ModelsPage {
         if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.selected = self.selected.saturating_sub(1);
-                    self.clamp_view();
+                    self.select(self.selected.saturating_sub(1));
                     return Outcome::Consumed;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let last = self.last_row();
-                    self.selected = (self.selected + 1).min(last);
-                    self.clamp_view();
+                    self.select(self.selected + 1);
                     return Outcome::Consumed;
                 }
                 KeyCode::PageUp => {
-                    self.selected = self.selected.saturating_sub(self.body_rows().max(1));
-                    self.clamp_view();
+                    self.select(self.selected.saturating_sub(self.body_rows().max(1)));
                     return Outcome::Consumed;
                 }
                 KeyCode::PageDown => {
-                    let last = self.last_row();
-                    self.selected = (self.selected + self.body_rows().max(1)).min(last);
-                    self.clamp_view();
+                    self.select(self.selected + self.body_rows().max(1));
                     return Outcome::Consumed;
                 }
                 KeyCode::Home => {
-                    self.selected = 0;
-                    self.clamp_view();
+                    self.select(0);
                     return Outcome::Consumed;
                 }
                 KeyCode::End => {
-                    self.selected = self.last_row();
-                    self.clamp_view();
+                    self.select(self.last_row());
                     return Outcome::Consumed;
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => {
@@ -621,6 +613,11 @@ impl ModelsPage {
 
     fn last_row(&self) -> usize {
         self.rows().len().saturating_sub(1)
+    }
+
+    fn select(&mut self, index: usize) {
+        self.selected = index.min(self.last_row());
+        self.clamp_view();
     }
 
     fn is_expanded(&self, provider: &str) -> bool {
