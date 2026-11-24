@@ -35,6 +35,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The key overlay shows the full `cancel` and `save` button labels again.
+  Horizontal stacks now reserve each child's measured width instead of one cell.
 - Long shell output lines wrap at the console width instead of being cut off.
   The height reserved for a console counts wrapped rows, so expansion and
   scrolling stay in sync with what is painted.

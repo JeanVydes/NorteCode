@@ -100,6 +100,27 @@ fn the_rendered_value_is_masked() {
 }
 
 #[test]
+fn the_rendered_prompt_shows_full_button_labels() {
+    let mut tree = open_prompt();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
+    tree.render(buffer.area, &mut buffer, &Theme::default());
+
+    let rendered: String = buffer
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    assert!(
+        rendered.contains("cancel"),
+        "the cancel button was clipped: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("save"),
+        "the save button was clipped: {rendered:?}"
+    );
+}
+
+#[test]
 fn escape_reports_cancellation() {
     let mut tree = open_prompt();
     tree.handle_event(&key(KeyCode::Esc, KeyModifiers::NONE));
