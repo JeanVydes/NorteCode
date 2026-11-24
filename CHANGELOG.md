@@ -32,9 +32,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   the first user message. The answer is parsed into a short plain title, saved
   with a `derived` title source, and published as `SessionRenamed`. A title the
   user chose is never replaced.
-- The models page can delete a provider's saved key with `Shift+Down`, after
-  a confirmation. The host removes the stored entry and leaves environment
-  variables untouched.
+- The models page can delete a provider's saved key with `Ctrl+D`, after a
+  confirmation; `Ctrl+Delete` also works when the terminal reports it. The
+  host removes the stored entry and leaves environment variables untouched.
 
 ### Fixed
 

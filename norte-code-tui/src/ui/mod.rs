@@ -33,6 +33,7 @@ mod markdown;
 mod models_page;
 mod node_lookup;
 mod overlay_frame;
+mod panel_chrome;
 mod plan_overlay;
 mod plugins_page;
 mod question_prompt;
@@ -53,6 +54,7 @@ mod telemetry_page;
 #[cfg(test)]
 #[path = "telemetry_page_tests.rs"]
 mod telemetry_page_tests;
+mod text;
 mod toast_host;
 #[cfg(test)]
 #[path = "toast_host_tests.rs"]
@@ -71,7 +73,8 @@ pub(crate) use header::Header;
 
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt, KeyPromptAction};
 pub(crate) use key_status::invalidate_key;
-pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
+pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage, ProviderKeyStatus};
+pub(crate) use panel_chrome::rounded as panel_chrome;
 pub(crate) use plan_overlay::{PLAN_REVIEW_PREFIX, PlanOverlay, PlanReviewAction};
 pub(crate) use plugins_page::PluginsAction;
 pub(crate) use question_prompt::QuestionPrompt;
@@ -80,8 +83,9 @@ pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
 pub(crate) use settings_page::SettingsPage;
 pub(crate) use telemetry_page::TelemetryPage;
+pub(crate) use text::clip;
 pub(crate) use toast_host::ToastHost;
-pub(crate) use transcript::{Item, MessageAction, Tone, ToolState, Transcript};
+pub(crate) use transcript::{Item, MessageAction, Tone, ToolState, Transcript, parse_turn};
 
 use crate::ui_model::{Tab, UiModel};
 
@@ -92,6 +96,13 @@ use terminalui::components::statusbar::{StatusBar, StatusBarStyle};
 use self::copy::{READY, ShortcutHint};
 
 /// The chat-only bottom strip: queue, reasoning, hints and connection chip.
+fn status_bar_style(theme: &terminalui::Theme) -> StatusBarStyle {
+    StatusBarStyle {
+        background: Some(theme.secondary),
+        separator: Some(theme.border),
+    }
+}
+
 fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
     node(
         "status",
@@ -101,21 +112,22 @@ fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
                     "queue",
                     selector::Selector::new(
                         "queue",
-                        vec!["steer", "queue", "interrupt", "reject"],
-                        0,
+                        crate::ui_model::SendMode::ALL
+                            .iter()
+                            .map(|mode| mode.label())
+                            .collect(),
+                        model.preferences.send_mode.index(),
                     ),
                 ),
                 node(
                     "reasoning",
                     selector::Selector::new(
                         "reasoning",
-                        vec!["auto", "low", "medium", "high"],
-                        match model.preferences.reasoning {
-                            crate::ui_model::ReasoningLevel::Auto => 0,
-                            crate::ui_model::ReasoningLevel::Low => 1,
-                            crate::ui_model::ReasoningLevel::Medium => 2,
-                            crate::ui_model::ReasoningLevel::High => 3,
-                        },
+                        crate::ui_model::ReasoningLevel::ALL
+                            .iter()
+                            .map(|level| level.label())
+                            .collect(),
+                        model.preferences.reasoning.index(),
                     ),
                 ),
             ])
@@ -126,10 +138,7 @@ fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
                     Text::new(READY).with_style(TextStyle::default().fg(theme.success).bold()),
                 ),
             ])
-            .with_style(StatusBarStyle {
-                background: Some(theme.secondary),
-                separator: Some(theme.border),
-            }),
+            .with_style(status_bar_style(theme)),
     )
 }
 
@@ -302,9 +311,20 @@ fn update_models(tree: &mut Tree, model: &UiModel) {
     let mut key_status = std::collections::HashMap::new();
     if let Some(catalog) = model.catalog.as_ref() {
         for provider in &catalog.providers {
+            let available = match provider.key_source {
+                norte_code_wire::ProviderKeySource::Unknown => {
+                    key_status::provider_has_key(&provider.provider_id, &provider.environment_keys)
+                }
+                norte_code_wire::ProviderKeySource::Missing => false,
+                _ => true,
+            };
             key_status.insert(
                 provider.provider_id.clone(),
-                key_status::provider_has_key(&provider.provider_id, &provider.environment_keys),
+                ProviderKeyStatus {
+                    available,
+                    source: provider.key_source,
+                    environment_keys: provider.environment_keys.clone(),
+                },
             );
         }
     }
@@ -351,10 +371,7 @@ pub(crate) fn sync_theme(tree: &mut Tree, model: &UiModel) {
     tree.visit_mut(|node| match node.id.as_str() {
         "status" => {
             if let Some(bar) = node.view.as_any().downcast_mut::<StatusBar>() {
-                bar.style = StatusBarStyle {
-                    background: Some(theme.secondary),
-                    separator: Some(theme.border),
-                };
+                bar.style = status_bar_style(&theme);
             }
         }
         "hint" => {

@@ -8,6 +8,8 @@ use crate::shell::ShellArgs;
 use crate::ui;
 use crate::ui_model::{TurnState, UiModel};
 
+use super::notice;
+
 pub(in crate::app) fn fold_turn_event(
     kind: &ServerEventKind,
     tree: &mut terminalui::Tree,
@@ -47,11 +49,8 @@ pub(in crate::app) fn fold_turn_event(
         }
         if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
             stream.start_thinking();
-            stream.push(ui::Item::Notice {
-                text: "question answered".to_string(),
-                tone: ui::Tone::Neutral,
-            });
         }
+        notice(tree, "question answered".to_string(), ui::Tone::Neutral);
         return;
     }
     if let ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. } = kind {
@@ -188,12 +187,7 @@ fn fold_delta(delta: &norte_code_wire::Delta, tree: &mut terminalui::Tree, model
             }
         }
         norte_code_wire::Delta::Refusal { text, .. } => {
-            if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-                stream.push(ui::Item::Notice {
-                    text: format!("refusal · {text}"),
-                    tone: ui::Tone::Warn,
-                });
-            }
+            notice(tree, format!("refusal · {text}"), ui::Tone::Warn);
         }
         _ => {}
     }

@@ -391,6 +391,7 @@ impl Service {
     /// The catalogue with its origin, for the editor.
     pub(super) fn catalog_detail_event(&self, request_id: u64) -> EventStream {
         let catalog = self.catalog();
+        let config = self.config();
         let (plugin_providers, plugin_models) = self.lock_plugin_catalogue().clone();
         let file_providers: std::collections::BTreeSet<String> = load_catalog_raw()
             .map(|(providers, _)| providers.providers.into_keys().collect())
@@ -425,6 +426,7 @@ impl Service {
                         .filter(|model| &model.provider_id == provider_id)
                         .count(),
                     environment_keys: provider.environment_keys.clone(),
+                    key_source: config.key_source(provider_id, &provider.environment_keys),
                 },
             )
             .collect();

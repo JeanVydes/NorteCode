@@ -3,34 +3,24 @@
 use std::collections::HashMap;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use ratatui::layout::Rect;
-use terminalui::{InputEvent, Outcome, Theme, Tree, node};
+use terminalui::{InputEvent, Outcome, Tree, node};
 
-use super::{Mode, ModelsAction, ModelsData, ModelsPage};
+use super::{Mode, ModelsAction, ModelsData, ModelsPage, ProviderKeyStatus};
 
-fn model(provider: &str, id: &str) -> norte_code_wire::ModelInfo {
-    norte_code_wire::ModelInfo {
-        provider: provider.to_owned(),
-        model: id.to_owned(),
-        name: id.to_owned(),
-        description: None,
-        max_context: None,
-        max_output: None,
-        tools: false,
-        input: Vec::new(),
-        output: Vec::new(),
-        reasoning: norte_code_wire::ReasoningInfo::default(),
-        deprecated: false,
-    }
+fn file_key() -> ProviderKeyStatus {
+    crate::test_support::provider_key_status(norte_code_wire::ProviderKeySource::File, &[])
 }
 
 fn page_with_keys() -> ModelsPage {
     let mut page = ModelsPage::new();
     page.set_data(ModelsData {
-        models: vec![model("openrouter", "one"), model("anthropic", "two")],
+        models: vec![
+            crate::test_support::model_info("openrouter", "one"),
+            crate::test_support::model_info("anthropic", "two"),
+        ],
         key_status: HashMap::from([
-            ("openrouter".to_owned(), true),
-            ("anthropic".to_owned(), true),
+            ("openrouter".to_owned(), file_key()),
+            ("anthropic".to_owned(), file_key()),
         ]),
         active: None,
     });
@@ -54,10 +44,10 @@ fn input(code: KeyCode) -> InputEvent {
     InputEvent::from(Event::Key(key_event(code)))
 }
 
-fn shift_down() -> InputEvent {
+fn ctrl_d() -> InputEvent {
     InputEvent::from(Event::Key(key_event_with_modifiers(
-        KeyCode::Down,
-        KeyModifiers::SHIFT,
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL,
     )))
 }
 
@@ -65,7 +55,7 @@ fn shift_down() -> InputEvent {
 fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_down());
+    tree.handle_event(&ctrl_d());
 
     assert!(matches!(
         tree.find::<ModelsPage>("models").map(|page| page.mode.clone()),
@@ -78,7 +68,6 @@ fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
             .is_empty()
     );
 
-    assert!(tree.focus("delete_key_confirm"));
     tree.handle_event(&input(KeyCode::Enter));
     let actions = tree
         .find_mut::<ModelsPage>("models")
@@ -93,8 +82,8 @@ fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
 fn cancelling_the_key_dialog_leaves_the_key_alone() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_down());
-    assert!(tree.focus("delete_key_cancel"));
+    tree.handle_event(&ctrl_d());
+    tree.handle_event(&input(KeyCode::Left));
     tree.handle_event(&input(KeyCode::Enter));
 
     let actions = tree
@@ -110,21 +99,49 @@ fn cancelling_the_key_dialog_leaves_the_key_alone() {
 }
 
 #[test]
+fn arrow_keys_move_between_the_delete_buttons() {
+    let mut tree = Tree::new(node("models", page_with_keys()));
+    tree.focus("models");
+    tree.handle_event(&ctrl_d());
+
+    assert_eq!(
+        tree.find::<ModelsPage>("models").expect("page").focus_id(),
+        Some("delete_key_confirm")
+    );
+    tree.handle_event(&input(KeyCode::Left));
+    assert_eq!(
+        tree.find::<ModelsPage>("models").expect("page").focus_id(),
+        Some("delete_key_cancel")
+    );
+    tree.handle_event(&input(KeyCode::Right));
+    assert_eq!(
+        tree.find::<ModelsPage>("models").expect("page").focus_id(),
+        Some("delete_key_confirm")
+    );
+}
+
+#[test]
+fn escape_cancels_the_delete_dialog() {
+    let mut tree = Tree::new(node("models", page_with_keys()));
+    tree.focus("models");
+    tree.handle_event(&ctrl_d());
+    tree.handle_event(&input(KeyCode::Esc));
+
+    let page = tree.find_mut::<ModelsPage>("models").expect("page");
+    assert!(matches!(page.mode, Mode::Listing));
+    assert!(page.take_pending().is_empty());
+}
+
+#[test]
 fn the_confirmation_names_the_provider() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_down());
+    tree.handle_event(&ctrl_d());
 
-    let area = Rect::new(0, 0, 80, 24);
-    let mut buf = ratatui::buffer::Buffer::empty(area);
-    tree.render(area, &mut buf, &Theme::default());
-    let sheet = &buf;
-    let painted: String = (0..area.height)
-        .flat_map(|y| (0..area.width).map(move |x| sheet[(x, y)].symbol().to_string()))
-        .collect();
+    let sheet = crate::test_support::rendered(&mut tree);
     assert!(
-        painted.contains("Delete the saved key for openrouter?"),
-        "{painted}"
+        sheet.contains("Delete the saved key for openrouter?"),
+        "{sheet}"
     );
 }
 
@@ -133,6 +150,35 @@ fn typing_d_still_filters_the_catalogue() {
     let mut page = page_with_keys();
     page.handle_key(&key_event(KeyCode::Char('d')));
     assert_eq!(page.filter, "d");
+}
+
+#[test]
+fn an_environment_key_cannot_be_deleted() {
+    let mut page = ModelsPage::new();
+    page.set_data(ModelsData {
+        models: vec![crate::test_support::model_info("openrouter", "one")],
+        key_status: HashMap::from([(
+            "openrouter".to_owned(),
+            crate::test_support::provider_key_status(
+                norte_code_wire::ProviderKeySource::Environment,
+                &["OPENROUTER_API_KEY"],
+            ),
+        )]),
+        active: None,
+    });
+    let mut tree = Tree::new(node("models", page));
+    assert!(tree.focus("models"));
+
+    tree.handle_event(&ctrl_d());
+
+    let page = tree.find::<ModelsPage>("models").expect("page");
+    assert!(matches!(page.mode, Mode::Listing));
+    assert!(
+        tree.find_mut::<ModelsPage>("models")
+            .expect("page")
+            .take_pending()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -147,18 +193,35 @@ fn plain_delete_is_left_to_the_text_input() {
 }
 
 #[test]
-fn shift_down_does_not_move_the_selection() {
+fn ctrl_d_does_not_move_the_selection() {
     let mut page = page_with_keys();
     page.selected = 1;
     let mut tree = Tree::new(node("models", page));
     tree.focus("models");
-    tree.handle_event(&shift_down());
+    tree.handle_event(&ctrl_d());
 
     let page = tree.find::<ModelsPage>("models").expect("page");
     assert_eq!(page.selected, 1);
     assert!(matches!(
         page.mode,
         Mode::ConfirmDelete { ref provider } if provider == "anthropic"
+    ));
+}
+
+#[test]
+fn ctrl_delete_also_opens_the_confirmation() {
+    let mut page = page_with_keys();
+
+    assert_eq!(
+        page.handle_key(&key_event_with_modifiers(
+            KeyCode::Delete,
+            KeyModifiers::CONTROL,
+        )),
+        Outcome::Consumed
+    );
+    assert!(matches!(
+        page.mode,
+        Mode::ConfirmDelete { ref provider } if provider == "openrouter"
     ));
 }
 
@@ -211,4 +274,50 @@ fn backspace_with_filter_text_still_edits_the_filter() {
     );
     assert_eq!(page.filter, "ope");
     assert_eq!(page.selected, 0);
+}
+
+#[test]
+fn the_rail_names_the_environment_variable_holding_a_key() {
+    let mut page = ModelsPage::new();
+    page.set_data(ModelsData {
+        models: vec![crate::test_support::model_info("openrouter", "one")],
+        key_status: HashMap::from([(
+            "openrouter".to_owned(),
+            crate::test_support::provider_key_status(
+                norte_code_wire::ProviderKeySource::Environment,
+                &["OPENROUTER_API_KEY"],
+            ),
+        )]),
+        active: None,
+    });
+    let mut tree = Tree::new(node("models", page));
+    assert!(tree.focus("models"));
+
+    let sheet = crate::test_support::rendered(&mut tree);
+
+    assert!(sheet.contains("source   env OPENROUTER_API_KEY"), "{sheet}");
+}
+
+#[test]
+fn the_rail_shows_a_saved_key_without_naming_an_environment_variable() {
+    let mut tree = Tree::new(node("models", page_with_keys()));
+    assert!(tree.focus("models"));
+
+    let sheet = crate::test_support::rendered(&mut tree);
+
+    assert!(sheet.contains("source   saved key"), "{sheet}");
+}
+
+#[test]
+fn the_rail_shows_the_source_for_a_model_row() {
+    let mut page = page_with_keys();
+    page.expanded.insert("openrouter".to_owned());
+    page.selected = 1;
+    let mut tree = Tree::new(node("models", page));
+    assert!(tree.focus("models"));
+
+    let sheet = crate::test_support::rendered(&mut tree);
+
+    assert!(sheet.contains("provider openrouter"), "{sheet}");
+    assert!(sheet.contains("source   saved key"), "{sheet}");
 }

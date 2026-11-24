@@ -340,6 +340,29 @@ pub enum Modality {
     File,
 }
 
+/// Where a provider's key comes from, as the host resolves it.
+///
+/// Only `File` can be removed from a client: environment variables and
+/// keyring entries are not in the secrets file. `Unknown` is what an older
+/// host sends, so clients stay conservative until they hear otherwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKeySource {
+    /// The provider needs no key.
+    NotNeeded,
+    /// A set environment variable supplies the key.
+    Environment,
+    /// The 0600 secrets file supplies the key.
+    File,
+    /// The operating system keyring supplies the key.
+    Keyring,
+    /// No source currently holds a key.
+    Missing,
+    /// The host did not report a source.
+    #[default]
+    Unknown,
+}
+
 /// One provider as the editor shows it.
 ///
 /// The wire is additive: a host may carry fields this build does not know
@@ -362,6 +385,10 @@ pub struct CatalogProviderInfo {
     /// non-blank wins. A provider with none needs no key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environment_keys: Vec<String>,
+    /// Where the host found this provider's key. Defaults to `Unknown` for
+    /// hosts that predate the field.
+    #[serde(default)]
+    pub key_source: ProviderKeySource,
 }
 
 /// One model as the editor shows it.

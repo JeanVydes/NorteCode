@@ -154,7 +154,7 @@ fn parse_runtime(path: &Path, raw: &str) -> Result<CliRuntimeConfig, ConfigError
 }
 
 fn default_path() -> PathBuf {
-    Path::new("cli.json").to_path_buf()
+    Path::new(CONFIG_FILE).to_path_buf()
 }
 
 fn config_path() -> Option<PathBuf> {

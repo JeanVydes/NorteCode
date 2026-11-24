@@ -777,3 +777,178 @@ fn feedback_on_a_plan_review_sends_the_written_text() {
     }
     assert!(model.question.is_none());
 }
+
+#[test]
+fn ctrl_d_opens_and_enter_confirms_the_delete_dialog() {
+    use std::collections::HashMap;
+
+    let mut model = UiModel::detached();
+    model.tab = Tab::Models;
+    let mut tree = ui::build_tree(&model);
+    ui::sync_views(&mut tree, &model);
+    let page = tree.find_mut::<ui::ModelsPage>("models").expect("models");
+    page.set_data(ui::ModelsData {
+        models: vec![crate::test_support::model_info("openrouter", "one")],
+        key_status: HashMap::from([(
+            "openrouter".to_owned(),
+            crate::test_support::provider_key_status(norte_code_wire::ProviderKeySource::File, &[]),
+        )]),
+        active: None,
+    });
+    assert!(tree.focus("models"));
+
+    let (send, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(send);
+    let mut events: Option<mpsc::Receiver<ClientEvent>> = None;
+    let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    handle_key(
+        &mut tree,
+        ctrl_d,
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+    assert_eq!(
+        tree.focused_id(),
+        Some("delete_key_confirm"),
+        "{}",
+        tree.inspect_outline()
+    );
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    handle_key(
+        &mut tree,
+        enter,
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+    match commands_rx.try_recv() {
+        Ok(UiCommand::DeleteSecret { provider }) => assert_eq!(provider, "openrouter"),
+        other => panic!("unexpected command: {other:?}"),
+    }
+    assert!(
+        !tree
+            .find::<ui::ModelsPage>("models")
+            .expect("models")
+            .confirming_delete()
+    );
+}
+
+#[test]
+fn tab_and_arrows_navigate_the_delete_dialog_before_enter() {
+    use std::collections::HashMap;
+
+    let mut model = UiModel::detached();
+    model.tab = Tab::Models;
+    let mut tree = ui::build_tree(&model);
+    ui::sync_views(&mut tree, &model);
+    tree.find_mut::<ui::ModelsPage>("models")
+        .expect("models")
+        .set_data(ui::ModelsData {
+            models: vec![crate::test_support::model_info("openrouter", "one")],
+            key_status: HashMap::from([(
+                "openrouter".to_owned(),
+                crate::test_support::provider_key_status(
+                    norte_code_wire::ProviderKeySource::File,
+                    &[],
+                ),
+            )]),
+            active: None,
+        });
+
+    let (send, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(send);
+    let mut events: Option<mpsc::Receiver<ClientEvent>> = None;
+    let mut press = |tree: &mut Tree, key: KeyEvent| {
+        handle_key(tree, key, &mut commands, &mut events, &mut model, None);
+    };
+
+    press(
+        &mut tree,
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(
+        tree.find::<ui::ModelsPage>("models")
+            .expect("models")
+            .focus_id(),
+        Some("delete_key_confirm")
+    );
+
+    press(&mut tree, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        tree.find::<ui::ModelsPage>("models")
+            .expect("models")
+            .focus_id(),
+        Some("delete_key_cancel")
+    );
+    press(&mut tree, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(
+        tree.find::<ui::ModelsPage>("models")
+            .expect("models")
+            .focus_id(),
+        Some("delete_key_confirm")
+    );
+    press(&mut tree, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    press(&mut tree, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(commands_rx.try_recv().is_err());
+    assert!(
+        !tree
+            .find::<ui::ModelsPage>("models")
+            .expect("models")
+            .confirming_delete()
+    );
+}
+
+#[test]
+fn deleting_an_environment_key_shows_a_toast() {
+    use std::collections::HashMap;
+
+    let mut model = UiModel::detached();
+    model.tab = Tab::Models;
+    let mut tree = ui::build_tree(&model);
+    ui::sync_views(&mut tree, &model);
+    tree.find_mut::<ui::ModelsPage>("models")
+        .expect("models")
+        .set_data(ui::ModelsData {
+            models: vec![crate::test_support::model_info("openrouter", "one")],
+            key_status: HashMap::from([(
+                "openrouter".to_owned(),
+                crate::test_support::provider_key_status(
+                    norte_code_wire::ProviderKeySource::Environment,
+                    &["OPENROUTER_API_KEY"],
+                ),
+            )]),
+            active: None,
+        });
+    assert!(tree.focus("models"));
+
+    let (send, mut commands_rx) = mpsc::channel(4);
+    let mut commands = Some(send);
+    let mut events: Option<mpsc::Receiver<ClientEvent>> = None;
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+
+    assert!(
+        tree.find::<ui::ToastHost>("toast")
+            .expect("toast")
+            .is_active()
+    );
+    let painted = crate::test_support::rendered(&mut tree);
+    assert!(painted.contains("only saved keys can be removed"));
+    assert!(
+        !tree
+            .find::<ui::ModelsPage>("models")
+            .expect("models")
+            .confirming_delete()
+    );
+    assert!(commands_rx.try_recv().is_err());
+}

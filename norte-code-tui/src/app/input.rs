@@ -30,7 +30,7 @@ use modals::{drain_plan_review, drain_question_answer};
 use palette::drain_palette;
 use selectors::{drain_tab_request, sync_selectors};
 
-pub(in crate::app) use key::{apply_key_intent, env_keys, handle_key, open_key_prompt, set_model};
+pub(in crate::app) use key::{apply_key_intent, handle_key, open_key_prompt, set_model};
 pub(in crate::app) use modals::drain_plan_requests;
 
 /// How input events are folded into the model.

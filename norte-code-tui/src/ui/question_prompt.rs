@@ -12,7 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
 
-use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius};
+use terminalui::components::chrome::Padding;
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
 use crate::answer::QuestionAnswer;
@@ -357,21 +357,14 @@ impl View for QuestionPrompt {
         let y = area.y + (area.height.saturating_sub(height)) / 2;
         let panel = Rect::new(x, y, width, height);
 
-        let chrome = Chrome {
-            border: Some(Border {
-                set: BorderSet::Rounded,
-                color: Some(theme.accent),
-                radius: Radius::Small,
-            }),
-            background: Some(theme.secondary),
-            radius: Radius::Small,
-            padding: Padding {
+        let chrome = super::panel_chrome(
+            theme.accent,
+            Some(theme.secondary),
+            Padding {
                 horizontal: 2,
                 vertical: 1,
             },
-            border_gradient: None,
-            fill_gradient: None,
-        };
+        );
         let inner = terminalui::components::chrome::draw_box(buf, panel, &chrome, theme);
         let mut row = Self::paint_header(inner, buf, &prompt_lines, theme);
         row = self.paint_options(inner, buf, row, theme);

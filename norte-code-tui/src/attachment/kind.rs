@@ -49,6 +49,16 @@ impl AttachmentKind {
         }
     }
 
+    /// The fixed slot this kind occupies in attachment counts.
+    pub(crate) const fn slot(self) -> usize {
+        match self {
+            Self::Image => 0,
+            Self::File => 1,
+            Self::Audio => 2,
+            Self::Video => 3,
+        }
+    }
+
     /// Classify a media type using the host's rules.
     ///
     /// The client helper also accepts `application/json`, but the host

@@ -341,7 +341,7 @@ impl Composer {
             let Some(kind) = chip.kind().attachment() else {
                 continue;
             };
-            counts[attachment_slot(kind)] += 1;
+            counts[kind.slot()] += 1;
         }
         for file in files {
             let result = (|| {
@@ -351,7 +351,7 @@ impl Composer {
             })();
             match result {
                 Ok((mime, kind)) => {
-                    let slot = attachment_slot(kind);
+                    let slot = kind.slot();
                     counts[slot] += 1;
                     let width = ChipLabel::uploaded(kind, counts[slot])
                         .as_str()
@@ -441,15 +441,6 @@ impl Composer {
             KeyCode::Down if self.caret_on_last_line() => self.recall_newer(),
             _ => false,
         }
-    }
-}
-
-fn attachment_slot(kind: AttachmentKind) -> usize {
-    match kind {
-        AttachmentKind::Image => 0,
-        AttachmentKind::File => 1,
-        AttachmentKind::Audio => 2,
-        AttachmentKind::Video => 3,
     }
 }
 

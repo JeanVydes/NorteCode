@@ -6,7 +6,7 @@ use crate::client::UiCommand;
 use crate::ui;
 use crate::ui_model::{Tab, UiModel};
 
-use super::super::input::{env_keys, open_key_prompt, set_model};
+use super::super::input::{open_key_prompt, set_model};
 
 /// Drain the sessions page's pending actions into the client.
 pub(in crate::app) fn drain_sessions_actions(
@@ -205,11 +205,11 @@ pub(in crate::app) fn drain_models_actions(
                 provider,
                 model: model_id,
             } => {
-                let keys = env_keys(model, &provider);
+                let keys = model.environment_keys(&provider);
                 open_key_prompt(tree, &provider, Some(model_id), &keys);
             }
             ui::ModelsAction::AskKeyForExpand { provider } => {
-                let keys = env_keys(model, &provider);
+                let keys = model.environment_keys(&provider);
                 open_key_prompt(tree, &provider, None, &keys);
             }
             ui::ModelsAction::ToggleExpand { provider } => {

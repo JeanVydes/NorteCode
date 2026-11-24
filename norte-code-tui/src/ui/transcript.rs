@@ -120,7 +120,7 @@ pub(crate) enum Item {
     },
 }
 
-fn parse_turn(turn_id: Option<&str>) -> Option<u64> {
+pub(crate) fn parse_turn(turn_id: Option<&str>) -> Option<u64> {
     turn_id.and_then(|id| id.strip_prefix("turn_").unwrap_or(id).parse().ok())
 }
 
@@ -612,13 +612,7 @@ impl Transcript {
         }
         self.push(Item::Assistant {
             text: text.to_string(),
-            turn: turn.and_then(|turn| {
-                turn.id
-                    .strip_prefix("turn_")
-                    .unwrap_or(&turn.id)
-                    .parse()
-                    .ok()
-            }),
+            turn: turn.and_then(|turn| crate::ui::parse_turn(Some(&turn.id))),
         });
     }
 

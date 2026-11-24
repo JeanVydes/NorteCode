@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use norte_code_wire::ProviderKeySource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -449,6 +450,20 @@ impl Agent {
         match &self.keys {
             Some(keys) => keys.known(provider, environment_keys),
             None => crate::keys::environment_value(environment_keys),
+        }
+    }
+
+    /// Where this provider's key is stored, for clients deciding what can be
+    /// removed. Environment values are never part of the secrets file.
+    #[must_use]
+    pub fn key_source(&self, provider: &str, environment_keys: &[String]) -> ProviderKeySource {
+        match &self.keys {
+            Some(keys) => keys.source(provider, environment_keys),
+            None if environment_keys.is_empty() => ProviderKeySource::NotNeeded,
+            None if crate::keys::environment_value(environment_keys).is_some() => {
+                ProviderKeySource::Environment
+            }
+            None => ProviderKeySource::Missing,
         }
     }
 }

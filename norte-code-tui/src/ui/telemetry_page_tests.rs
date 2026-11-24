@@ -407,14 +407,7 @@ fn the_chart_composition_buffer_is_reused() {
 fn both_line_charts_draw_the_time_axis() {
     let (mut tree, _, theme) = chart_tree();
     let area = render_charts(&mut tree, &theme, 70);
-    let mut buf = Buffer::empty(area);
-    tree.render(area, &mut buf, &theme);
-    let mut painted = String::new();
-    for y in 0..area.height {
-        for x in 0..area.width {
-            painted.push_str(buf[(x, y)].symbol());
-        }
-    }
+    let painted = crate::test_support::rendered_in(&mut tree, area, &theme);
 
     assert!(painted.match_indices("09:00").count() >= 3);
 }

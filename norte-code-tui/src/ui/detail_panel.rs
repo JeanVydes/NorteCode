@@ -8,7 +8,7 @@ use ratatui::style::{Modifier, Style};
 use serde::Serialize;
 
 use terminalui::components::badge::{Badge, BadgeVariant};
-use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius, draw_box};
+use terminalui::components::chrome::{Padding, draw_box};
 use terminalui::components::separator::Separator;
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
@@ -112,21 +112,14 @@ impl View for DetailPanel {
         if area.width < 8 || area.height < 3 {
             return;
         }
-        let chrome = Chrome {
-            border: Some(Border {
-                set: BorderSet::Rounded,
-                color: Some(theme.border),
-                radius: Radius::Small,
-            }),
-            background: None,
-            radius: Radius::Small,
-            padding: Padding {
+        let chrome = super::panel_chrome(
+            theme.border,
+            None,
+            Padding {
                 horizontal: 0,
                 vertical: 0,
             },
-            border_gradient: None,
-            fill_gradient: None,
-        };
+        );
         let inner = draw_box(buf, area, &chrome, theme);
         let mut y = inner.y;
         let title = &self.title;

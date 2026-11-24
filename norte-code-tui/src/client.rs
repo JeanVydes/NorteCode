@@ -22,6 +22,7 @@ use crate::attachment::{AttachmentSource, PreparedAttachment};
 use crate::client_error::ClientError;
 use crate::config::ClientConfig;
 use crate::shared_telemetry::SharedTelemetry;
+use serde::Serialize;
 
 /// Events the connection reports to the interface.
 #[derive(Clone, Debug)]
@@ -239,7 +240,7 @@ pub(crate) enum UiCommand {
 }
 
 /// A plugin operation the host can do for us.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) enum PluginOp {
     /// Install a plugin from a git repository, optionally one package of it.
     Install {
@@ -710,7 +711,7 @@ async fn fork_session(
     turn: Option<u64>,
     events: &Sender<ClientEvent>,
 ) {
-    let id = turn.map(|turn| format!("turn_{turn}"));
+    let id = turn.map(turn_id);
     match api.fork(session.as_str(), id.as_deref(), None).await {
         Ok(forked) => {
             // The fork is a real session in the host's list; find its summary
@@ -759,10 +760,7 @@ async fn rewind_session(
             .await;
         return;
     };
-    match api
-        .rewind(session.as_str(), &format!("turn_{turn}"), true)
-        .await
-    {
+    match api.rewind(session.as_str(), &turn_id(turn), true).await {
         Ok(rewound) => {
             let _ = events
                 .send(ClientEvent::Notice {
@@ -1040,8 +1038,10 @@ async fn apply_command(
             delete_secret(api, events, &provider).await;
         }
         UiCommand::SetReasoning { session, effort } => {
-            let reasoning = match effort.as_str() {
-                "low" | "medium" | "high" => norte_code_wire::Reasoning::Effort { effort },
+            let reasoning = match crate::ui_model::ReasoningLevel::from_label(&effort) {
+                Some(level) if level != crate::ui_model::ReasoningLevel::Auto => {
+                    norte_code_wire::Reasoning::Effort { effort }
+                }
                 _ => norte_code_wire::Reasoning::Automatic,
             };
             let _ = api
@@ -1086,3 +1086,7 @@ async fn drive_stream(
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+fn turn_id(turn: u64) -> String {
+    format!("turn_{turn}")
+}

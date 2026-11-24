@@ -38,6 +38,9 @@ mod usage_calendar;
 
 pub use tui_error::TuiError;
 
+#[cfg(test)]
+mod test_support;
+
 /// Turns the TUI on and serves until it exits, or reports why it cannot.
 ///
 /// # Errors

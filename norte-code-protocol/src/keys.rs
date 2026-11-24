@@ -19,6 +19,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use norte_code_wire::ProviderKeySource;
+
 use crate::config::{ApiKey, ConfigError, atomic_write_with, user_config_path};
 
 /// Where a typed key was stored.
@@ -76,6 +78,9 @@ pub trait KeyStore: Send + Sync + fmt::Debug {
     /// keyring but was never used this run does not unlock it. An empty
     /// `environment_keys` list returns the empty key a local endpoint uses.
     fn known(&self, provider: &str, environment_keys: &[String]) -> Option<ApiKey>;
+
+    /// Where this provider's key currently comes from.
+    fn source(&self, provider: &str, environment_keys: &[String]) -> ProviderKeySource;
 
     /// Saves a key the person typed.
     ///
@@ -250,6 +255,19 @@ impl KeyStore for FileKeyStore {
         }
         let path = secrets_path()?;
         read_secret(&path, provider)
+    }
+
+    fn source(&self, provider: &str, environment_keys: &[String]) -> ProviderKeySource {
+        if environment_keys.is_empty() {
+            return ProviderKeySource::NotNeeded;
+        }
+        if environment_value(environment_keys).is_some() {
+            return ProviderKeySource::Environment;
+        }
+        match secrets_path().and_then(|path| read_secret(&path, provider)) {
+            Some(_) => ProviderKeySource::File,
+            None => ProviderKeySource::Missing,
+        }
     }
 
     fn save(&self, provider: &str, key: &str) -> Result<KeyStorage, KeyStoreError> {

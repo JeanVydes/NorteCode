@@ -125,7 +125,8 @@ impl TelemetryPage {
                                 node("time", TableCell::text(time.to_owned()).with_weight(3)),
                                 node(
                                     "model",
-                                    TableCell::text(clip(&record.model, 20)).with_weight(5),
+                                    TableCell::text(crate::ui::clip(&record.model, 20))
+                                        .with_weight(5),
                                 ),
                                 node(
                                     "status",
@@ -169,9 +170,9 @@ impl TelemetryPage {
                 || vec![Field::new("no request", "select a row")],
                 |record| {
                     vec![
-                        Field::new("id", clip(&record.id, 34)),
-                        Field::new("model", clip(&record.model, 34)),
-                        Field::new("provider", clip(&record.provider, 34)),
+                        Field::new("id", crate::ui::clip(&record.id, 34)),
+                        Field::new("model", crate::ui::clip(&record.model, 34)),
+                        Field::new("provider", crate::ui::clip(&record.provider, 34)),
                         Field::new("status", status_label(record.status)),
                         Field::new("started", record.started_at.clone()),
                         Field::new("duration", format!("{} ms", record.duration_ms)),
@@ -319,7 +320,7 @@ impl TelemetryPage {
                 buf.set_stringn(
                     area.x + 1,
                     y,
-                    clip(id, usize::from(area.width.saturating_sub(2))),
+                    crate::ui::clip(id, usize::from(area.width.saturating_sub(2))),
                     usize::from(area.width.saturating_sub(2)),
                     Style::default().fg(theme.foreground),
                 );
@@ -343,13 +344,4 @@ fn status_label(status: norte_code_wire::RequestStatus) -> &'static str {
         norte_code_wire::RequestStatus::Error => "failed",
         norte_code_wire::RequestStatus::Cancelled => "cancelled",
     }
-}
-
-fn clip(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_owned();
-    }
-    let mut out: String = text.chars().take(limit.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }

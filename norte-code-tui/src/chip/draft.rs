@@ -252,7 +252,7 @@ impl Draft {
             let Some(kind) = chip.kind().attachment() else {
                 continue;
             };
-            let slot = attachment_slot(kind);
+            let slot = kind.slot();
             counts[slot] += 1;
             chip.set_label(ChipLabel::uploaded(kind, counts[slot]));
         }
@@ -315,13 +315,4 @@ fn merge_text(segments: Vec<Segment>) -> Vec<Segment> {
         merged.push(segment);
     }
     merged
-}
-
-fn attachment_slot(kind: AttachmentKind) -> usize {
-    match kind {
-        AttachmentKind::Image => 0,
-        AttachmentKind::File => 1,
-        AttachmentKind::Audio => 2,
-        AttachmentKind::Video => 3,
-    }
 }

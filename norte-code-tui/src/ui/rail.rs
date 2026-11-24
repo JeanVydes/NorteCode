@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use terminalui::components::badge::{Badge, BadgeVariant};
 use terminalui::components::button::{Button, ButtonVariant};
-use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius, draw_box};
+use terminalui::components::chrome::{Padding, draw_box};
 use terminalui::components::gauge::{Gauge, GaugeStyle};
 use terminalui::components::stat::Stat;
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
@@ -560,21 +560,14 @@ impl View for Rail {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
-        let chrome = Chrome {
-            border: Some(Border {
-                set: BorderSet::Rounded,
-                color: Some(theme.border),
-                radius: Radius::Small,
-            }),
-            background: None,
-            radius: Radius::Small,
-            padding: Padding {
+        let chrome = super::panel_chrome(
+            theme.border,
+            None,
+            Padding {
                 horizontal: 0,
                 vertical: 0,
             },
-            border_gradient: None,
-            fill_gradient: None,
-        };
+        );
         let inner = draw_box(buf, area, &chrome, theme);
         self.area = area;
         self.inner = inner;

@@ -2,6 +2,7 @@
 
 use std::any::Any;
 
+use norte_code_wire::ProviderKeySource;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use serde::Serialize;
@@ -71,18 +72,40 @@ pub(crate) const KEY_FIELD_LABEL: &str = "key";
 pub(crate) const KEY_REQUIRED: &str = "a key is required";
 pub(crate) const KEY_SAVE: &str = "save";
 pub(crate) const KEY_SAVING: &str = "saving key...";
-pub(crate) const MODELS_KEY_HINT: &str = "Enter expands, Shift+Down removes the saved key";
+pub(crate) const MODELS_KEY_HINT: &str = "Enter expands, Ctrl+D removes the saved key";
 pub(crate) const DELETE_KEY_TITLE: &str = "delete provider key";
 
 pub(crate) fn delete_key_question(provider: &str) -> String {
     format!("Delete the saved key for {provider}? Environment variables stay set.")
 }
 
+fn environment_key_names(environment_keys: &[String]) -> String {
+    environment_keys.join(" or ")
+}
+
 pub(crate) fn key_expectation(environment_keys: &[String]) -> String {
     if environment_keys.is_empty() {
         "this provider expects an API key".to_owned()
     } else {
-        format!("expects {}", environment_keys.join(" or "))
+        format!("expects {}", environment_key_names(environment_keys))
+    }
+}
+
+/// How the rail describes where a provider's key comes from.
+pub(crate) fn key_source_label(source: ProviderKeySource, environment_keys: &[String]) -> String {
+    match source {
+        ProviderKeySource::Environment if environment_keys.is_empty() => "env".to_owned(),
+        ProviderKeySource::Environment => {
+            format!("env {}", environment_key_names(environment_keys))
+        }
+        ProviderKeySource::File => "saved key".to_owned(),
+        ProviderKeySource::Keyring => "keyring".to_owned(),
+        ProviderKeySource::NotNeeded => "not needed".to_owned(),
+        ProviderKeySource::Missing if environment_keys.is_empty() => NONE.to_owned(),
+        ProviderKeySource::Missing => {
+            format!("env {} (not set)", environment_key_names(environment_keys))
+        }
+        ProviderKeySource::Unknown => "unknown".to_owned(),
     }
 }
 
@@ -90,6 +113,16 @@ pub(crate) const ASK_USER: &str = "ask_user";
 pub(crate) const ANSWER: &str = "answer";
 pub(crate) const PLAN_REVIEW: &str = "plan review";
 pub(crate) const FEEDBACK: &str = "feedback";
+
+fn hint_styles(theme: &Theme) -> (KbdStyle, TextStyle) {
+    (
+        KbdStyle {
+            background: Some(theme.secondary),
+            foreground: Some(theme.muted),
+        },
+        TextStyle::default().fg(theme.muted),
+    )
+}
 
 /// A row of key caps and labels, used for the status strip hints.
 #[derive(Serialize)]
@@ -99,11 +132,7 @@ pub(crate) struct ShortcutHint {
 
 impl ShortcutHint {
     pub(crate) fn chat(theme: &Theme) -> Self {
-        let cap = KbdStyle {
-            background: Some(theme.secondary),
-            foreground: Some(theme.muted),
-        };
-        let label = TextStyle::default().fg(theme.muted);
+        let (cap, label) = hint_styles(theme);
         let children = vec![
             node("key_tabs", Kbd::new("Alt+0-9").with_style(cap.clone())),
             node("label_tabs", Text::new(TAB_HINT).with_style(label)),
@@ -116,11 +145,7 @@ impl ShortcutHint {
     }
 
     pub(crate) fn restyle(&mut self, theme: &Theme) {
-        let cap = KbdStyle {
-            background: Some(theme.secondary),
-            foreground: Some(theme.muted),
-        };
-        let label = TextStyle::default().fg(theme.muted);
+        let (cap, label) = hint_styles(theme);
         for child in &mut self.children {
             if let Some(kbd) = child.view.as_any().downcast_mut::<Kbd>() {
                 kbd.style = cap.clone();

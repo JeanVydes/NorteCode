@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
-use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius, draw_box};
+use terminalui::components::chrome::{Padding, draw_box};
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
 use crate::frame_limiter::FRAME_RATE_CAP;
@@ -160,21 +160,14 @@ impl View for DebugOverlay {
                 }
             }
         }
-        let chrome = Chrome {
-            border: Some(Border {
-                set: BorderSet::Rounded,
-                color: Some(theme.border),
-                radius: Radius::Small,
-            }),
-            background: Some(theme.background),
-            radius: Radius::Small,
-            padding: Padding {
+        let chrome = super::panel_chrome(
+            theme.border,
+            Some(theme.background),
+            Padding {
                 horizontal: 0,
                 vertical: 0,
             },
-            border_gradient: None,
-            fill_gradient: None,
-        };
+        );
         let inner = draw_box(buf, box_rect, &chrome, theme);
         buf.set_stringn(
             inner.x + 1,

@@ -7,9 +7,43 @@ use crate::config::ClientConfig;
 use crate::ui;
 use crate::ui_model::{SessionAttachmentState, Tab, TurnState, UiModel};
 
-use super::super::event_fold::toast;
+use super::super::event_fold::{notice, toast};
 use super::palette::handle_palette_key;
 use super::{cycle_theme, digit_switches_tab, scroll_page, settle_input, toggle_list_focus};
+
+fn models_page(tree: &terminalui::Tree) -> Option<&ui::ModelsPage> {
+    tree.find::<ui::ModelsPage>("models")
+}
+
+fn models_page_mut(tree: &mut terminalui::Tree) -> Option<&mut ui::ModelsPage> {
+    tree.find_mut::<ui::ModelsPage>("models")
+}
+
+fn switch_tab(tree: &mut terminalui::Tree, model: &mut UiModel, tab: Tab) {
+    model.tab = tab;
+    ui::sync_views(tree, model);
+}
+
+fn toggle_delete_choice(tree: &mut terminalui::Tree, model: &UiModel) -> bool {
+    if model.tab != Tab::Models || !models_page(tree).is_some_and(ui::ModelsPage::confirming_delete)
+    {
+        return false;
+    }
+    if let Some(page) = models_page_mut(tree) {
+        page.toggle_dialog_choice();
+    }
+    true
+}
+
+fn warn_about_unremovable_key(tree: &mut terminalui::Tree, model: &UiModel) -> bool {
+    if model.tab != Tab::Models
+        || models_page(tree).is_some_and(ui::ModelsPage::can_delete_selected_key)
+    {
+        return false;
+    }
+    toast(tree, "only saved keys can be removed", ui::Tone::Warn);
+    true
+}
 
 fn overlay_owns_enter(tree: &terminalui::Tree) -> bool {
     let question_open = tree
@@ -37,6 +71,18 @@ pub(in crate::app) fn handle_key(
     if handle_palette_key(tree, key, commands, model) {
         return false;
     }
+    if key.modifiers == KeyModifiers::CONTROL
+        && matches!(key.code, KeyCode::Char('d') | KeyCode::Delete)
+        && warn_about_unremovable_key(tree, model)
+    {
+        return false;
+    }
+    if key.modifiers == KeyModifiers::NONE
+        && key.code == KeyCode::Tab
+        && toggle_delete_choice(tree, model)
+    {
+        return false;
+    }
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             let copied = tree
@@ -52,13 +98,11 @@ pub(in crate::app) fn handle_key(
             pass_to_tree = false;
         }
         (KeyModifiers::CONTROL, KeyCode::Tab) => {
-            model.tab = model.tab.next();
-            ui::sync_views(tree, model);
+            switch_tab(tree, model, model.tab.next());
             pass_to_tree = false;
         }
         (KeyModifiers::CONTROL | KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::BackTab) => {
-            model.tab = model.tab.previous();
-            ui::sync_views(tree, model);
+            switch_tab(tree, model, model.tab.previous());
             pass_to_tree = false;
         }
         (KeyModifiers::NONE, KeyCode::PageUp) => {
@@ -98,15 +142,13 @@ pub(in crate::app) fn handle_key(
         }
         (KeyModifiers::CONTROL | KeyModifiers::ALT, KeyCode::Char(digit)) => {
             if let Some(tab) = Tab::from_digit(digit) {
-                model.tab = tab;
-                ui::sync_views(tree, model);
+                switch_tab(tree, model, tab);
                 pass_to_tree = false;
             }
         }
         (KeyModifiers::NONE, KeyCode::Char(digit)) if digit_switches_tab(tree, model) => {
             if let Some(tab) = Tab::from_digit(digit) {
-                model.tab = tab;
-                ui::sync_views(tree, model);
+                switch_tab(tree, model, tab);
                 pass_to_tree = false;
             }
         }
@@ -188,21 +230,6 @@ pub(in crate::app) fn set_model(
     }
 }
 
-/// The environment keys the provider names in the catalogue.
-pub(in crate::app) fn env_keys(model: &UiModel, provider: &str) -> Vec<String> {
-    model
-        .catalog
-        .as_ref()
-        .and_then(|catalog| {
-            catalog
-                .providers
-                .iter()
-                .find(|p| p.provider_id == provider)
-                .map(|p| p.environment_keys.clone())
-        })
-        .unwrap_or_default()
-}
-
 /// Ask for the provider's key, remembering what to do once saved.
 pub(in crate::app) fn open_key_prompt(
     tree: &mut terminalui::Tree,
@@ -237,21 +264,19 @@ fn send_current_prompt(
         return;
     }
     let SessionAttachmentState::Attached = model.attachment else {
-        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-            stream.push(ui::Item::Notice {
-                text: "raep not attached; message not sent (Ctrl+R retries)".into(),
-                tone: ui::Tone::Warn,
-            });
-        }
+        notice(
+            tree,
+            "raep not attached; message not sent (Ctrl+R retries)".into(),
+            ui::Tone::Warn,
+        );
         return;
     };
     if !model.active_session_has_model() {
-        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-            stream.push(ui::Item::Notice {
-                text: "no model selected; message not sent (3 Models, Enter to choose)".into(),
-                tone: ui::Tone::Warn,
-            });
-        }
+        notice(
+            tree,
+            "no model selected; message not sent (3 Models, Enter to choose)".into(),
+            ui::Tone::Warn,
+        );
         return;
     }
     let Some(session) = model.active.clone() else {
@@ -260,13 +285,10 @@ fn send_current_prompt(
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
         stream.push(ui::Item::User {
             text: prompt.clone(),
-            turn: model.active_turn.as_ref().and_then(|turn| {
-                turn.id
-                    .strip_prefix("turn_")
-                    .unwrap_or(&turn.id)
-                    .parse()
-                    .ok()
-            }),
+            turn: model
+                .active_turn
+                .as_ref()
+                .and_then(|turn| crate::ui::parse_turn(Some(&turn.id))),
         });
         stream.start_thinking();
     }
@@ -274,12 +296,7 @@ fn send_current_prompt(
         composer.push_history(&prompt);
     }
     if let Some(commands) = commands.as_ref() {
-        let queue_mode = match model.preferences.send_mode {
-            crate::ui_model::SendMode::Steer => "steer",
-            crate::ui_model::SendMode::Queue => "queue",
-            crate::ui_model::SendMode::Interrupt => "interrupt",
-            crate::ui_model::SendMode::Reject => "reject",
-        };
+        let queue_mode = model.preferences.send_mode.label();
         let _ = commands.try_send(UiCommand::Send {
             session,
             text: prompt,
@@ -299,12 +316,11 @@ fn cancel_active_turn(
     model: &mut UiModel,
 ) -> bool {
     let Some(active) = model.active_turn.take() else {
-        if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-            stream.push(ui::Item::Notice {
-                text: "a turn seems to be running but its id is unknown; cannot cancel".to_string(),
-                tone: ui::Tone::Warn,
-            });
-        }
+        notice(
+            tree,
+            "a turn seems to be running but its id is unknown; cannot cancel".to_string(),
+            ui::Tone::Warn,
+        );
         model.turn = TurnState::Idle;
         return false;
     };
@@ -324,10 +340,7 @@ fn cancel_active_turn(
     toast(tree, "turn cancelled", ui::Tone::Neutral);
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
         stream.stop_thinking();
-        stream.push(ui::Item::Notice {
-            text: "turn cancelled".to_string(),
-            tone: ui::Tone::Neutral,
-        });
     }
+    notice(tree, "turn cancelled".to_string(), ui::Tone::Neutral);
     false
 }

@@ -687,7 +687,7 @@ impl SessionsPage {
             } else {
                 Style::default().fg(theme.foreground)
             };
-            let clipped = clip(title, 44);
+            let clipped = crate::ui::clip(title, 44);
             buf.set_stringn(area.x + 2, y, &clipped, 44, title_style);
             let provider = session.provider.as_deref().unwrap_or("unknown");
             let usage = self.usage.get(&session.session_id);
@@ -737,15 +737,6 @@ impl SessionsPage {
             );
         }
     }
-}
-
-fn clip(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(limit.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 #[cfg(test)]

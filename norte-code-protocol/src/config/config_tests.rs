@@ -571,6 +571,14 @@ impl crate::keys::KeyStore for FakeKeys {
         Some(ApiKey::new(format!("{provider}-key")))
     }
 
+    fn source(
+        &self,
+        _provider: &str,
+        _environment_keys: &[String],
+    ) -> norte_code_wire::ProviderKeySource {
+        norte_code_wire::ProviderKeySource::File
+    }
+
     fn save(
         &self,
         _provider: &str,
@@ -681,4 +689,41 @@ fn service_json_reads_raep_limits() {
     assert_eq!(service.raep_limits.replay_capacity, 25);
     assert_eq!(service.raep_limits.max_queued_inputs, 4);
     assert_eq!(service.raep_limits.command_timeout_ms, 5_000);
+}
+
+#[test]
+fn key_source_separates_environment_from_a_missing_key() {
+    use norte_code_wire::ProviderKeySource;
+
+    let config = Config::default();
+    assert_eq!(
+        config.key_source("local", &[]),
+        ProviderKeySource::NotNeeded
+    );
+    assert_eq!(
+        config.key_source("remote", &["NORTE_CODE_TEST_ABSENT_KEY".to_owned()]),
+        ProviderKeySource::Missing
+    );
+    let Ok(path) = std::env::var("PATH") else {
+        return;
+    };
+    let _ = path;
+    assert_eq!(
+        config.key_source("remote", &["PATH".to_owned()]),
+        ProviderKeySource::Environment
+    );
+}
+
+#[test]
+fn a_host_store_reports_file_backed_keys() {
+    use norte_code_wire::ProviderKeySource;
+
+    let config = Config {
+        keys: Some(Arc::new(FakeKeys)),
+        ..Config::default()
+    };
+    assert_eq!(
+        config.key_source("ollamacloud", &["PATH".to_owned()]),
+        ProviderKeySource::File
+    );
 }

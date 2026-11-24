@@ -219,15 +219,8 @@ fn hiding_the_rail_removes_its_ink_but_not_its_focus_slot() {
     let theme = model.preferences.catalog.theme(&model.preferences.theme);
     let mut tree = build_tree(&model);
     let area = Rect::new(0, 0, 100, 40);
-    let mut buf = Buffer::empty(area);
-    tree.render(area, &mut buf, &theme);
     assert_eq!(tree.focused_id(), Some("composer"));
-    let mut painted = String::new();
-    for y in 0..area.height {
-        for x in 0..area.width {
-            painted.push_str(buf[(x, y)].symbol());
-        }
-    }
+    let painted = crate::test_support::rendered_in(&mut tree, area, &theme);
     assert!(!painted.contains("CONTEXT"), "the hidden rail still drew");
     assert!(tree.focusable_ids().contains(&"compact"));
 }

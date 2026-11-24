@@ -86,6 +86,19 @@ impl ReasoningLevel {
             Self::High => Self::Auto,
         }
     }
+
+    /// Every level, in selector order.
+    pub(crate) const ALL: [Self; 4] = [Self::Auto, Self::Low, Self::Medium, Self::High];
+
+    /// The index of this level in [`Self::ALL`].
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Auto => 0,
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+        }
+    }
 }
 
 /// The effort level the reasoning selector offers.
@@ -130,6 +143,19 @@ impl SendMode {
             Self::Queue => Self::Interrupt,
             Self::Interrupt => Self::Reject,
             Self::Reject => Self::Steer,
+        }
+    }
+
+    /// Every mode, in selector order.
+    pub(crate) const ALL: [Self; 4] = [Self::Steer, Self::Queue, Self::Interrupt, Self::Reject];
+
+    /// The index of this mode in [`Self::ALL`].
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Steer => 0,
+            Self::Queue => 1,
+            Self::Interrupt => 2,
+            Self::Reject => 3,
         }
     }
 }
@@ -406,6 +432,20 @@ impl UiModel {
                         .is_none_or(|provider| provider == &info.provider)
             })
             .or_else(|| self.models.iter().find(|info| info.model == agent.id))
+    }
+
+    /// The environment variables the catalogue names for a provider.
+    pub(crate) fn environment_keys(&self, provider: &str) -> Vec<String> {
+        self.catalog
+            .as_ref()
+            .and_then(|catalog| {
+                catalog
+                    .providers
+                    .iter()
+                    .find(|entry| entry.provider_id == provider)
+                    .map(|entry| entry.environment_keys.clone())
+            })
+            .unwrap_or_default()
     }
 
     /// Whether the attached session has a model configured.

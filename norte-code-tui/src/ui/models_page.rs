@@ -5,8 +5,9 @@
 //! does not, shows only the models that match. Providers with nothing
 //! matching are hidden. Enter on a provider toggles its models; Enter on a
 //! model selects it, asking for the provider's key first when there is no
-//! key on disk or in the environment. Shift+Down asks to remove the
-//! selected provider's saved key after a confirmation.
+//! key on disk or in the environment. Ctrl+D (or Ctrl+Delete where the
+//! terminal reports it) asks to remove the selected provider's saved key
+//! after a confirmation.
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -20,7 +21,10 @@ use terminalui::components::dialog::Dialog;
 use terminalui::components::table::{Table, TableCell, TableRow};
 use terminalui::{Context, InputEvent, Node, Outcome, Stack, Theme, View, node};
 
-use super::copy::{CANCEL, CONFIRM, DELETE_KEY_TITLE, MODELS_KEY_HINT, delete_key_question};
+use super::copy::{
+    CANCEL, CONFIRM, DELETE_KEY_TITLE, MODELS_KEY_HINT, delete_key_question,
+    key_source_label as describe_key_source,
+};
 use super::detail_panel::{DetailPanel, Field};
 use super::node_lookup::find_node_mut;
 
@@ -39,6 +43,25 @@ enum Mode {
         /// The provider whose key would be removed.
         provider: String,
     },
+}
+
+/// Which button in the delete confirmation is selected.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+enum DeleteChoice {
+    /// Keep the key.
+    Cancel,
+    /// Remove the key.
+    #[default]
+    Confirm,
+}
+
+impl DeleteChoice {
+    fn button_id(self) -> &'static str {
+        match self {
+            Self::Cancel => "delete_key_cancel",
+            Self::Confirm => "delete_key_confirm",
+        }
+    }
 }
 
 /// How a provider is rendered: header row, then its models when expanded.
@@ -60,12 +83,29 @@ pub(crate) enum Row {
     },
 }
 
+/// What the host knows about one provider's key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderKeyStatus {
+    /// Whether the row should present the key as usable.
+    pub(crate) available: bool,
+    /// Where the host resolved the key from.
+    pub(crate) source: norte_code_wire::ProviderKeySource,
+    /// The environment variables the host checks for this provider.
+    pub(crate) environment_keys: Vec<String>,
+}
+
+impl ProviderKeyStatus {
+    fn removable(&self) -> bool {
+        self.source == norte_code_wire::ProviderKeySource::File
+    }
+}
+
 /// The catalogue model entries, keyed by nothing but the provider id.
 pub(crate) struct ModelsData {
     /// The catalogue models to list.
     pub(crate) models: Vec<norte_code_wire::ModelInfo>,
-    /// Whether each provider has a usable key.
-    pub(crate) key_status: std::collections::HashMap<String, bool>,
+    /// The key status of each provider.
+    pub(crate) key_status: std::collections::HashMap<String, ProviderKeyStatus>,
     /// The model the attached session uses, `(provider, id)` pairs.
     pub(crate) active: Option<(String, String)>,
 }
@@ -109,9 +149,9 @@ pub(crate) enum ModelsAction {
 pub(crate) struct ModelsPage {
     /// The models of the attached server's catalogue.
     models: Vec<norte_code_wire::ModelInfo>,
-    /// Whether each provider has a usable key.
+    /// What each provider's key is and where it comes from.
     #[serde(skip)]
-    key_status: std::collections::HashMap<String, bool>,
+    key_status: std::collections::HashMap<String, ProviderKeyStatus>,
     /// The model the attached session uses.
     #[serde(skip)]
     active: Option<(String, String)>,
@@ -129,6 +169,9 @@ pub(crate) struct ModelsPage {
     /// What the page is doing over the catalogue.
     #[serde(default)]
     mode: Mode,
+    /// Which delete confirmation button is selected.
+    #[serde(default)]
+    dialog_choice: DeleteChoice,
     /// Actions to drain.
     #[serde(skip)]
     pending: Vec<ModelsAction>,
@@ -149,6 +192,7 @@ impl ModelsPage {
             offset: 0,
             area: Rect::new(0, 0, 0, 0),
             mode: Mode::Listing,
+            dialog_choice: DeleteChoice::default(),
             pending: Vec::new(),
             children: vec![
                 node(
@@ -187,6 +231,9 @@ impl ModelsPage {
     }
 
     fn open_delete(&mut self, provider: &str) {
+        if !self.key_is_removable(provider) {
+            return;
+        }
         if let Some(dialog) = self
             .children
             .get_mut(DELETE_DIALOG_INDEX)
@@ -198,22 +245,72 @@ impl ModelsPage {
         self.mode = Mode::ConfirmDelete {
             provider: provider.to_owned(),
         };
+        self.set_dialog_choice(DeleteChoice::Confirm);
     }
 
     /// The view the host should focus while a dialog is open.
     pub(crate) fn focus_id(&self) -> Option<&'static str> {
         match self.mode {
             Mode::Listing => None,
-            Mode::ConfirmDelete { .. } => Some("delete_key_confirm"),
+            Mode::ConfirmDelete { .. } => Some(self.dialog_choice.button_id()),
         }
     }
 
-    fn dialog_button_pressed(&mut self, button_id: &str) -> bool {
+    /// Whether the delete confirmation is open.
+    pub(crate) fn confirming_delete(&self) -> bool {
+        matches!(self.mode, Mode::ConfirmDelete { .. })
+    }
+
+    /// Whether the highlighted provider's key is one a host can remove.
+    pub(crate) fn can_delete_selected_key(&self) -> bool {
+        self.selected_provider()
+            .is_some_and(|provider| self.key_is_removable(&provider))
+    }
+
+    fn key_is_removable(&self, provider: &str) -> bool {
+        self.key_status
+            .get(provider)
+            .is_some_and(ProviderKeyStatus::removable)
+    }
+
+    fn delete_provider(&self) -> Option<String> {
+        match &self.mode {
+            Mode::Listing => None,
+            Mode::ConfirmDelete { provider } => Some(provider.clone()),
+        }
+    }
+
+    /// Switch the selected button in the delete confirmation.
+    pub(crate) fn toggle_dialog_choice(&mut self) {
+        let next = match self.dialog_choice {
+            DeleteChoice::Cancel => DeleteChoice::Confirm,
+            DeleteChoice::Confirm => DeleteChoice::Cancel,
+        };
+        self.set_dialog_choice(next);
+    }
+
+    fn dialog_button_mut(&mut self, button_id: &str) -> Option<&mut Button> {
         self.children
             .get_mut(DELETE_DIALOG_INDEX)
             .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
             .and_then(|dialog| find_node_mut(dialog.children_mut(), button_id))
             .and_then(|node| node.view.as_any().downcast_mut::<Button>())
+    }
+
+    fn set_dialog_choice(&mut self, choice: DeleteChoice) {
+        self.dialog_choice = choice;
+        for id in [
+            DeleteChoice::Cancel.button_id(),
+            DeleteChoice::Confirm.button_id(),
+        ] {
+            if let Some(button) = self.dialog_button_mut(id) {
+                button.state.active = choice.button_id() == id;
+            }
+        }
+    }
+
+    fn dialog_button_pressed(&mut self, button_id: &str) -> bool {
+        self.dialog_button_mut(button_id)
             .is_some_and(Button::take_pressed)
     }
 
@@ -229,11 +326,15 @@ impl ModelsPage {
         let Mode::ConfirmDelete { provider } = self.mode.clone() else {
             return;
         };
-        let confirmed = self.dialog_button_pressed("delete_key_confirm");
-        let cancelled = self.dialog_button_pressed("delete_key_cancel");
+        let confirmed = self.dialog_button_pressed(DeleteChoice::Confirm.button_id());
+        let cancelled = self.dialog_button_pressed(DeleteChoice::Cancel.button_id());
         if !confirmed && !cancelled && self.dialog_open() {
             return;
         }
+        self.finish_delete(&provider, confirmed);
+    }
+
+    fn finish_delete(&mut self, provider: &str, confirmed: bool) {
         if let Some(dialog) = self
             .children
             .get_mut(DELETE_DIALOG_INDEX)
@@ -243,7 +344,9 @@ impl ModelsPage {
         }
         self.mode = Mode::Listing;
         if confirmed {
-            self.pending.push(ModelsAction::DeleteKey { provider });
+            self.pending.push(ModelsAction::DeleteKey {
+                provider: provider.to_owned(),
+            });
         }
     }
 
@@ -322,8 +425,8 @@ impl ModelsPage {
             if !provider_matches && matching.is_empty() {
                 continue;
             }
-            let expanded = !query.is_empty() || self.expanded.contains(&provider);
-            let signed_in = self.key_status.get(&provider).copied().unwrap_or(false);
+            let expanded = self.is_expanded(&provider);
+            let signed_in = self.key_status(&provider);
             rows.push(Row::Provider {
                 name: provider.clone(),
                 count: matching.len(),
@@ -355,7 +458,16 @@ impl ModelsPage {
     }
 
     fn key_status(&self, provider: &str) -> bool {
-        self.key_status.get(provider).copied().unwrap_or(false)
+        self.key_status
+            .get(provider)
+            .is_some_and(|status| status.available)
+    }
+
+    fn key_source(&self, provider: &str) -> String {
+        self.key_status.get(provider).map_or_else(
+            || describe_key_source(norte_code_wire::ProviderKeySource::Unknown, &[]),
+            |status| describe_key_source(status.source, &status.environment_keys),
+        )
     }
 
     fn activate(&mut self) {
@@ -389,10 +501,50 @@ impl ModelsPage {
         }
     }
 
+    fn handle_delete_key(&mut self, key: &crossterm::event::KeyEvent) -> Outcome {
+        use crossterm::event::KeyCode;
+        let Some(provider) = self.delete_provider() else {
+            return Outcome::Ignored;
+        };
+        match key.code {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => {
+                self.set_dialog_choice(DeleteChoice::Cancel);
+                Outcome::Consumed
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('l' | 'j') => {
+                self.set_dialog_choice(DeleteChoice::Confirm);
+                Outcome::Consumed
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.finish_delete(&provider, self.dialog_choice == DeleteChoice::Confirm);
+                Outcome::Consumed
+            }
+            KeyCode::Esc => {
+                self.finish_delete(&provider, false);
+                Outcome::Consumed
+            }
+            _ => Outcome::Ignored,
+        }
+    }
+
     fn handle_key(&mut self, key: &crossterm::event::KeyEvent) -> Outcome {
         use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-        if key.kind != KeyEventKind::Press || self.mode != Mode::Listing {
+        if key.kind != KeyEventKind::Press {
             return Outcome::Ignored;
+        }
+        if self.confirming_delete() {
+            return self.handle_delete_key(key);
+        }
+        if self.mode != Mode::Listing {
+            return Outcome::Ignored;
+        }
+        if key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Delete | KeyCode::Char('d'))
+        {
+            if let Some(provider) = self.selected_provider() {
+                self.open_delete(&provider);
+            }
+            return Outcome::Consumed;
         }
         if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
             match key.code {
@@ -401,14 +553,8 @@ impl ModelsPage {
                     self.clamp_view();
                     return Outcome::Consumed;
                 }
-                KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
-                    if let Some(provider) = self.selected_provider() {
-                        self.open_delete(&provider);
-                    }
-                    return Outcome::Consumed;
-                }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let last = self.rows().len().saturating_sub(1);
+                    let last = self.last_row();
                     self.selected = (self.selected + 1).min(last);
                     self.clamp_view();
                     return Outcome::Consumed;
@@ -419,7 +565,7 @@ impl ModelsPage {
                     return Outcome::Consumed;
                 }
                 KeyCode::PageDown => {
-                    let last = self.rows().len().saturating_sub(1);
+                    let last = self.last_row();
                     self.selected = (self.selected + self.body_rows().max(1)).min(last);
                     self.clamp_view();
                     return Outcome::Consumed;
@@ -430,7 +576,7 @@ impl ModelsPage {
                     return Outcome::Consumed;
                 }
                 KeyCode::End => {
-                    self.selected = self.rows().len().saturating_sub(1);
+                    self.selected = self.last_row();
                     self.clamp_view();
                     return Outcome::Consumed;
                 }
@@ -473,6 +619,32 @@ impl ModelsPage {
         }
     }
 
+    fn last_row(&self) -> usize {
+        self.rows().len().saturating_sub(1)
+    }
+
+    fn is_expanded(&self, provider: &str) -> bool {
+        !self.query().is_empty() || self.expanded.contains(provider)
+    }
+
+    fn model_detail_tail(source: String) -> Vec<Field> {
+        vec![
+            Field::new("source", source),
+            Field::new("hint", MODELS_KEY_HINT),
+        ]
+    }
+
+    fn provider_detail_fields(&self, name: &str, count: usize, signed_in: bool) -> Vec<Field> {
+        let source = self.key_source(name);
+        vec![
+            Field::new("provider", name.to_owned()),
+            Field::new("models", count.to_string()),
+            Field::new("key", if signed_in { "available" } else { "missing" }),
+            Field::new("source", source),
+            Field::new("hint", MODELS_KEY_HINT),
+        ]
+    }
+
     fn sync_detail(&mut self) {
         let rows = self.rows();
         let fields = rows.into_iter().nth(self.selected).map_or_else(
@@ -482,13 +654,9 @@ impl ModelsPage {
                     name,
                     count,
                     signed_in,
-                } => vec![
-                    Field::new("provider", name),
-                    Field::new("models", count.to_string()),
-                    Field::new("key", if signed_in { "available" } else { "missing" }),
-                    Field::new("hint", MODELS_KEY_HINT),
-                ],
+                } => self.provider_detail_fields(&name, count, signed_in),
                 Row::Model { model } => {
+                    let source = self.key_source(&model.provider);
                     let mut fields = vec![
                         Field::new("provider", model.provider),
                         Field::new("id", model.model),
@@ -501,13 +669,13 @@ impl ModelsPage {
                         "context",
                         model
                             .max_context
-                            .map_or_else(|| "unknown".to_owned(), human_count),
+                            .map_or_else(|| "unknown".to_owned(), crate::context::human_count),
                     ));
                     fields.push(Field::new(
                         "output",
                         model
                             .max_output
-                            .map_or_else(|| "unknown".to_owned(), human_count),
+                            .map_or_else(|| "unknown".to_owned(), crate::context::human_count),
                     ));
                     fields.push(Field::new("tools", model.tools.to_string()));
                     if !model.input.is_empty() {
@@ -522,7 +690,7 @@ impl ModelsPage {
                     if model.deprecated {
                         fields.push(Field::new("status", "deprecated"));
                     }
-                    fields.push(Field::new("hint", MODELS_KEY_HINT));
+                    fields.extend(Self::model_detail_tail(source));
                     fields
                 }
             },
@@ -535,28 +703,6 @@ impl ModelsPage {
         {
             panel.set(title, fields);
         }
-    }
-}
-
-fn human_count(count: u64) -> String {
-    if count < 1_000 {
-        return count.to_string();
-    }
-    if count < 1_000_000 {
-        let thousands = count / 1_000;
-        let rest = (count % 1_000) / 100;
-        return if rest == 0 {
-            format!("{thousands}k")
-        } else {
-            format!("{thousands}.{rest}k")
-        };
-    }
-    let millions = count / 1_000_000;
-    let rest = (count % 1_000_000) / 100_000;
-    if rest == 0 {
-        format!("{millions}m")
-    } else {
-        format!("{millions}.{rest}m")
     }
 }
 
@@ -604,9 +750,10 @@ impl ModelsPage {
                             node(
                                 "context",
                                 TableCell::text(
-                                    model
-                                        .max_context
-                                        .map_or_else(|| "–".to_owned(), human_count),
+                                    model.max_context.map_or_else(
+                                        || "–".to_owned(),
+                                        crate::context::human_count,
+                                    ),
                                 )
                                 .with_weight(2),
                             ),
@@ -649,7 +796,7 @@ impl View for ModelsPage {
     }
 
     fn focusable(&self) -> bool {
-        true
+        self.mode == Mode::Listing
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
