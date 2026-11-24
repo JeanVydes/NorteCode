@@ -12,6 +12,9 @@ mod copy;
 mod debug_overlay;
 mod detail_panel;
 #[cfg(test)]
+#[path = "detail_panel_tests.rs"]
+mod detail_panel_tests;
+#[cfg(test)]
 #[path = "focus_tests.rs"]
 mod focus_tests;
 mod header;
@@ -33,7 +36,6 @@ mod markdown;
 mod models_page;
 mod node_lookup;
 mod overlay_frame;
-mod panel_chrome;
 mod plan_overlay;
 mod plugins_page;
 mod question_prompt;
@@ -58,7 +60,6 @@ mod toast_host;
 #[cfg(test)]
 #[path = "toast_host_tests.rs"]
 mod toast_host_tests;
-mod text;
 mod transcript;
 
 use norte_code_client::config::RetentionConfig;
@@ -74,14 +75,12 @@ pub(crate) use header::Header;
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt, KeyPromptAction};
 pub(crate) use key_status::invalidate_key;
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage, ProviderKeyStatus};
-pub(crate) use panel_chrome::rounded as panel_chrome;
 pub(crate) use plan_overlay::{PLAN_REVIEW_PREFIX, PlanOverlay, PlanReviewAction};
 pub(crate) use plugins_page::PluginsAction;
 pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::{Rail, RailPosition};
 pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
-pub(crate) use text::clip;
 pub(crate) use settings_page::SettingsPage;
 pub(crate) use telemetry_page::TelemetryPage;
 pub(crate) use toast_host::ToastHost;

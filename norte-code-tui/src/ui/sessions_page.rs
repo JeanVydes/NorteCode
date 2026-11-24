@@ -687,7 +687,7 @@ impl SessionsPage {
             } else {
                 Style::default().fg(theme.foreground)
             };
-            let clipped = crate::ui::clip(title, 44);
+            let clipped = terminalui::clip(title, 44);
             buf.set_stringn(area.x + 2, y, &clipped, 44, title_style);
             let provider = session.provider.as_deref().unwrap_or("unknown");
             let usage = self.usage.get(&session.session_id);

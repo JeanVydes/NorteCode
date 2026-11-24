@@ -3,14 +3,14 @@
 use std::any::Any;
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Constraint, Rect};
 use serde::Serialize;
 
 use terminalui::components::badge::{Badge, BadgeVariant};
-use terminalui::components::chrome::{Padding, draw_box};
+use terminalui::components::chrome::Padding;
+use terminalui::components::panel::Panel;
 use terminalui::components::separator::Separator;
-use terminalui::{Context, InputEvent, Outcome, Theme, View};
+use terminalui::{Context, InputEvent, Outcome, Stack, Text, TextStyle, Theme, View, node};
 
 /// How a field paints its value.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -112,27 +112,7 @@ impl View for DetailPanel {
         if area.width < 8 || area.height < 3 {
             return;
         }
-        let chrome = super::panel_chrome(
-            theme.border,
-            None,
-            Padding {
-                horizontal: 0,
-                vertical: 0,
-            },
-        );
-        let inner = draw_box(buf, area, &chrome, theme);
-        let mut y = inner.y;
-        let title = &self.title;
-        buf.set_stringn(
-            inner.x + 1,
-            y,
-            title,
-            usize::from(inner.width.saturating_sub(2)),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-        y += 2;
+
         let label_width = self
             .fields
             .iter()
@@ -141,62 +121,73 @@ impl View for DetailPanel {
             .max()
             .unwrap_or(0)
             .min(10);
-        for field in &self.fields {
-            if y >= inner.y + inner.height {
-                break;
-            }
+        let label_cells = u16::try_from(label_width).unwrap_or(u16::MAX);
+
+        let mut children = vec![
+            node(
+                "title",
+                Text::new(&self.title).with_style(TextStyle::default().fg(theme.accent).bold()),
+            ),
+            node("title_gap", Text::new("")),
+        ];
+        let mut constraints = vec![Constraint::Length(1), Constraint::Length(1)];
+
+        for (index, field) in self.fields.iter().enumerate() {
+            let id = format!("field-{index}");
             if matches!(field.presentation, FieldPresentation::Separator) {
-                Separator::new().render(
-                    Rect {
-                        x: inner.x + 1,
-                        y,
-                        width: inner.width.saturating_sub(2),
-                        height: 1,
-                    },
-                    buf,
-                    cx,
-                    theme,
-                );
-                y += 1;
+                children.push(node(id, Separator::new()));
+                constraints.push(Constraint::Length(1));
                 continue;
             }
-            let dim = Style::default().fg(theme.muted).bg(theme.background);
-            buf.set_stringn(
-                inner.x + 1,
-                y,
-                &field.label,
-                label_width.saturating_add(1),
-                dim,
+
+            let label = node(
+                format!("{id}-label"),
+                Text::new(&field.label).with_style(TextStyle {
+                    foreground: Some(theme.muted),
+                    background: Some(theme.background),
+                    ..TextStyle::default()
+                }),
             );
-            let value_x = inner.x + 1 + u16::try_from(label_width + 1).unwrap_or(u16::MAX);
-            let label_cells = u16::try_from(label_width).unwrap_or(u16::MAX);
-            let budget = usize::from(inner.width.saturating_sub(label_cells.saturating_add(2)));
-            let row = Rect {
-                x: value_x,
-                y,
-                width: u16::try_from(budget).unwrap_or(u16::MAX),
-                height: 1,
+            let value = match &field.presentation {
+                FieldPresentation::Badge(variant) => node(
+                    format!("{id}-value"),
+                    Badge::new(field.value.as_str()).with_variant(*variant),
+                ),
+                FieldPresentation::Text | FieldPresentation::Separator => node(
+                    format!("{id}-value"),
+                    Text::new(&field.value).with_style(TextStyle {
+                        foreground: Some(theme.foreground),
+                        background: Some(theme.background),
+                        ..TextStyle::default()
+                    }),
+                ),
             };
-            match &field.presentation {
-                FieldPresentation::Badge(variant) => {
-                    let value: String = field.value.chars().take(budget).collect();
-                    Badge::new(value)
-                        .with_variant(*variant)
-                        .render(row, buf, cx, theme);
-                }
-                FieldPresentation::Text | FieldPresentation::Separator => {
-                    let value: String = field.value.chars().take(budget).collect();
-                    buf.set_stringn(
-                        row.x,
-                        row.y,
-                        &value,
-                        value.chars().count(),
-                        Style::default().fg(theme.foreground).bg(theme.background),
-                    );
-                }
-            }
-            y += 1;
+            children.push(node(
+                id,
+                Stack::horizontal()
+                    .children(vec![label, value])
+                    .constraints(vec![
+                        Constraint::Length(label_cells + 1),
+                        Constraint::Fill(1),
+                    ]),
+            ));
+            constraints.push(Constraint::Length(1));
         }
+
+        let rows = Stack::vertical()
+            .children(children)
+            .constraints(constraints);
+        let mut panel = Panel::themed(
+            theme,
+            Some(theme.border),
+            None,
+            Padding {
+                horizontal: 1,
+                vertical: 0,
+            },
+        )
+        .children(vec![node("rows", rows)]);
+        panel.render(area, buf, cx, theme);
     }
 
     fn handle_event(&mut self, _event: &InputEvent, _cx: &mut Context) -> Outcome {

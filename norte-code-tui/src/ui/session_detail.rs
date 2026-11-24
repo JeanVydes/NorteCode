@@ -51,8 +51,8 @@ pub(crate) fn fields(session: &SessionSummary, usage: &SessionUsage) -> Vec<Fiel
         .join(", ");
     let mut fields = vec![
         Field::new("title", title),
-        Field::new("id", crate::ui::clip(&session.session_id, 36)),
-        Field::new("model", crate::ui::clip(&model, 36)),
+        Field::new("id", terminalui::clip(&session.session_id, 36)),
+        Field::new("model", terminalui::clip(&model, 36)),
         Field::badge(
             "status",
             session.status.label(),
@@ -95,7 +95,7 @@ pub(crate) fn fields(session: &SessionSummary, usage: &SessionUsage) -> Vec<Fiel
         fields.push(Field::new("cost", format!("${:.4}", usage.cost)));
     }
     if let Some(parent) = &session.parent_session_id {
-        fields.push(Field::new("parent", crate::ui::clip(parent, 34)));
+        fields.push(Field::new("parent", terminalui::clip(parent, 34)));
     }
     fields.push(Field::separator());
     fields.push(Field::badge(

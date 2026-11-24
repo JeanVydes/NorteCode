@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
-use terminalui::components::chrome::{Padding, draw_box};
+use terminalui::components::chrome::{Chrome, Padding, draw_box};
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
 use crate::frame_limiter::FRAME_RATE_CAP;
@@ -160,8 +160,9 @@ impl View for DebugOverlay {
                 }
             }
         }
-        let chrome = super::panel_chrome(
-            theme.border,
+        let chrome = Chrome::themed(
+            theme,
+            Some(theme.border),
             Some(theme.background),
             Padding {
                 horizontal: 0,

@@ -16,6 +16,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use serde::Serialize;
+use terminalui::components::autocomplete::Autocomplete;
 use terminalui::components::button::{Button, ButtonVariant};
 use terminalui::components::dialog::Dialog;
 use terminalui::components::table::{Table, TableCell, TableRow};
@@ -156,7 +157,7 @@ pub(crate) struct ModelsPage {
     #[serde(skip)]
     active: Option<(String, String)>,
     /// The filter typed by the user.
-    filter: String,
+    filter: Autocomplete,
     /// The expanded providers.
     expanded: HashSet<String>,
     /// The selected row index.
@@ -186,7 +187,7 @@ impl ModelsPage {
             models: Vec::new(),
             key_status: std::collections::HashMap::new(),
             active: None,
-            filter: String::new(),
+            filter: Autocomplete::new(Vec::new()),
             expanded: HashSet::new(),
             selected: 0,
             offset: 0,
@@ -368,6 +369,16 @@ impl ModelsPage {
         self.models = data.models;
         self.key_status = data.key_status;
         self.active = data.active;
+        let mut suggestions: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        for model in &self.models {
+            if seen.insert(model.provider.clone()) {
+                suggestions.push(model.provider.clone());
+            }
+            suggestions.push(model.model.clone());
+            suggestions.push(model.name.clone());
+        }
+        self.filter.set_suggestions(suggestions);
         self.selected = self.selected.min(self.rows().len().saturating_sub(1));
         self.clamp_view();
     }
@@ -391,7 +402,7 @@ impl ModelsPage {
     }
 
     fn query(&self) -> String {
-        self.filter.trim().to_lowercase()
+        self.filter.value().trim().to_lowercase()
     }
 
     fn rows(&self) -> Vec<Row> {
@@ -577,15 +588,19 @@ impl ModelsPage {
                     return Outcome::Consumed;
                 }
                 KeyCode::Backspace => {
-                    if self.filter.pop().is_some() {
+                    if self.filter.value().is_empty() {
+                        return Outcome::Ignored;
+                    }
+                    let before = self.filter.value().to_owned();
+                    let outcome = self.filter.handle_key(key);
+                    if self.filter.value() != before {
                         self.selected = 0;
                         self.clamp_view();
-                        return Outcome::Consumed;
                     }
-                    return Outcome::Ignored;
+                    return outcome;
                 }
                 KeyCode::Esc => {
-                    if self.filter.is_empty() {
+                    if self.filter.value().is_empty() {
                         return Outcome::Ignored;
                     }
                     self.filter.clear();
@@ -593,11 +608,14 @@ impl ModelsPage {
                     self.clamp_view();
                     return Outcome::Consumed;
                 }
-                KeyCode::Char(character) => {
-                    self.filter.push(character);
-                    self.selected = 0;
-                    self.clamp_view();
-                    return Outcome::Consumed;
+                KeyCode::Char(_) => {
+                    let before = self.filter.value().to_owned();
+                    let outcome = self.filter.handle_key(key);
+                    if self.filter.value() != before {
+                        self.selected = 0;
+                        self.clamp_view();
+                    }
+                    return outcome;
                 }
                 _ => return Outcome::Ignored,
             }
@@ -799,10 +817,10 @@ impl View for ModelsPage {
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
         self.area = area;
         let muted = Style::default().fg(theme.muted);
-        let filter_label = if self.filter.is_empty() {
+        let filter_label = if self.filter.value().is_empty() {
             " / filter providers and models".to_string()
         } else {
-            format!(" /{}  · Esc clears", self.filter)
+            format!(" /{}  · Esc clears", self.filter.value())
         };
         buf.set_stringn(
             area.x,

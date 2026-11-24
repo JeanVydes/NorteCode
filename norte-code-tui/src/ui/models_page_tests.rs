@@ -150,7 +150,7 @@ fn typing_d_still_filters_the_catalogue() {
         KeyCode::Char('d'),
         KeyModifiers::NONE,
     ));
-    assert_eq!(page.filter, "d");
+    assert_eq!(page.filter.value(), "d");
 }
 
 #[test]
@@ -278,7 +278,7 @@ fn backspace_with_an_empty_filter_keeps_the_selection() {
 #[test]
 fn backspace_with_filter_text_still_edits_the_filter() {
     let mut page = page_with_keys();
-    page.filter.push_str("open");
+    page.filter.set_value("open");
     page.selected = 1;
 
     assert_eq!(
@@ -288,7 +288,7 @@ fn backspace_with_filter_text_still_edits_the_filter() {
         )),
         Outcome::Consumed
     );
-    assert_eq!(page.filter, "ope");
+    assert_eq!(page.filter.value(), "ope");
     assert_eq!(page.selected, 0);
 }
 

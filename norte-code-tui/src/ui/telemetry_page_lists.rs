@@ -125,7 +125,7 @@ impl TelemetryPage {
                                 node("time", TableCell::text(time.to_owned()).with_weight(3)),
                                 node(
                                     "model",
-                                    TableCell::text(crate::ui::clip(&record.model, 20))
+                                    TableCell::text(terminalui::clip(&record.model, 20))
                                         .with_weight(5),
                                 ),
                                 node(
@@ -170,9 +170,9 @@ impl TelemetryPage {
                 || vec![Field::new("no request", "select a row")],
                 |record| {
                     vec![
-                        Field::new("id", crate::ui::clip(&record.id, 34)),
-                        Field::new("model", crate::ui::clip(&record.model, 34)),
-                        Field::new("provider", crate::ui::clip(&record.provider, 34)),
+                        Field::new("id", terminalui::clip(&record.id, 34)),
+                        Field::new("model", terminalui::clip(&record.model, 34)),
+                        Field::new("provider", terminalui::clip(&record.provider, 34)),
                         Field::new("status", status_label(record.status)),
                         Field::new("started", record.started_at.clone()),
                         Field::new("duration", format!("{} ms", record.duration_ms)),
@@ -320,7 +320,7 @@ impl TelemetryPage {
                 buf.set_stringn(
                     area.x + 1,
                     y,
-                    crate::ui::clip(id, usize::from(area.width.saturating_sub(2))),
+                    terminalui::clip(id, usize::from(area.width.saturating_sub(2))),
                     usize::from(area.width.saturating_sub(2)),
                     Style::default().fg(theme.foreground),
                 );
