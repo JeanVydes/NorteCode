@@ -556,7 +556,16 @@ impl Transcript {
     /// Flip every `Running` tool block to `Done`.
     pub(crate) fn complete_running_tools(&mut self) {
         for item in &mut self.items {
-            if let Item::Tool { state, .. } = item
+            if let Item::Tool {
+                state,
+                console: Some(console),
+                ..
+            } = item
+                && *state == ToolState::Running
+            {
+                *state = ToolState::Done;
+                console.set_exit(None);
+            } else if let Item::Tool { state, .. } = item
                 && *state == ToolState::Running
             {
                 *state = ToolState::Done;
@@ -587,12 +596,18 @@ impl Transcript {
     pub(crate) fn finish_tool(&mut self, call_id: &str) {
         for item in self.items.iter_mut().rev() {
             if let Item::Tool {
-                call_id: id, state, ..
+                call_id: id,
+                state,
+                console,
+                ..
             } = item
                 && *id == call_id
                 && *state == ToolState::Running
             {
                 *state = ToolState::Done;
+                if let Some(console) = console {
+                    console.set_exit(None);
+                }
                 self.dirty = true;
                 return;
             }
