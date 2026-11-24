@@ -392,8 +392,15 @@ impl SessionsPage {
                         button.take_pressed()
                     })
                     .unwrap_or(false);
-                if confirmed || !self.dialog_open(DELETE_DIALOG_INDEX) {
-                    (false, None, Some(session.clone()))
+                let cancelled = self
+                    .dialog_child::<Button, _>(DELETE_DIALOG_INDEX, "delete_cancel", |button| {
+                        button.take_pressed()
+                    })
+                    .unwrap_or(false);
+                let was_open = self.dialog_open(DELETE_DIALOG_INDEX);
+                if confirmed || cancelled || !was_open {
+                    let delete = confirmed || !was_open;
+                    (false, None, delete.then(|| session.clone()))
                 } else {
                     return;
                 }

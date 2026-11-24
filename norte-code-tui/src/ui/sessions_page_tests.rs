@@ -2,6 +2,7 @@
 
 use crossterm::event::Event;
 use ratatui::layout::Rect;
+use terminalui::components::button::Button;
 use terminalui::components::input::Input;
 use terminalui::{InputEvent, Theme, Tree, node};
 
@@ -190,4 +191,31 @@ fn the_attached_session_cannot_be_deleted() {
     page.handle_listing_key(&key('d'));
     assert!(page.take_pending().is_empty());
     assert_eq!(page.mode, Mode::Listing);
+}
+
+#[test]
+fn cancelling_delete_closes_the_overlay_without_deleting() {
+    let mut tree = Tree::new(node("sessions", page_with(vec![session("doomed", None)])));
+    tree.focus("sessions");
+    tree.handle_event(&key_input('d'));
+    assert_eq!(
+        tree.find::<SessionsPage>("sessions").expect("page").mode,
+        Mode::ConfirmDelete {
+            session: norte_code_wire::SessionKey::new("doomed")
+        }
+    );
+
+    if let Some(cancel) = tree.find_mut::<Button>("delete_cancel") {
+        cancel.state.pressed = true;
+    }
+    let actions = tree
+        .find_mut::<SessionsPage>("sessions")
+        .expect("page")
+        .take_pending();
+    assert!(actions.is_empty(), "cancel must not delete the session");
+    assert_eq!(
+        tree.find::<SessionsPage>("sessions").expect("page").mode,
+        Mode::Listing,
+        "cancel must close the delete overlay"
+    );
 }
