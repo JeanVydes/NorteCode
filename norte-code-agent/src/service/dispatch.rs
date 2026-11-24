@@ -489,6 +489,17 @@ impl Service {
                     ServerEventKind::SecretSaved { provider },
                 ))
             }
+            Kind::DeleteSecret { provider } => {
+                let store = self
+                    .key_store()
+                    .ok_or(norte_code_protocol::keys::KeyStoreError::Unsupported)?;
+                store.delete(&provider)?;
+                Ok(single(
+                    request_id,
+                    None,
+                    ServerEventKind::SecretDeleted { provider },
+                ))
+            }
             Kind::ListPlugins
             | Kind::InstallPlugin { .. }
             | Kind::UpdatePlugins { .. }

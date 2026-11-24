@@ -30,6 +30,16 @@ fn key_save_failures_name_their_operation() {
 }
 
 #[test]
+fn key_delete_failures_name_their_operation() {
+    let error = ClientError::delete_secret("read-only home");
+    assert!(matches!(error, ClientError::DeleteSecret(_)));
+    assert_eq!(
+        error.to_string(),
+        "could not delete the key: read-only home"
+    );
+}
+
+#[test]
 fn stream_failures_are_distinguished_from_command_failures() {
     assert!(matches!(
         ClientError::unstable_stream(),

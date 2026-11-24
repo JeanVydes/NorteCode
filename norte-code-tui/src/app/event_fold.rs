@@ -115,7 +115,8 @@ pub(in crate::app) fn fold(
         | ServerEventKind::HistoryRewound { .. }
         | ServerEventKind::OutputPartStarted { .. }
         | ServerEventKind::OutputPartFinished { .. }
-        | ServerEventKind::SecretSaved { .. } => {}
+        | ServerEventKind::SecretSaved { .. }
+        | ServerEventKind::SecretDeleted { .. } => {}
     }
 }
 

@@ -217,6 +217,11 @@ pub(in crate::app) fn drain_models_actions(
                     page.toggle_expansion(&provider);
                 }
             }
+            ui::ModelsAction::DeleteKey { provider } => {
+                if let Some(commands) = commands.as_ref() {
+                    let _ = commands.try_send(UiCommand::DeleteSecret { provider });
+                }
+            }
         }
     }
 }

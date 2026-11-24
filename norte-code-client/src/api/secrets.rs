@@ -18,4 +18,19 @@ impl RestClient {
         )
         .await
     }
+
+    /// Removes a provider key from the host's key store.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or the reason the host refused the removal.
+    pub async fn delete_secret(&self, provider: &str) -> Result<(), ApiError> {
+        self.command_ok(
+            None,
+            ClientRequestKind::DeleteSecret {
+                provider: provider.to_owned(),
+            },
+        )
+        .await
+    }
 }

@@ -376,6 +376,12 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             model: None,
             details: None,
         },
+        ServerEventKind::SecretDeleted { provider } => CanonicalEvent::AgentChanged {
+            change: AgentChange::SecretDeleted,
+            provider: Some(provider.as_str()),
+            model: None,
+            details: None,
+        },
         ServerEventKind::CatalogDetail { providers, models } => CanonicalEvent::AgentCatalog {
             kind: CatalogKind::Providers,
             entries: payload(CatalogDetailPayload {

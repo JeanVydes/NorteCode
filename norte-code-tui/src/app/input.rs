@@ -148,8 +148,13 @@ pub(in crate::app) fn settle_input(
     let modal_focus = tree
         .find::<ui::SessionsPage>("sessions")
         .and_then(ui::SessionsPage::focus_id)
+        .or_else(|| {
+            tree.find::<ui::ModelsPage>("models")
+                .and_then(ui::ModelsPage::focus_id)
+        })
         .map(str::to_owned)
-        .or_else(|| (model.tab == Tab::Sessions).then(|| "sessions".to_owned()));
+        .or_else(|| (model.tab == Tab::Sessions).then(|| "sessions".to_owned()))
+        .or_else(|| (model.tab == Tab::Models).then(|| "models".to_owned()));
     if let Some(id) = modal_focus {
         tree.focus(&id);
     }

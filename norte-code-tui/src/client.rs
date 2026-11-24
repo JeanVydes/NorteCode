@@ -110,6 +110,16 @@ pub(crate) enum ClientEvent {
         /// What went wrong, in words a person can act on.
         reason: ClientError,
     },
+    /// The host removed a provider key.
+    SecretDeleted {
+        /// The provider the key belonged to.
+        provider: String,
+    },
+    /// The host refused to remove a provider key.
+    SecretDeleteFailed {
+        /// What went wrong, in words a person can act on.
+        reason: ClientError,
+    },
 }
 
 /// Commands the interface sends to the connection task.
@@ -220,6 +230,11 @@ pub(crate) enum UiCommand {
         provider: String,
         /// The secret value.
         key: String,
+    },
+    /// Remove a provider key from the host.
+    DeleteSecret {
+        /// The provider the key belongs to.
+        provider: String,
     },
 }
 
@@ -918,6 +933,25 @@ async fn save_secret(api: &RestClient, events: &Sender<ClientEvent>, provider: &
     }
 }
 
+async fn delete_secret(api: &RestClient, events: &Sender<ClientEvent>, provider: &str) {
+    match api.delete_secret(provider).await {
+        Ok(()) => {
+            let _ = events
+                .send(ClientEvent::SecretDeleted {
+                    provider: provider.to_owned(),
+                })
+                .await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SecretDeleteFailed {
+                    reason: ClientError::delete_secret(error),
+                })
+                .await;
+        }
+    }
+}
+
 /// Pump events from the stream while dispatching commands.
 async fn apply_command(
     command: UiCommand,
@@ -1001,6 +1035,9 @@ async fn apply_command(
         }
         UiCommand::SaveSecret { provider, key } => {
             save_secret(api, events, &provider, &key).await;
+        }
+        UiCommand::DeleteSecret { provider } => {
+            delete_secret(api, events, &provider).await;
         }
         UiCommand::SetReasoning { session, effort } => {
             let reasoning = match effort.as_str() {

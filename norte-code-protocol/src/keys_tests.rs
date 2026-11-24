@@ -59,6 +59,21 @@ fn a_saved_key_round_trips_and_keeps_its_neighbours() {
 }
 
 #[test]
+fn deleting_a_key_keeps_its_neighbours_and_drops_an_empty_file() {
+    let path = temporary("delete.json");
+    save_secret(&path, "one", "first").expect("save one");
+    save_secret(&path, "two", "second").expect("save two");
+
+    delete_secret(&path, "one").expect("delete one");
+    assert!(read_secret(&path, "one").is_none());
+    assert_eq!(read_secret(&path, "two").expect("two").expose(), "second");
+    delete_secret(&path, "missing").expect("a missing entry is not an error");
+
+    delete_secret(&path, "two").expect("delete two");
+    assert!(!path.exists());
+}
+
+#[test]
 fn a_corrupt_file_reads_as_empty_and_is_replaced() {
     let path = temporary("corrupt.json");
     fs::write(&path, "{not json").expect("write");

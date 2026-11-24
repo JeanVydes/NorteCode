@@ -70,6 +70,7 @@ pub(crate) use debug_overlay::{DebugOverlay, OverlayClock};
 pub(crate) use header::Header;
 
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt, KeyPromptAction};
+pub(crate) use key_status::invalidate_key;
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage};
 pub(crate) use plan_overlay::{PLAN_REVIEW_PREFIX, PlanOverlay, PlanReviewAction};
 pub(crate) use plugins_page::PluginsAction;

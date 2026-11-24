@@ -10,7 +10,7 @@ use crate::ui_model::{SessionAttachmentState, TurnState, UiModel};
 use super::super::DrainOutcome;
 use super::super::input::apply_key_intent;
 use super::history::{fold_history_event, fold_history_failure};
-use super::{fold, push_attachment_notice};
+use super::{fold, push_attachment_notice, toast};
 
 /// Track the host-reported model of the attached session from a list refresh.
 fn refresh_active_model(model: &mut UiModel, sessions: &[norte_code_wire::SessionSummary]) {
@@ -154,6 +154,22 @@ fn fold_secret_event(
             }
             true
         }
+        ClientEvent::SecretDeleted { provider } => {
+            ui::invalidate_key(provider);
+            toast(
+                tree,
+                &format!("key removed for {provider}"),
+                ui::Tone::Neutral,
+            );
+            if let Some(commands) = commands.as_ref() {
+                let _ = commands.try_send(UiCommand::RefreshViews);
+            }
+            true
+        }
+        ClientEvent::SecretDeleteFailed { reason } => {
+            toast(tree, &reason.to_string(), ui::Tone::Error);
+            true
+        }
         _ => false,
     }
 }
@@ -244,7 +260,10 @@ pub(in crate::app) fn drain_server_events(
                 changed = fold_upload_event(&event, tree) || changed;
             }
             Ok(
-                event @ (ClientEvent::SecretSaved { .. } | ClientEvent::SecretSaveFailed { .. }),
+                event @ (ClientEvent::SecretSaved { .. }
+                | ClientEvent::SecretSaveFailed { .. }
+                | ClientEvent::SecretDeleted { .. }
+                | ClientEvent::SecretDeleteFailed { .. }),
             ) => {
                 changed = fold_secret_event(&event, tree, commands, model) || changed;
             }

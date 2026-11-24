@@ -796,6 +796,9 @@ pub(crate) fn server_event_from_frame(
                     AgentChange::SecretSaved => norte_code_wire::ServerEventKind::SecretSaved {
                         provider: decoded.provider.unwrap_or_default(),
                     },
+                    AgentChange::SecretDeleted => norte_code_wire::ServerEventKind::SecretDeleted {
+                        provider: decoded.provider.unwrap_or_default(),
+                    },
                     AgentChange::SkillsUpdated => {
                         let count: CatalogCount = decoded
                             .details
@@ -1136,7 +1139,8 @@ pub(crate) fn session_from_request(request: &ClientRequest) -> Option<String> {
         | ClientRequestKind::RemovePlugin { .. }
         | ClientRequestKind::SetPluginEnabled { .. }
         | ClientRequestKind::SessionImport { .. }
-        | ClientRequestKind::SaveSecret { .. } => None,
+        | ClientRequestKind::SaveSecret { .. }
+        | ClientRequestKind::DeleteSecret { .. } => None,
     }?;
     Some(session.as_str().to_owned())
 }

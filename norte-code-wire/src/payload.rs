@@ -685,6 +685,8 @@ pub enum AgentChange {
     CatalogUpdated,
     /// A provider key was stored on the host.
     SecretSaved,
+    /// A provider key was removed from the host's key store.
+    SecretDeleted,
     /// The skills were rescanned.
     SkillsUpdated,
 }

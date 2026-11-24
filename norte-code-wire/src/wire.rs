@@ -630,6 +630,11 @@ pub enum ClientRequestKind {
         /// The secret value.
         key: String,
     },
+    /// Remove a provider key from the host's key store.
+    DeleteSecret {
+        /// The provider the key belongs to.
+        provider: String,
+    },
 }
 
 /// What a replayed message carries, so the client renders it the way the
@@ -1191,6 +1196,11 @@ pub enum ServerEventKind {
     /// A provider key was stored on the host.
     SecretSaved {
         /// The provider the key belongs to.
+        provider: String,
+    },
+    /// A provider key was removed from the host's key store.
+    SecretDeleted {
+        /// The provider the key belonged to.
         provider: String,
     },
     /// The editable catalogue: the providers and models written in the files,

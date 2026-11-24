@@ -5,7 +5,8 @@
 //! does not, shows only the models that match. Providers with nothing
 //! matching are hidden. Enter on a provider toggles its models; Enter on a
 //! model selects it, asking for the provider's key first when there is no
-//! key on disk or in the environment.
+//! key on disk or in the environment. Delete asks to remove the selected
+//! provider's saved key after a confirmation.
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -14,10 +15,31 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use serde::Serialize;
+use terminalui::components::button::{Button, ButtonVariant};
+use terminalui::components::dialog::Dialog;
 use terminalui::components::table::{Table, TableCell, TableRow};
-use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
+use terminalui::{Context, InputEvent, Node, Outcome, Stack, Theme, View, node};
 
+use super::copy::{CANCEL, CONFIRM, DELETE_KEY_TITLE, MODELS_KEY_HINT, delete_key_question};
 use super::detail_panel::{DetailPanel, Field};
+use super::node_lookup::find_node_mut;
+
+const TABLE_INDEX: usize = 0;
+const DETAIL_INDEX: usize = 1;
+const DELETE_DIALOG_INDEX: usize = 2;
+
+/// The interaction mode of the page.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+enum Mode {
+    /// Browsing the catalogue.
+    #[default]
+    Listing,
+    /// Confirming the removal of a provider's saved key.
+    ConfirmDelete {
+        /// The provider whose key would be removed.
+        provider: String,
+    },
+}
 
 /// How a provider is rendered: header row, then its models when expanded.
 #[derive(Clone)]
@@ -75,6 +97,11 @@ pub(crate) enum ModelsAction {
         /// The provider.
         provider: String,
     },
+    /// Remove the provider's saved key from the host.
+    DeleteKey {
+        /// The provider.
+        provider: String,
+    },
 }
 
 /// The catalogue picker.
@@ -99,6 +126,9 @@ pub(crate) struct ModelsPage {
     /// The last drawn area.
     #[serde(skip)]
     area: Rect,
+    /// What the page is doing over the catalogue.
+    #[serde(default)]
+    mode: Mode,
     /// Actions to drain.
     #[serde(skip)]
     pending: Vec<ModelsAction>,
@@ -118,6 +148,7 @@ impl ModelsPage {
             selected: 0,
             offset: 0,
             area: Rect::new(0, 0, 0, 0),
+            mode: Mode::Listing,
             pending: Vec::new(),
             children: vec![
                 node(
@@ -132,7 +163,94 @@ impl ModelsPage {
                     )),
                 ),
                 node("model_detail", DetailPanel::new()),
+                node("delete_key_dialog", Dialog::new(Vec::new())),
             ],
+        }
+    }
+
+    fn delete_dialog(provider: &str) -> Dialog {
+        Dialog::new(vec![node(
+            "actions",
+            Stack::horizontal().gap(2).children(vec![
+                node(
+                    "delete_key_cancel",
+                    Button::new(ButtonVariant::Secondary, CANCEL),
+                ),
+                node(
+                    "delete_key_confirm",
+                    Button::new(ButtonVariant::Destructive, CONFIRM),
+                ),
+            ]),
+        )])
+        .with_title(DELETE_KEY_TITLE)
+        .with_message(delete_key_question(provider))
+    }
+
+    fn open_delete(&mut self, provider: &str) {
+        if let Some(dialog) = self
+            .children
+            .get_mut(DELETE_DIALOG_INDEX)
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+        {
+            *dialog = Self::delete_dialog(provider);
+            dialog.open();
+        }
+        self.mode = Mode::ConfirmDelete {
+            provider: provider.to_owned(),
+        };
+    }
+
+    /// The view the host should focus while a dialog is open.
+    pub(crate) fn focus_id(&self) -> Option<&'static str> {
+        match self.mode {
+            Mode::Listing => None,
+            Mode::ConfirmDelete { .. } => Some("delete_key_confirm"),
+        }
+    }
+
+    fn dialog_button_pressed(&mut self, button_id: &str) -> bool {
+        self.children
+            .get_mut(DELETE_DIALOG_INDEX)
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+            .and_then(|dialog| find_node_mut(dialog.children_mut(), button_id))
+            .and_then(|node| node.view.as_any().downcast_mut::<Button>())
+            .is_some_and(Button::take_pressed)
+    }
+
+    fn dialog_open(&self) -> bool {
+        self.children
+            .get(DELETE_DIALOG_INDEX)
+            .and_then(|node| node.view.as_any_ref().downcast_ref::<Dialog>())
+            .is_some_and(Dialog::is_open)
+    }
+
+    /// Close a finished dialog and turn its outcome into an action.
+    fn drain_modal(&mut self) {
+        let Mode::ConfirmDelete { provider } = self.mode.clone() else {
+            return;
+        };
+        let confirmed = self.dialog_button_pressed("delete_key_confirm");
+        let cancelled = self.dialog_button_pressed("delete_key_cancel");
+        if !confirmed && !cancelled && self.dialog_open() {
+            return;
+        }
+        if let Some(dialog) = self
+            .children
+            .get_mut(DELETE_DIALOG_INDEX)
+            .and_then(|node| node.view.as_any().downcast_mut::<Dialog>())
+        {
+            dialog.close();
+        }
+        self.mode = Mode::Listing;
+        if confirmed {
+            self.pending.push(ModelsAction::DeleteKey { provider });
+        }
+    }
+
+    fn selected_provider(&self) -> Option<String> {
+        match self.rows().into_iter().nth(self.selected)? {
+            Row::Provider { name, .. } => Some(name),
+            Row::Model { model } => Some(model.provider),
         }
     }
 
@@ -153,6 +271,7 @@ impl ModelsPage {
 
     /// Take any pending requests the host should action.
     pub(crate) fn take_pending(&mut self) -> Vec<ModelsAction> {
+        self.drain_modal();
         std::mem::take(&mut self.pending)
     }
 
@@ -272,7 +391,7 @@ impl ModelsPage {
 
     fn handle_key(&mut self, key: &crossterm::event::KeyEvent) -> Outcome {
         use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-        if key.kind != KeyEventKind::Press {
+        if key.kind != KeyEventKind::Press || self.mode != Mode::Listing {
             return Outcome::Ignored;
         }
         if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
@@ -311,6 +430,12 @@ impl ModelsPage {
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     self.activate();
+                    return Outcome::Consumed;
+                }
+                KeyCode::Delete => {
+                    if let Some(provider) = self.selected_provider() {
+                        self.open_delete(&provider);
+                    }
                     return Outcome::Consumed;
                 }
                 KeyCode::Backspace => {
@@ -359,7 +484,7 @@ impl ModelsPage {
                     Field::new("provider", name),
                     Field::new("models", count.to_string()),
                     Field::new("key", if signed_in { "available" } else { "missing" }),
-                    Field::new("hint", "Enter expands or asks for a key"),
+                    Field::new("hint", MODELS_KEY_HINT),
                 ],
                 Row::Model { model } => {
                     let mut fields = vec![
@@ -395,6 +520,7 @@ impl ModelsPage {
                     if model.deprecated {
                         fields.push(Field::new("status", "deprecated"));
                     }
+                    fields.push(Field::new("hint", MODELS_KEY_HINT));
                     fields
                 }
             },
@@ -402,7 +528,7 @@ impl ModelsPage {
         let title = "model";
         if let Some(panel) = self
             .children
-            .get_mut(1)
+            .get_mut(DETAIL_INDEX)
             .and_then(|node| node.view.as_any().downcast_mut::<DetailPanel>())
         {
             panel.set(title, fields);
@@ -564,24 +690,34 @@ impl View for ModelsPage {
         let table_rows = self.table_rows(&rows);
         if let Some(table) = self
             .children
-            .first_mut()
+            .get_mut(TABLE_INDEX)
             .and_then(|node| node.view.as_any().downcast_mut::<Table>())
         {
             table.set_rows(table_rows);
             table.state.selected = self.selected.min(rows.len().saturating_sub(1));
         }
-        if let Some(child) = self.children.first_mut() {
+        if let Some(child) = self.children.get_mut(TABLE_INDEX) {
             child.view.render(table_rect, buf, cx, theme);
         }
-        if let Some(child) = self.children.get_mut(1) {
+        if let Some(child) = self.children.get_mut(DETAIL_INDEX) {
             child.view.render(detail_rect, buf, cx, theme);
+        }
+        if self.mode != Mode::Listing
+            && let Some(dialog) = self.children.get_mut(DELETE_DIALOG_INDEX)
+        {
+            dialog.view.render(area, buf, cx, theme);
         }
     }
 
-    fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
+    fn handle_event(&mut self, event: &InputEvent, cx: &mut Context) -> Outcome {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let _ = cx.is_focused();
         match event {
             InputEvent::Mouse(mouse) => {
-                use crossterm::event::{MouseButton, MouseEventKind};
+                if self.mode != Mode::Listing {
+                    return Outcome::Ignored;
+                }
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
                         self.selected = self.selected.saturating_sub(3);
@@ -611,3 +747,7 @@ impl View for ModelsPage {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "models_page_tests.rs"]
+mod tests;

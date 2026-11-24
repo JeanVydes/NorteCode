@@ -30,6 +30,19 @@ fn a_secret_save_round_trips_without_a_session() {
 }
 
 #[test]
+fn a_secret_delete_round_trips_without_a_session() {
+    let request = round_trips_request(ClientRequestKind::DeleteSecret {
+        provider: "anthropic".to_owned(),
+    });
+    match request.kind {
+        ClientRequestKind::DeleteSecret { provider } => {
+            assert_eq!(provider, "anthropic");
+        }
+        other => panic!("expected a secret delete, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_fork_without_new_fields_adds_no_fields() {
     let request = round_trips_request(ClientRequestKind::ForkSession {
         session: SessionKey::new("s"),
