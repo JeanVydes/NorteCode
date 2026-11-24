@@ -132,16 +132,13 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             },
-            ServiceCommand::Restart => {
-                service::down().ok();
-                match service::up() {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(error) => {
-                        eprintln!("{} {}", output::red("✗"), error);
-                        ExitCode::FAILURE
-                    }
+            ServiceCommand::Restart => match service::down().and_then(|()| service::up()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("{} {}", output::red("✗"), error);
+                    ExitCode::FAILURE
                 }
-            }
+            },
             ServiceCommand::Status => {
                 service::status();
                 ExitCode::SUCCESS

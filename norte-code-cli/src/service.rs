@@ -194,6 +194,51 @@ fn pid_alive(pid: i32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).is_dir()
 }
 
+/// Whether a process is the RAEP service daemon.
+///
+/// The daemon and the TUI share the `norte` binary and process name, so the
+/// name alone cannot tell them apart. The daemon is the one launched with the
+/// `service serve` arguments; matching those keeps a restart from killing the
+/// TUI or another `norte` process.
+fn process_cmdline(pid: i32) -> Option<Vec<String>> {
+    let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let args = raw
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect();
+    Some(args)
+}
+
+/// Whether argument list `args` is the daemon, not the TUI or another binary.
+fn cmdline_is_service(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "serve") && args.iter().any(|arg| arg == "service")
+}
+
+fn is_service_process(pid: i32) -> bool {
+    process_cmdline(pid).is_some_and(|args| cmdline_is_service(&args))
+}
+
+/// The PID of the running service daemon, found by its arguments.
+fn find_service_pid() -> Option<i32> {
+    let entries = fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let pid: i32 = match entry.file_name().to_string_lossy().parse() {
+            Ok(pid) => pid,
+            Err(_) => continue,
+        };
+        if is_service_process(pid) {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+/// The PID the pidfile names, but only when it still points at the daemon.
+fn pidfile_service_pid() -> Option<i32> {
+    read_pidfile().filter(|pid| is_service_process(*pid))
+}
+
 fn kill_pid(pid: i32, signal: i32) {
     // Use kill(2) via a tiny subprocess to avoid unsafe.
     let _ = Command::new("kill")
@@ -291,7 +336,7 @@ pub(crate) fn down() -> Result<(), String> {
         let _ = fs::remove_file(pidfile_path());
         return Ok(());
     }
-    let pid = read_pidfile().or_else(|| find_pid_by_name("norte-code-server"));
+    let pid = pidfile_service_pid().or_else(find_service_pid);
     let Some(pid) = pid else {
         return Err("service is up but no PID could be found — kill it manually".to_owned());
     };
@@ -311,27 +356,11 @@ pub(crate) fn down() -> Result<(), String> {
     Ok(())
 }
 
-fn find_pid_by_name(name: &str) -> Option<i32> {
-    // Linux-only fallback: scan /proc for a process whose comm matches.
-    let entries = fs::read_dir("/proc").ok()?;
-    for entry in entries.flatten() {
-        let pid: i32 = match entry.file_name().to_string_lossy().parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let comm = fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
-        if comm.trim() == name {
-            return Some(pid);
-        }
-    }
-    None
-}
-
 pub(crate) fn status() {
     let url = service_url();
     output::print_heading("norte-code service");
     output::print_kv("endpoint", &url);
-    if let Some(pid) = read_pidfile().or_else(|| find_pid_by_name("norte-code-server")) {
+    if let Some(pid) = pidfile_service_pid().or_else(find_service_pid) {
         output::print_kv("pid", &pid.to_string());
         if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
             let _ = stat; // kept for future uptime parsing

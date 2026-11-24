@@ -2,7 +2,7 @@
 
 use norte_code_client::config::ServiceLifecycleConfig;
 
-use super::worker_count_from;
+use super::{cmdline_is_service, worker_count_from};
 
 fn lifecycle_with_workers(workers: usize) -> ServiceLifecycleConfig {
     ServiceLifecycleConfig {
@@ -30,4 +30,32 @@ fn worker_count_ignores_invalid_overrides() {
     let config = lifecycle_with_workers(5);
     assert_eq!(worker_count_from(Some("many"), 12, &config), 5);
     assert_eq!(worker_count_from(Some("0"), 12, &config), 1);
+}
+
+fn args(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+#[test]
+fn service_process_is_found_by_its_arguments_not_its_name() {
+    assert!(cmdline_is_service(&args(&[
+        "/home/jean/.cargo/bin/norte",
+        "service",
+        "serve"
+    ])));
+}
+
+#[test]
+fn tui_and_other_service_subcommands_are_not_the_daemon() {
+    assert!(!cmdline_is_service(&args(&["/home/jean/.cargo/bin/norte"])));
+    assert!(!cmdline_is_service(&args(&[
+        "/home/jean/.cargo/bin/norte",
+        "service",
+        "status"
+    ])));
+    assert!(!cmdline_is_service(&args(&[
+        "/home/jean/.cargo/bin/norte",
+        "service",
+        "restart"
+    ])));
 }
