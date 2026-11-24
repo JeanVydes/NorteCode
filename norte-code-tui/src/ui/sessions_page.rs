@@ -321,6 +321,7 @@ impl SessionsPage {
         self.mode = Mode::ConfirmDelete {
             session: norte_code_wire::SessionKey::new(session.session_id.clone()),
         };
+        self.submit_requested = false;
     }
 
     /// The view the host should focus while a dialog is open.
@@ -387,11 +388,14 @@ impl SessionsPage {
                 }
             }
             Mode::ConfirmDelete { session } => {
-                let confirmed = self
-                    .dialog_child::<Button, _>(DELETE_DIALOG_INDEX, "delete_confirm", |button| {
-                        button.take_pressed()
-                    })
-                    .unwrap_or(false);
+                let confirmed = self.submit_requested
+                    || self
+                        .dialog_child::<Button, _>(
+                            DELETE_DIALOG_INDEX,
+                            "delete_confirm",
+                            Button::take_pressed,
+                        )
+                        .unwrap_or(false);
                 let cancelled = self
                     .dialog_child::<Button, _>(DELETE_DIALOG_INDEX, "delete_cancel", |button| {
                         button.take_pressed()
@@ -610,6 +614,16 @@ impl View for SessionsPage {
                     return Outcome::Ignored;
                 }
                 if matches!(self.mode, Mode::Rename { .. }) {
+                    if key.code == crossterm::event::KeyCode::Enter {
+                        self.submit_requested = true;
+                        return Outcome::Consumed;
+                    }
+                    return Outcome::Ignored;
+                }
+                if matches!(self.mode, Mode::ConfirmDelete { .. }) {
+                    // The confirm button sits behind a Pane whose focus
+                    // counting differs from the tree's, so Enter does not
+                    // reliably reach it. Handle it here, as Rename does.
                     if key.code == crossterm::event::KeyCode::Enter {
                         self.submit_requested = true;
                         return Outcome::Consumed;

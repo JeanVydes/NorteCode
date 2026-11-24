@@ -952,3 +952,49 @@ fn deleting_an_environment_key_shows_a_toast() {
     );
     assert!(commands_rx.try_recv().is_err());
 }
+
+#[test]
+fn enter_confirms_delete_and_closes_the_overlay() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Sessions;
+    let mut tree = ui::build_tree(&model);
+    tree.find_mut::<ui::SessionsPage>("sessions")
+        .expect("sessions page")
+        .set_data(
+            vec![norte_code_wire::SessionSummary {
+                session_id: "doomed".to_owned(),
+                ..Default::default()
+            }],
+            None,
+            crate::session_stats::SharedUsage::default(),
+        );
+    ui::sync_views(&mut tree, &model);
+    assert!(tree.focus("sessions"));
+    let mut commands = None;
+    let mut events = None;
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+    assert_eq!(tree.focused_id(), Some("delete_confirm"));
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+
+    assert_eq!(
+        tree.focused_id(),
+        Some("sessions"),
+        "confirm must close the delete overlay and return focus"
+    );
+}
