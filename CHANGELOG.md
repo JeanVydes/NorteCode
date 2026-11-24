@@ -32,15 +32,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   the first user message. The answer is parsed into a short plain title, saved
   with a `derived` title source, and published as `SessionRenamed`. A title the
   user chose is never replaced.
-- The models page can delete a provider's saved key with `Shift+Delete`, after
+- The models page can delete a provider's saved key with `Shift+Space`, after
   a confirmation. The host removes the stored entry and leaves environment
   variables untouched.
 
 ### Fixed
 
-- `Shift+Delete` opens the provider key confirmation even when the terminal
-  reports it as `Shift+Backspace`. Backspace with an empty filter no longer
-  jumps to the first provider.
+- Backspace with an empty filter no longer jumps to the first provider; it
+  leaves the key to the text input.
 - The key overlay shows the full `cancel` and `save` button labels again.
   Horizontal stacks now reserve each child's measured width instead of one cell.
 - Long shell output lines wrap at the console width instead of being cut off.

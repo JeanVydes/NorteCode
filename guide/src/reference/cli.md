@@ -103,7 +103,7 @@ the files are written and picked up on the next start.
 Key resolution is environment first, then `secrets.json` beside the config
 (mode 0600). Selecting a model in the TUI checks both; if the provider's key
 is missing, it opens a prompt to paste it and saves it under the provider id.
-Press Shift+Delete on a model or provider to erase its saved key after a
+Press Shift+Space on a model or provider to erase its saved key after a
 confirmation; an environment variable is reported, never removed.
 
 ### `norte service mcps …`

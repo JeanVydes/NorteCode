@@ -54,16 +54,9 @@ fn input(code: KeyCode) -> InputEvent {
     InputEvent::from(Event::Key(key_event(code)))
 }
 
-fn shift_delete() -> InputEvent {
+fn shift_space() -> InputEvent {
     InputEvent::from(Event::Key(key_event_with_modifiers(
-        KeyCode::Delete,
-        KeyModifiers::SHIFT,
-    )))
-}
-
-fn shift_backspace() -> InputEvent {
-    InputEvent::from(Event::Key(key_event_with_modifiers(
-        KeyCode::Backspace,
+        KeyCode::Char(' '),
         KeyModifiers::SHIFT,
     )))
 }
@@ -72,7 +65,7 @@ fn shift_backspace() -> InputEvent {
 fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_delete());
+    tree.handle_event(&shift_space());
 
     assert!(matches!(
         tree.find::<ModelsPage>("models").map(|page| page.mode.clone()),
@@ -100,7 +93,7 @@ fn deleting_a_key_requires_confirmation_and_carries_the_provider() {
 fn cancelling_the_key_dialog_leaves_the_key_alone() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_delete());
+    tree.handle_event(&shift_space());
     assert!(tree.focus("delete_key_cancel"));
     tree.handle_event(&input(KeyCode::Enter));
 
@@ -120,7 +113,7 @@ fn cancelling_the_key_dialog_leaves_the_key_alone() {
 fn the_confirmation_names_the_provider() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_delete());
+    tree.handle_event(&shift_space());
 
     let area = Rect::new(0, 0, 80, 24);
     let mut buf = ratatui::buffer::Buffer::empty(area);
@@ -154,15 +147,32 @@ fn plain_delete_is_left_to_the_text_input() {
 }
 
 #[test]
-fn shift_backspace_opens_the_same_confirmation() {
+fn shift_space_does_not_type_into_the_filter() {
     let mut tree = Tree::new(node("models", page_with_keys()));
     tree.focus("models");
-    tree.handle_event(&shift_backspace());
+    tree.handle_event(&shift_space());
 
+    let page = tree.find::<ModelsPage>("models").expect("page");
+    assert_eq!(page.filter, "");
     assert!(matches!(
-        tree.find::<ModelsPage>("models").map(|page| page.mode.clone()),
-        Some(Mode::ConfirmDelete { provider }) if provider == "openrouter"
+        page.mode,
+        Mode::ConfirmDelete { ref provider } if provider == "openrouter"
     ));
+}
+
+#[test]
+fn plain_space_still_activates_the_selection() {
+    let mut tree = Tree::new(node("models", page_with_keys()));
+    tree.focus("models");
+    tree.handle_event(&input(KeyCode::Char(' ')));
+
+    let actions = tree
+        .find_mut::<ModelsPage>("models")
+        .expect("page")
+        .take_pending();
+    assert!(
+        matches!(&actions[..], [ModelsAction::ToggleExpand { provider }] if provider == "openrouter")
+    );
 }
 
 #[test]
