@@ -1,6 +1,6 @@
 //! The single entry point for Norte Code.
 //!
-//! `norte` runs the service if it is not already running and then opens the
+//! `norte` restarts the local service and then opens the
 //! terminal interface. `norte service …` manages the background server, and
 //! `norte tui` only runs the terminal interface. Everything else is a thin
 //! wrapper over the host's HTTP API.
@@ -106,7 +106,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         None => {
-            if let Err(error) = service::ensure_up() {
+            if let Err(error) = service::prepare_for_tui() {
                 eprintln!("{} {}", output::red("✗"), error);
                 return ExitCode::FAILURE;
             }

@@ -331,12 +331,12 @@ pub(crate) fn up() -> Result<(), String> {
 pub(crate) fn down() -> Result<(), String> {
     let lifecycle = &runtime_config().service_lifecycle;
     let url = service_url();
-    if !probe(&url) {
+    let pid = pidfile_service_pid().or_else(find_service_pid);
+    if !probe(&url) && pid.is_none() {
         println!("  {} service is not running", output::muted("○"));
         let _ = fs::remove_file(pidfile_path());
         return Ok(());
     }
-    let pid = pidfile_service_pid().or_else(find_service_pid);
     let Some(pid) = pid else {
         return Err("service is up but no PID could be found — kill it manually".to_owned());
     };
@@ -873,12 +873,20 @@ pub(crate) fn doctor() -> Result<(), String> {
     Ok(())
 }
 
-pub fn ensure_up() -> Result<(), String> {
+pub fn prepare_for_tui() -> Result<(), String> {
+    let path = norte_code_protocol::config::user_cli_path();
+    let config = norte_code_protocol::config::CliConfig::load(path.as_deref(), None)
+        .map_err(|error| format!("could not read client config: {error}"))?
+        .config;
     let url = service_url();
-    if probe(&url) {
-        return Ok(());
+    if config.service_type == norte_code_protocol::config::ServiceType::Remote {
+        return if probe(&url) {
+            Ok(())
+        } else {
+            Err(format!("remote service is not reachable at {url}"))
+        };
     }
-    up()?;
+    restart_local(&url, down, probe, up)?;
     // Wait a bit more in case probe lagged.
     for _ in 0..20 {
         if probe(&url) {
@@ -887,4 +895,19 @@ pub fn ensure_up() -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     Err(format!("service did not become ready at {url}"))
+}
+
+fn restart_local(
+    url: &str,
+    stop: impl FnOnce() -> Result<(), String>,
+    is_running: impl FnOnce(&str) -> bool,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    stop()?;
+    if is_running(url) {
+        return Err(format!(
+            "service at {url} is still running; cannot start a service for this workspace"
+        ));
+    }
+    start()
 }

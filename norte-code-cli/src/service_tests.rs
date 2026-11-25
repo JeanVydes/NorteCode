@@ -2,7 +2,45 @@
 
 use norte_code_client::config::ServiceLifecycleConfig;
 
-use super::{cmdline_is_service, worker_count_from};
+use super::{cmdline_is_service, restart_local, worker_count_from};
+
+#[test]
+fn restarting_stops_the_service_before_starting_a_new_one() {
+    let events = std::cell::RefCell::new(Vec::new());
+    restart_local(
+        "local",
+        || {
+            events.borrow_mut().push("stop");
+            Ok(())
+        },
+        |_| {
+            events.borrow_mut().push("probe");
+            false
+        },
+        || {
+            events.borrow_mut().push("start");
+            Ok(())
+        },
+    )
+    .expect("restart");
+    assert_eq!(*events.borrow(), ["stop", "probe", "start"]);
+}
+
+#[test]
+fn restarting_does_not_reuse_a_service_that_failed_to_stop() {
+    let started = std::cell::Cell::new(false);
+    let result = restart_local(
+        "local",
+        || Ok(()),
+        |_| true,
+        || {
+            started.set(true);
+            Ok(())
+        },
+    );
+    assert!(result.is_err());
+    assert!(!started.get());
+}
 
 fn lifecycle_with_workers(workers: usize) -> ServiceLifecycleConfig {
     ServiceLifecycleConfig {
