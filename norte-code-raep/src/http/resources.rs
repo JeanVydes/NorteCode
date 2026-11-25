@@ -17,6 +17,19 @@ pub(super) async fn list_agents(
     .into_response()
 }
 
+pub(super) async fn clear_data(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = principal(&host, &headers) {
+        return response;
+    }
+    match host.clear_data().await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => invalid(&error.to_string()),
+    }
+}
+
 pub(super) async fn read_agent(
     State(host): State<Arc<NorteCodeRaepHost>>,
     headers: HeaderMap,

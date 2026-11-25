@@ -792,6 +792,9 @@ fn paint_connection(
         SessionAttachmentState::Connecting => Badge::new(CONNECTING_DOT)
             .with_variant(BadgeVariant::Warning)
             .render(badge_row(inner, y, CONNECTING_DOT), buf, cx, theme),
+        SessionAttachmentState::Ready => Badge::new("ready")
+            .with_variant(BadgeVariant::Success)
+            .render(badge_row(inner, y, "ready"), buf, cx, theme),
         SessionAttachmentState::Attached => Badge::new(ATTACHED)
             .with_variant(BadgeVariant::Success)
             .render(badge_row(inner, y, ATTACHED), buf, cx, theme),

@@ -28,6 +28,13 @@ pub enum ServiceError {
     /// The engine failed.
     #[error(transparent)]
     Norte(#[from] norte::Error),
+    /// Session data could not be removed from the persistence store.
+    #[error("data cleanup failed: {source}")]
+    DataCleanup {
+        /// The underlying persistence failure.
+        #[source]
+        source: norte::Error,
+    },
     /// The named session is not known.
     #[error("session `{0}` is not known")]
     UnknownSession(String),

@@ -24,6 +24,93 @@ use super::*;
 use super::NorteCodeRaepHost;
 
 impl NorteCodeRaepHost {
+    /// Removes every session and all operational data while preserving the
+    /// service configuration and installed catalogues.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a running turn cannot be stopped or a durable data
+    /// store cannot be cleared.
+    pub async fn clear_data(&self) -> Result<usize, HostError> {
+        self.turn_handles.abort_all().await;
+        let mut sessions = std::collections::BTreeSet::new();
+        for service in self.services.values() {
+            sessions.extend(
+                service
+                    .list_live_sessions()
+                    .await
+                    .into_iter()
+                    .map(|info| info.session.as_str().to_owned()),
+            );
+        }
+        let owners = self.state.lock().await.session_owners.clone();
+        let count = sessions.len();
+        for session in sessions {
+            let owner = owners.get(&session).map_or("", String::as_str);
+            self.delete_session(&session, owner).await?;
+        }
+        for service in self.services.values() {
+            service
+                .clear_data()
+                .await
+                .map_err(|error| HostError::Service(error.to_string()))?;
+        }
+        if let Some(index) = &self.upload_index {
+            index.clear().await?;
+        }
+        self.clear_bundle_artifacts().await?;
+        self.clear_legacy_pins().await?;
+        let replay = Arc::clone(&self.replay);
+        tokio::task::spawn_blocking(move || replay.clear())
+            .await
+            .map_err(|error| HostError::Replay(format!("replay cleanup task: {error}")))??;
+        *self.state.lock().await = HostState::default();
+        Ok(count)
+    }
+
+    async fn clear_bundle_artifacts(&self) -> Result<(), HostError> {
+        let root = self.config.replay_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            for name in ["imports", "exports"] {
+                let path = root.join(name);
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(HostError::Artifact(format!(
+                            "could not clear {name}: {error}"
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| HostError::Artifact(format!("artifact cleanup task: {error}")))?
+    }
+
+    async fn clear_legacy_pins(&self) -> Result<(), HostError> {
+        let Some(path) = self.config.legacy_pins_dir.clone() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || {
+            for path in [path.clone(), path.with_file_name("pins.migrated")] {
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(HostError::Artifact(format!(
+                            "could not clear legacy pins: {error}"
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| HostError::Artifact(format!("pins cleanup task: {error}")))?
+    }
+
     pub(crate) fn service_for_agent(&self, agent_id: &str) -> Result<Arc<Service>, HostError> {
         let requested = if agent_id.is_empty() {
             &self.config.agent_id
@@ -309,13 +396,17 @@ impl NorteCodeRaepHost {
         if self.session_summary(session_id, principal).await.is_none() {
             return Ok(false);
         }
-        self.submit_service(
-            session_id,
-            ClientRequestKind::DeleteSession {
-                session: SessionKey::new(session_id),
-            },
-        )
-        .await?;
+        let service = self.service_for_session(session_id)?;
+        let events = service
+            .submit(norte_code_wire::ClientRequest {
+                request_id: 0,
+                kind: ClientRequestKind::DeleteSession {
+                    session: SessionKey::new(session_id),
+                },
+            })
+            .await
+            .map_err(|error| HostError::Service(error.to_string()))?;
+        self.collect_service_events(session_id, events).await?;
         {
             let mut state = self.state.lock().await;
             state.attached.remove(session_id);

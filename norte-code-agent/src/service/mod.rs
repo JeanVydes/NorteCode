@@ -12,6 +12,7 @@ mod cancellation;
 mod compaction;
 mod config_state;
 mod construction;
+mod data_clear;
 mod delegation;
 mod delegation_settings;
 mod delegator;

@@ -17,6 +17,14 @@ use std::path::{Path, PathBuf};
 
 use super::schema::CatalogError;
 
+/// A catalogue directory could not be derived from the process environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CatalogLocationError {
+    /// Neither supported configuration root is set.
+    #[error("neither XDG_CONFIG_HOME nor HOME is set, so the catalogue has no location")]
+    MissingConfigRoot,
+}
+
 /// The built-in provider catalogue.
 const DEFAULT_PROVIDERS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -35,18 +43,14 @@ const DEFAULT_MODELS: &str = include_str!(concat!(
 ///
 /// Returns a message naming the missing variable when neither
 /// `XDG_CONFIG_HOME` nor `HOME` is set.
-pub fn catalog_dir() -> Result<PathBuf, String> {
+pub fn catalog_dir() -> Result<PathBuf, CatalogLocationError> {
     if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(config).join("norte-code"));
     }
     if let Some(home) = std::env::var_os("HOME") {
         return Ok(PathBuf::from(home).join(".config").join("norte-code"));
     }
-    Err(
-        "neither XDG_CONFIG_HOME nor HOME is set, so the catalogue has no location; \
-         set HOME, or XDG_CONFIG_HOME to name it directly"
-            .to_owned(),
-    )
+    Err(CatalogLocationError::MissingConfigRoot)
 }
 
 /// The providers file.
@@ -55,7 +59,7 @@ pub fn catalog_dir() -> Result<PathBuf, String> {
 ///
 /// Returns a message naming the missing variable when neither
 /// `XDG_CONFIG_HOME` nor `HOME` is set.
-pub fn providers_path() -> Result<PathBuf, String> {
+pub fn providers_path() -> Result<PathBuf, CatalogLocationError> {
     Ok(catalog_dir()?.join("providers.json"))
 }
 
@@ -65,7 +69,7 @@ pub fn providers_path() -> Result<PathBuf, String> {
 ///
 /// Returns a message naming the missing variable when neither
 /// `XDG_CONFIG_HOME` nor `HOME` is set.
-pub fn models_path() -> Result<PathBuf, String> {
+pub fn models_path() -> Result<PathBuf, CatalogLocationError> {
     Ok(catalog_dir()?.join("models.json"))
 }
 
@@ -99,7 +103,7 @@ impl CreatedCatalog {
 /// Returns [`CatalogError`] when the directory cannot be found or created, and
 /// when a file that was missing cannot be written.
 pub fn ensure_catalog_files() -> Result<CreatedCatalog, CatalogError> {
-    let dir = catalog_dir().map_err(|message| CatalogError::NoDirectory { message })?;
+    let dir = catalog_dir().map_err(CatalogError::NoDirectory)?;
     ensure_in(&dir)
 }
 
@@ -133,11 +137,16 @@ fn write_missing(path: &Path, body: &str) -> Result<bool, CatalogError> {
             });
         }
     };
-    file.write_all(body.as_bytes())
-        .map_err(|source| CatalogError::Write {
+    let result = file
+        .write_all(body.as_bytes())
+        .and_then(|()| file.sync_all());
+    if let Err(source) = result {
+        let _ = std::fs::remove_file(path);
+        return Err(CatalogError::Write {
             path: path.to_path_buf(),
             source,
-        })?;
+        });
+    }
     Ok(true)
 }
 

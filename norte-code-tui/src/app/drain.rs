@@ -63,7 +63,7 @@ pub(in crate::app) fn drain_toasts(tree: &mut terminalui::Tree) {
 pub(in crate::app) fn drain_composer_actions(
     tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
-    model: &UiModel,
+    model: &mut UiModel,
 ) {
     let actions = tree
         .find_mut::<ui::Composer>("composer")
@@ -77,11 +77,15 @@ pub(in crate::app) fn drain_composer_actions(
                     push_attachment_notice(tree, &error.into());
                     continue;
                 }
-                if let (Some(commands), Some(session)) = (commands.as_ref(), model.active.clone()) {
-                    let _ = commands.try_send(UiCommand::Upload {
-                        session,
-                        attachment,
-                    });
+                if let Some(session) = model.active.clone() {
+                    if let Some(commands) = commands.as_ref() {
+                        let _ = commands.try_send(UiCommand::Upload {
+                            session,
+                            attachment,
+                        });
+                    }
+                } else {
+                    model.pending_attachments.push(attachment);
                 }
             }
         }

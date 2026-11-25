@@ -83,6 +83,8 @@ pub enum Endpoint<'a> {
     },
     /// The sessions the principal can see.
     Sessions,
+    /// Clears all persisted operational data on the service.
+    ClearData,
     /// Creates a session.
     CreateSession(CreateSessionRequest<'a>),
     /// One session.
@@ -160,7 +162,9 @@ impl Endpoint<'_> {
             | Self::Imports
             | Self::ImportCommit { .. } => Method::POST,
             Self::RenameSession { .. } => Method::PATCH,
-            Self::DeleteSession { .. } | Self::DeleteImport { .. } => Method::DELETE,
+            Self::DeleteSession { .. } | Self::DeleteImport { .. } | Self::ClearData => {
+                Method::DELETE
+            }
             Self::Info
             | Self::HealthLive
             | Self::HealthReady
@@ -192,6 +196,7 @@ impl Endpoint<'_> {
             Self::Agents => "/raep/v1/agents".to_owned(),
             Self::Agent { id } => format!("/raep/v1/agents/{}", encode(id)),
             Self::Sessions | Self::CreateSession(_) => "/raep/v1/sessions".to_owned(),
+            Self::ClearData => "/raep/v1/data".to_owned(),
             Self::Session { id } | Self::RenameSession { id, .. } | Self::DeleteSession { id } => {
                 format!("/raep/v1/sessions/{}", encode(id))
             }

@@ -7,10 +7,17 @@ pub(crate) enum SettingsSection {
     Plugins,
     Preferences,
     Agents,
+    Data,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [Self; 4] = [Self::Host, Self::Plugins, Self::Preferences, Self::Agents];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Host,
+        Self::Plugins,
+        Self::Preferences,
+        Self::Agents,
+        Self::Data,
+    ];
 
     fn index(self) -> usize {
         match self {
@@ -18,6 +25,7 @@ impl SettingsSection {
             Self::Plugins => 1,
             Self::Preferences => 2,
             Self::Agents => 3,
+            Self::Data => 4,
         }
     }
 }
@@ -32,7 +40,7 @@ pub(crate) struct SectionRect {
 /// Computed once per render and reused for click hit-testing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SettingsLayout {
-    sections: [SectionRect; 4],
+    sections: [SectionRect; 5],
     pref_rows_y: u16,
     plugin_rows_y: u16,
     total_height: u16,
@@ -52,6 +60,7 @@ impl SettingsLayout {
         plugins: usize,
         agents: usize,
         preferences: usize,
+        data_actions: usize,
     ) -> Self {
         let heights = SettingsSection::ALL.map(|section| match section {
             SettingsSection::Host => 1_u16
@@ -66,8 +75,9 @@ impl SettingsLayout {
                 .saturating_add(Self::PANEL_BORDER)
                 .saturating_add(Self::TABLE_HEADER)
                 .saturating_add(rows(agents)),
+            SettingsSection::Data => 1_u16.saturating_add(rows(data_actions)),
         });
-        let mut sections = [SectionRect { y: 0, height: 0 }; 4];
+        let mut sections = [SectionRect { y: 0, height: 0 }; 5];
         let mut y = 0;
         for (section, height) in SettingsSection::ALL.into_iter().zip(heights) {
             sections[section.index()] = SectionRect { y, height };

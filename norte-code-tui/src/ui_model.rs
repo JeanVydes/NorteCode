@@ -3,6 +3,7 @@
 //! The view reads this; only the client layer mutates it. Everything here
 //! is plain data, free of any notion of terminal or layout.
 
+use crate::attachment::PreparedAttachment;
 use crate::context::ContextUsage;
 use crate::diff::DiffMode;
 use crate::theme::{ThemeCatalog, ThemeChoice, ThemeKind};
@@ -33,6 +34,8 @@ pub(crate) enum SessionAttachmentState {
     Disconnected,
     /// Attaching now; no messages will flow until this resolves.
     Connecting,
+    /// Connected and ready; the first session will be created on first send.
+    Ready,
     /// Attached and streaming.
     Attached,
     /// The attach attempt failed; a reason is shown instead of the chat.
@@ -257,6 +260,8 @@ pub(crate) struct UiModel {
     pub(crate) sessions: Vec<SessionSummary>,
     /// The session the interface is attached to; set on attach.
     pub(crate) active: Option<norte_code_wire::SessionKey>,
+    /// Attachments staged locally until the first message creates a session.
+    pub(crate) pending_attachments: Vec<PreparedAttachment>,
     /// The model catalogue of the attached server.
     pub(crate) models: Vec<norte_code_wire::ModelInfo>,
     /// The attachment's plans.
@@ -495,6 +500,7 @@ impl UiModel {
             active_turn: None,
             sessions: Vec::new(),
             active: None,
+            pending_attachments: Vec::new(),
             models: Vec::new(),
             plans: Vec::new(),
             todos: Vec::new(),

@@ -20,6 +20,8 @@ pub(crate) enum ClientError {
     RenameSession(String),
     /// Deleting a session.
     DeleteSession(String),
+    /// Clearing persisted service data.
+    ClearData(String),
     /// Installing, updating or toggling a plugin.
     Plugin(String),
     /// Creating a session.
@@ -81,6 +83,11 @@ impl ClientError {
     /// The host refused a delete.
     pub(crate) fn delete(error: impl fmt::Display) -> Self {
         Self::DeleteSession(format!("delete session failed · {error}"))
+    }
+
+    /// The host refused to clear service data.
+    pub(crate) fn clear_data(error: impl fmt::Display) -> Self {
+        Self::ClearData(format!("clear data failed · {error}"))
     }
 
     /// A plugin operation failed.
@@ -187,6 +194,7 @@ impl fmt::Display for ClientError {
             Self::CancelTurn(message)
             | Self::RenameSession(message)
             | Self::DeleteSession(message)
+            | Self::ClearData(message)
             | Self::Plugin(message)
             | Self::CreateSession(message)
             | Self::Runtime(message)

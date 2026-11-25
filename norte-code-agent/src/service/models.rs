@@ -590,6 +590,9 @@ impl Service {
         for skipped in catalog.extend(providers.providers, models.models) {
             tracing::warn!("skipping plugin catalogue entry during reload: {skipped}");
         }
+        for warning in catalog.warnings() {
+            tracing::warn!("catalogue entry was adjusted: {warning}");
+        }
         let models = catalog.model_count();
         *self.lock_catalog_write() = Arc::new(catalog);
         Ok(single(

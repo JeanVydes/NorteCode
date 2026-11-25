@@ -284,3 +284,18 @@ fn the_ring_forgets_the_oldest_record_when_it_is_full() {
         MAX_TELEMETRY_RECORDS - 1
     );
 }
+
+#[test]
+fn clearing_telemetry_removes_records_and_resets_counters() {
+    let telemetry = Telemetry::default();
+    telemetry.push(request_record("row", "session"));
+    telemetry
+        .counters
+        .requests
+        .store(4, std::sync::atomic::Ordering::Relaxed);
+
+    telemetry.clear();
+
+    assert!(telemetry.records.lock().expect("records").is_empty());
+    assert_eq!(telemetry.counters.snapshot()["requests"], 0);
+}

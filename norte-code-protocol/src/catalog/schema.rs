@@ -7,6 +7,48 @@ use norte_code_wire::catalog::{
     MAX_CATALOG_BYTES, MAX_CONTEXT, MAX_OUTPUT, Model, ModelEntry, Models, Provider, Providers,
 };
 
+/// Which catalogue file a write error concerns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogFile {
+    /// `providers.json`.
+    Providers,
+    /// `models.json`.
+    Models,
+}
+
+/// Why a wire endpoint cannot be used as an HTTP base URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireEndpointError {
+    /// The value cannot be parsed as a URL.
+    InvalidUrl,
+    /// Only HTTP and HTTPS endpoints are supported.
+    UnsupportedScheme,
+    /// The URL has no host.
+    MissingHost,
+    /// Credentials must be configured through Norte Code's key handling.
+    EmbeddedCredentials,
+}
+
+impl std::fmt::Display for WireEndpointError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidUrl => "not a valid URL",
+            Self::UnsupportedScheme => "must use HTTP or HTTPS",
+            Self::MissingHost => "must name a host",
+            Self::EmbeddedCredentials => "must not contain embedded credentials",
+        })
+    }
+}
+
+impl std::fmt::Display for CatalogFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Providers => formatter.write_str("providers"),
+            Self::Models => formatter.write_str("models"),
+        }
+    }
+}
+
 /// A failure while reading the catalogue.
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -21,11 +63,8 @@ pub enum CatalogError {
         max: usize,
     },
     /// Neither `XDG_CONFIG_HOME` nor `HOME` is set, so there is nowhere to look.
-    #[error("{message}")]
-    NoDirectory {
-        /// What is missing, as the path helpers word it.
-        message: String,
-    },
+    #[error(transparent)]
+    NoDirectory(#[from] super::source::CatalogLocationError),
     /// A file could not be read.
     #[error("could not read {path}: {source}")]
     Read {
@@ -76,6 +115,50 @@ pub enum CatalogError {
         /// The providers file.
         path: PathBuf,
     },
+    /// A model identity occurs more than once.
+    #[error("the catalogue defines model `{key}` more than once")]
+    DuplicateModel {
+        /// The provider/model display key.
+        key: String,
+    },
+    /// A provider lists the same wire schema more than once.
+    #[error("provider `{provider}` defines the `{schema}` wire more than once")]
+    DuplicateWire {
+        /// The provider id.
+        provider: String,
+        /// The duplicate schema name.
+        schema: String,
+    },
+    /// A provider wire endpoint is not a safe HTTP base URL.
+    #[error("provider `{provider}` has an invalid API endpoint `{api}`: {reason}")]
+    InvalidWireEndpoint {
+        /// The provider id.
+        provider: String,
+        /// The configured endpoint.
+        api: String,
+        /// Why the endpoint is invalid.
+        reason: WireEndpointError,
+    },
+    /// A provider id is empty or malformed.
+    #[error("invalid provider id `{id}` in the catalogue")]
+    InvalidProviderId {
+        /// The invalid provider id.
+        id: String,
+    },
+    /// A model id is empty or has surrounding whitespace.
+    #[error("invalid model id `{id}` in the catalogue")]
+    InvalidModelId {
+        /// The invalid value.
+        id: String,
+    },
+    /// A catalogue shape could not be serialized before writing.
+    #[error("could not serialize {file} catalogue: {source}")]
+    Serialize {
+        /// The file being serialized.
+        file: CatalogFile,
+        /// The serialization error.
+        source: serde_json::Error,
+    },
     /// A model is served by a provider with no wire of the requested schema.
     #[error(
         "the provider `{provider}` serves no `{wanted}` wire; it offers {offered}. Name one with --wire"
@@ -101,8 +184,9 @@ pub struct Catalog {
     providers: BTreeMap<String, Provider>,
     /// Every model, in the order the file listed them.
     models: Vec<Model>,
-    /// Model key — `provider/id` — to its place in `models`.
-    index: BTreeMap<String, usize>,
+    /// Provider/model identity to its place in `models`.
+    index: BTreeMap<String, BTreeMap<String, usize>>,
+    warnings: Vec<String>,
 }
 
 impl Catalog {
@@ -116,6 +200,12 @@ impl Catalog {
     #[must_use]
     pub fn model_entries(&self) -> &[Model] {
         &self.models
+    }
+
+    /// Warnings for catalogue limits that were ignored during construction.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Reads the two files a person owns.
@@ -169,8 +259,10 @@ impl Catalog {
             providers: providers.providers,
             models: models.models,
             index: BTreeMap::new(),
+            warnings: Vec::new(),
         };
         catalog.normalize()?;
+        catalog.warnings = catalog.validate();
         Ok(catalog)
     }
 
@@ -191,6 +283,10 @@ impl Catalog {
     ) -> Vec<String> {
         let mut skipped = Vec::new();
         for (id, provider) in providers {
+            if let Err(error) = validate_provider(&id, &provider) {
+                skipped.push(error.to_string());
+                continue;
+            }
             if self.providers.contains_key(&id) {
                 skipped.push(format!("provider {id}: the catalogue already carries one"));
                 continue;
@@ -198,6 +294,20 @@ impl Catalog {
             self.providers.insert(id, provider);
         }
         for mut model in models {
+            if model.id.trim().is_empty() || model.id.trim() != model.id {
+                skipped.push(format!("model `{}`: invalid model id", model.id));
+                continue;
+            }
+            if model.provider_id.trim().is_empty()
+                || model.provider_id.trim() != model.provider_id
+                || model.provider_id.contains('/')
+            {
+                skipped.push(format!(
+                    "model `{}`: invalid provider id `{}`",
+                    model.id, model.provider_id
+                ));
+                continue;
+            }
             if !self.providers.contains_key(&model.provider_id) {
                 skipped.push(format!(
                     "model {}: no provider named `{}`",
@@ -206,7 +316,11 @@ impl Catalog {
                 continue;
             }
             let key = model.key();
-            if self.index.contains_key(&key) {
+            if self
+                .index
+                .get(&model.provider_id)
+                .is_some_and(|models| models.contains_key(&model.id))
+            {
                 skipped.push(format!("model {key}: the catalogue already carries one"));
                 continue;
             }
@@ -216,21 +330,40 @@ impl Catalog {
             if model.canonical_slug.trim().is_empty() {
                 model.canonical_slug.clone_from(&key);
             }
-            self.index.insert(key, self.models.len());
+            self.index
+                .entry(model.provider_id.clone())
+                .or_default()
+                .insert(model.id.clone(), self.models.len());
             self.models.push(model);
         }
+        let warnings = self.validate();
+        self.warnings.extend(warnings);
         skipped
     }
 
     /// Fills in the names a file left empty and indexes the models.
     fn normalize(&mut self) -> Result<(), CatalogError> {
         for (id, provider) in &mut self.providers {
+            validate_provider(id, provider)?;
             if provider.name.trim().is_empty() {
                 provider.name.clone_from(id);
             }
         }
         self.index.clear();
         for (position, model) in self.models.iter_mut().enumerate() {
+            if model.id.trim().is_empty() || model.id.trim() != model.id {
+                return Err(CatalogError::InvalidModelId {
+                    id: model.id.clone(),
+                });
+            }
+            if model.provider_id.trim().is_empty()
+                || model.provider_id.trim() != model.provider_id
+                || model.provider_id.contains('/')
+            {
+                return Err(CatalogError::InvalidProviderId {
+                    id: model.provider_id.clone(),
+                });
+            }
             if !self.providers.contains_key(&model.provider_id) {
                 return Err(CatalogError::UnknownProvider {
                     model: model.id.clone(),
@@ -244,7 +377,15 @@ impl Catalog {
             if model.canonical_slug.trim().is_empty() {
                 model.canonical_slug = model.key();
             }
-            self.index.insert(model.key(), position);
+            if self
+                .index
+                .entry(model.provider_id.clone())
+                .or_default()
+                .insert(model.id.clone(), position)
+                .is_some()
+            {
+                return Err(CatalogError::DuplicateModel { key: model.key() });
+            }
         }
         Ok(())
     }
@@ -297,7 +438,8 @@ impl Catalog {
     #[must_use]
     pub fn find(&self, provider: &str, model: &str) -> Option<&Model> {
         self.index
-            .get(&format!("{provider}/{model}"))
+            .get(provider)
+            .and_then(|models| models.get(model))
             .map(|position| &self.models[*position])
     }
 
@@ -346,6 +488,50 @@ impl Catalog {
     }
 }
 
+fn validate_provider(id: &str, provider: &Provider) -> Result<(), CatalogError> {
+    if id.trim().is_empty() || id.trim() != id || id.contains('/') {
+        return Err(CatalogError::InvalidProviderId { id: id.to_owned() });
+    }
+    let mut schemas = Vec::new();
+    for wire in &provider.wires {
+        if schemas.contains(&wire.schema) {
+            return Err(CatalogError::DuplicateWire {
+                provider: id.to_owned(),
+                schema: wire.schema.label().to_owned(),
+            });
+        }
+        schemas.push(wire.schema);
+        let url =
+            reqwest::Url::parse(&wire.api).map_err(|_| CatalogError::InvalidWireEndpoint {
+                provider: id.to_owned(),
+                api: wire.api.clone(),
+                reason: WireEndpointError::InvalidUrl,
+            })?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(CatalogError::InvalidWireEndpoint {
+                provider: id.to_owned(),
+                api: wire.api.clone(),
+                reason: WireEndpointError::UnsupportedScheme,
+            });
+        }
+        if url.host_str().is_none() {
+            return Err(CatalogError::InvalidWireEndpoint {
+                provider: id.to_owned(),
+                api: wire.api.clone(),
+                reason: WireEndpointError::MissingHost,
+            });
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(CatalogError::InvalidWireEndpoint {
+                provider: id.to_owned(),
+                api: wire.api.clone(),
+                reason: WireEndpointError::EmbeddedCredentials,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Reads the two catalogue files from where they belong.
 ///
 /// It is the one place the paths and the reading meet, so the host and the
@@ -360,10 +546,8 @@ impl Catalog {
 /// when either file is missing, unreadable or malformed, or when either
 /// carries nothing.
 pub fn load_catalog_files() -> Result<Catalog, CatalogError> {
-    let providers =
-        super::source::providers_path().map_err(|message| CatalogError::NoDirectory { message })?;
-    let models =
-        super::source::models_path().map_err(|message| CatalogError::NoDirectory { message })?;
+    let providers = super::source::providers_path()?;
+    let models = super::source::models_path()?;
     Catalog::load(&providers, &models)
 }
 
@@ -376,10 +560,8 @@ pub fn load_catalog_files() -> Result<Catalog, CatalogError> {
 ///
 /// Returns [`CatalogError`] when a file is unreadable, too large or malformed.
 pub fn load_catalog_raw() -> Result<(Providers, Models), CatalogError> {
-    let providers_path =
-        super::source::providers_path().map_err(|message| CatalogError::NoDirectory { message })?;
-    let models_path =
-        super::source::models_path().map_err(|message| CatalogError::NoDirectory { message })?;
+    let providers_path = super::source::providers_path()?;
+    let models_path = super::source::models_path()?;
     let providers: Providers = match read_limited(&providers_path) {
         Ok(bytes) => parse(&providers_path, &bytes)?,
         Err(CatalogError::Read { .. }) => Providers::default(),
@@ -395,9 +577,8 @@ pub fn load_catalog_raw() -> Result<(Providers, Models), CatalogError> {
 
 /// Writes the two catalogue files back, after an edit made through the host.
 ///
-/// The edit itself is applied to the in-memory values first, so a write that
-/// fails leaves the files as they were; a directory that does not exist is
-/// created, because a first run may not have made one yet.
+/// Each file is written to a unique temporary file, synced and then renamed
+/// into place. A directory that does not exist is created.
 ///
 /// # Errors
 ///
@@ -406,37 +587,56 @@ pub fn save_catalog_files(providers: &Providers, models: &Models) -> Result<(), 
     use std::io::Write as _;
 
     fn write_atomic(path: &std::path::Path, body: &str) -> Result<(), CatalogError> {
+        use std::ffi::OsString;
+        use std::fs::OpenOptions;
+
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         std::fs::create_dir_all(parent).map_err(|source| CatalogError::Write {
             path: parent.to_path_buf(),
             source,
         })?;
-        let temp = path.with_extension("json.tmp");
-        {
-            let mut file = std::fs::File::create(&temp).map_err(|source| CatalogError::Write {
-                path: temp.clone(),
-                source,
-            })?;
-            file.write_all(body.as_bytes())
-                .map_err(|source| CatalogError::Write {
-                    path: temp.clone(),
-                    source,
-                })?;
-            file.sync_all().ok();
+        let mut filename = path
+            .file_name()
+            .map_or_else(|| OsString::from("catalog"), std::ffi::OsStr::to_os_string);
+        filename.push(".");
+        filename.push(uuid::Uuid::new_v4().simple().to_string());
+        filename.push(".tmp");
+        let temp = parent.join(filename);
+        let write_result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)?;
+            file.write_all(body.as_bytes())?;
+            file.sync_all()
+        })();
+        if let Err(source) = write_result {
+            let _ = std::fs::remove_file(&temp);
+            return Err(CatalogError::Write { path: temp, source });
         }
-        std::fs::rename(&temp, path).map_err(|source| CatalogError::Write {
-            path: path.to_path_buf(),
-            source,
-        })
+        if let Err(source) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(CatalogError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+        Ok(())
     }
 
-    let providers_path =
-        super::source::providers_path().map_err(|message| CatalogError::NoDirectory { message })?;
-    let models_path =
-        super::source::models_path().map_err(|message| CatalogError::NoDirectory { message })?;
+    let providers_path = super::source::providers_path()?;
+    let models_path = super::source::models_path()?;
 
-    let providers_body = serde_json::to_string_pretty(providers).unwrap_or_default();
-    let models_body = serde_json::to_string_pretty(models).unwrap_or_default();
+    let providers_body =
+        serde_json::to_string_pretty(providers).map_err(|source| CatalogError::Serialize {
+            file: CatalogFile::Providers,
+            source,
+        })?;
+    let models_body =
+        serde_json::to_string_pretty(models).map_err(|source| CatalogError::Serialize {
+            file: CatalogFile::Models,
+            source,
+        })?;
     write_atomic(&providers_path, &providers_body)?;
     write_atomic(&models_path, &models_body)
 }

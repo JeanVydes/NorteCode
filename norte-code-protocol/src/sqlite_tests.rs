@@ -603,6 +603,22 @@ async fn deleting_a_session_takes_every_row_it_left_behind() {
 }
 
 #[tokio::test]
+async fn clear_data_removes_sessions_metrics_and_blobs() {
+    let store = SqliteStore::in_memory().expect("open");
+    let north = SessionId::new();
+    seed_conversation(&store, "first", north).await;
+    seed_rows(&store, "first", north).await;
+    let blob = store.put(b"attachment bytes").await.expect("store blob");
+
+    store.clear_data().await.expect("clear all data");
+
+    assert_eq!(store.sessions().await.expect("sessions").len(), 0);
+    assert_eq!(store.costs(None).await.expect("costs").len(), 0);
+    assert_eq!(store.requests(None).await.expect("requests").len(), 0);
+    assert!(!store.contains(blob).await.expect("blob lookup"));
+}
+
+#[tokio::test]
 async fn a_session_stored_before_the_directory_field_still_loads() {
     // The field is in the blob and not in a column, which is what makes it
     // optional: a row written before it existed decodes to `None` and the

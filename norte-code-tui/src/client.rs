@@ -32,6 +32,10 @@ pub(crate) enum ClientEvent {
         /// The session the interface is now attached to.
         session: norte_code_wire::SessionSummary,
     },
+    /// The service is reachable, but no session has been created yet.
+    Ready,
+    /// The user started a new empty draft without creating a session.
+    DraftStarted,
     /// The connection is down; contains the reason.
     Detached {
         /// What went wrong, in words a person can act on.
@@ -43,6 +47,8 @@ pub(crate) enum ClientEvent {
     Server(Box<norte_code_wire::ServerEvent>),
     /// The session list changed.
     Sessions(Vec<SessionSummary>),
+    /// The service cleared its operational data.
+    DataCleared,
     /// The catalogue of models, grouped by provider.
     Models(Vec<norte_code_wire::ModelInfo>),
     /// The plan list of the attached session.
@@ -131,11 +137,13 @@ pub(crate) enum UiCommand {
     /// Send a user message on the session's stream.
     Send {
         /// The session to send on.
-        session: SessionKey,
+        session: Option<SessionKey>,
         /// The text of the message.
         text: String,
         /// Uploaded parts that travel with the message.
         parts: Vec<UserInputPart>,
+        /// Attachments queued before the first session existed.
+        attachments: Vec<PreparedAttachment>,
         /// `steer` or `queue`; forwarded to the host.
         queue_mode: String,
     },
@@ -148,11 +156,8 @@ pub(crate) enum UiCommand {
     },
     /// Refetch the session list.
     Refresh,
-    /// Create a fresh session and attach to it.
-    CreateSession {
-        /// The title the user gave, if any.
-        title: Option<String>,
-    },
+    /// Start a blank draft without creating a session.
+    NewDraft,
     /// Set the session's model.
     SetModel {
         /// The session to change.
@@ -201,6 +206,8 @@ pub(crate) enum UiCommand {
         /// The session to delete.
         session: norte_code_wire::SessionKey,
     },
+    /// Erase all operational data from the connected service.
+    ClearData,
     /// Ask the host to cancel the running turn.
     CancelTurn {
         /// The session running the turn.
@@ -477,21 +484,48 @@ async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<Clien
     }
 }
 
-async fn create_session(
-    client: &Arc<RemoteClient>,
-    events: &Sender<ClientEvent>,
-    title: Option<String>,
-) -> Option<StreamOutcome> {
-    match client.create_session(title.as_deref()).await {
-        Ok(session) => Some(StreamOutcome::Switch(Box::new(session))),
-        Err(error) => {
-            let _ = events
-                .send(ClientEvent::SendFailed {
-                    reason: ClientError::create_session(error),
-                })
-                .await;
-            None
-        }
+async fn fetch_global_views(api: &Arc<RestClient>, events: &Sender<ClientEvent>) {
+    let (models, telemetry, plugins, catalog, agents, cost, info, live, ready, quota) = tokio::join!(
+        api.models(),
+        api.telemetry(None),
+        api.plugins(),
+        api.catalog_detail(),
+        api.agents(),
+        api.cost_report(None),
+        api.info(),
+        api.health_live(),
+        api.health_ready(),
+        api.quota(),
+    );
+    if let Ok(models) = models {
+        let _ = events.send(ClientEvent::Models(models)).await;
+    }
+    if let Ok(report) = telemetry {
+        let _ = events.send(ClientEvent::Telemetry(Arc::new(report))).await;
+    }
+    if let Ok(plugins) = plugins {
+        let _ = events.send(ClientEvent::Plugins(plugins)).await;
+    }
+    if let Ok(catalog) = catalog {
+        let _ = events.send(ClientEvent::Catalog(catalog)).await;
+    }
+    if let Ok(agents) = agents {
+        let _ = events.send(ClientEvent::Agents(agents)).await;
+    }
+    if let Ok(cost) = cost {
+        let _ = events.send(ClientEvent::CostGlobal(cost)).await;
+    }
+    if let Ok(info) = info {
+        let _ = events.send(ClientEvent::ServerInfo(info)).await;
+    }
+    if let Ok(live) = live {
+        let _ = events.send(ClientEvent::Liveness(live)).await;
+    }
+    if let Ok(ready) = ready {
+        let _ = events.send(ClientEvent::Readiness(ready)).await;
+    }
+    if let Ok(quota) = quota {
+        let _ = events.send(ClientEvent::Quota(quota)).await;
     }
 }
 
@@ -526,6 +560,7 @@ pub(crate) fn start(config: ClientConfig) -> (Sender<UiCommand>, Receiver<Client
 }
 
 /// Owns the connection; driven by commands from the interface.
+#[allow(clippy::too_many_lines)]
 async fn connection(
     config: ClientConfig,
     commands: Receiver<UiCommand>,
@@ -564,82 +599,90 @@ async fn connection(
     let Some(sessions) = wait_for_sessions(&client, &events, &reconnect).await else {
         return;
     };
-    let Some(fresh) = wait_for_new_session(&client, &events, &reconnect).await else {
-        return;
-    };
     let _ = events.send(ClientEvent::Sessions(sessions)).await;
-    let mut session = attach_shared(&client, &events, Box::new(fresh)).await;
-    let (session_tx, session_rx) = tokio::sync::watch::channel(session.clone());
+    let _ = events.send(ClientEvent::Ready).await;
+    Box::pin(fetch_global_views(&api, &events)).await;
+    let (session_tx, session_rx) = tokio::sync::watch::channel::<Option<SessionKey>>(None);
+    let command_session_rx = session_rx.clone();
+    let command_session_tx = session_tx.clone();
     let (outcome_tx, mut outcome_rx) = mpsc::channel(8);
     let command_client = Arc::clone(&client);
     let command_api = Arc::clone(&api);
     let command_events = events.clone();
     let command_task = tokio::spawn(async move {
-        let mut session_rx = session_rx;
+        let mut session_rx = command_session_rx;
         let mut commands = commands;
         while let Some(command) = commands.recv().await {
             let active = session_rx.borrow_and_update().clone();
-            if let Some(outcome) = apply_command(
+            if let Some(outcome) = Box::pin(apply_command(
                 command,
-                &active,
+                active.as_ref(),
                 &command_client,
                 &command_api,
                 &command_events,
-            )
+            ))
             .await
-                && outcome_tx.send(outcome).await.is_err()
             {
-                break;
+                let active = match &outcome {
+                    StreamOutcome::Switch(summary)
+                    | StreamOutcome::SwitchWithMessage(summary, _) => {
+                        Some(SessionKey::new(summary.session_id.clone()))
+                    }
+                    StreamOutcome::Retry | StreamOutcome::Cleared | StreamOutcome::Draft => None,
+                };
+                let _ = command_session_tx.send(active);
+                if outcome_tx.send(outcome).await.is_err() {
+                    break;
+                }
             }
         }
     });
+    let mut active_session: Option<SessionKey> = None;
+    let mut pending = None;
     loop {
-        let outcome = stream_loop(
-            &client,
-            &api,
-            &mut outcome_rx,
-            &events,
-            &session,
-            &reconnect,
-        )
-        .await;
+        let outcome = if let Some(session) = active_session.as_ref() {
+            stream_loop(
+                &client,
+                &api,
+                &mut outcome_rx,
+                &events,
+                session,
+                &reconnect,
+                &mut pending,
+            )
+            .await
+        } else if let Some(outcome) = outcome_rx.recv().await {
+            outcome
+        } else {
+            StreamOutcome::Retry
+        };
         match outcome {
             StreamOutcome::Retry => break,
             StreamOutcome::Switch(summary) => {
-                session = attach_shared(&client, &events, summary).await;
-                let _ = session_tx.send(session.clone());
+                active_session = Some(attach_shared(&client, &events, summary).await);
+                let _ = session_tx.send(active_session.clone());
+            }
+            StreamOutcome::SwitchWithMessage(summary, message) => {
+                active_session = Some(attach_shared(&client, &events, summary).await);
+                pending = Some(message);
+                let _ = session_tx.send(active_session.clone());
+            }
+            StreamOutcome::Cleared => {
+                active_session = None;
+                pending = None;
+                let _ = session_tx.send(None);
+                let _ = events.send(ClientEvent::DataCleared).await;
+                let _ = events.send(ClientEvent::Sessions(Vec::new())).await;
+            }
+            StreamOutcome::Draft => {
+                active_session = None;
+                pending = None;
+                let _ = session_tx.send(None);
+                let _ = events.send(ClientEvent::DraftStarted).await;
             }
         }
     }
     command_task.abort();
-}
-
-async fn wait_for_new_session(
-    client: &RemoteClient,
-    events: &Sender<ClientEvent>,
-    reconnect: &ReconnectConfig,
-) -> Option<SessionSummary> {
-    let key = RemoteClient::create_session_key();
-    let mut attempt = 0u32;
-    loop {
-        match client.create_session_with_key(None, &key).await {
-            Ok(session) => return Some(session),
-            Err(error) => {
-                attempt = attempt.saturating_add(1);
-                if attempt == reconnect.give_up_attempts {
-                    let _ = events
-                        .send(ClientEvent::Detached {
-                            reason: ClientError::create_session(error),
-                        })
-                        .await;
-                }
-                if events.is_closed() {
-                    return None;
-                }
-                tokio::time::sleep(retry_delay(reconnect, attempt.saturating_sub(1))).await;
-            }
-        }
-    }
 }
 
 async fn wait_for_sessions(
@@ -683,7 +726,13 @@ async fn send_prompt(
 ) {
     let content = (!parts.is_empty()).then_some(parts);
     if let Err(error) = api
-        .send_prompt(target.as_str(), Some(&text), content, None, &queue_mode)
+        .send_prompt(
+            target.as_str(),
+            (!text.is_empty()).then_some(text.as_str()),
+            content,
+            None,
+            &queue_mode,
+        )
         .await
     {
         let _ = events
@@ -700,7 +749,8 @@ async fn upload_attachment(
     events: &Sender<ClientEvent>,
     target: &SessionKey,
     attachment: PreparedAttachment,
-) {
+    notify_composer: bool,
+) -> Option<UploadReceipt> {
     let bytes = match &attachment.source {
         AttachmentSource::Image(bytes) => bytes.clone(),
         AttachmentSource::File(path) => match tokio::fs::read(path).await {
@@ -711,7 +761,7 @@ async fn upload_attachment(
                         reason: ClientError::read_attachment(path, error),
                     })
                     .await;
-                return;
+                return None;
             }
         },
     };
@@ -721,19 +771,22 @@ async fn upload_attachment(
                 reason: ClientError::attachment_too_large(bytes.len(), MAX_ATTACHMENT_BYTES),
             })
             .await;
-        return;
+        return None;
     }
     match api
         .upload(target.as_str(), attachment.mime.as_str(), bytes)
         .await
     {
         Ok(receipt) => {
-            let _ = events
-                .send(ClientEvent::Uploaded {
-                    attachment,
-                    receipt,
-                })
-                .await;
+            if notify_composer {
+                let _ = events
+                    .send(ClientEvent::Uploaded {
+                        attachment,
+                        receipt: receipt.clone(),
+                    })
+                    .await;
+            }
+            Some(receipt)
         }
         Err(error) => {
             let _ = events
@@ -741,6 +794,7 @@ async fn upload_attachment(
                     reason: ClientError::upload(error),
                 })
                 .await;
+            None
         }
     }
 }
@@ -895,6 +949,19 @@ enum StreamOutcome {
     Retry,
     /// The user asked another session.
     Switch(Box<norte_code_wire::SessionSummary>),
+    /// Create a session and send its first message once its stream is open.
+    SwitchWithMessage(Box<norte_code_wire::SessionSummary>, PendingMessage),
+    /// The service cleared its operational data; return to the no-session state.
+    Cleared,
+    /// Start a new empty draft without creating a server session.
+    Draft,
+}
+
+struct PendingMessage {
+    text: String,
+    parts: Vec<UserInputPart>,
+    attachments: Vec<PreparedAttachment>,
+    queue_mode: String,
 }
 
 /// Owns the session's event stream; driven by both the stream and commands.
@@ -910,6 +977,7 @@ async fn stream_loop(
     events: &Sender<ClientEvent>,
     session: &SessionKey,
     reconnect: &ReconnectConfig,
+    pending: &mut Option<PendingMessage>,
 ) -> StreamOutcome {
     let healthy_stream = Duration::from_secs(reconnect.healthy_stream_s);
     let mut attempt = 0u32;
@@ -931,6 +999,27 @@ async fn stream_loop(
                     Box::pin(fetch_views(api, session.as_str(), events)).await;
                     primed = true;
                 }
+                if let Some(message) = pending.take() {
+                    let mut parts = message.parts;
+                    for attachment in message.attachments {
+                        let kind = attachment.kind.part_kind();
+                        let mime = attachment.mime.to_string();
+                        if let Some(receipt) =
+                            upload_attachment(api, events, session, attachment, false).await
+                        {
+                            parts.push(UserInputPart::upload(kind, receipt.upload_id, mime));
+                        }
+                    }
+                    send_prompt(
+                        api,
+                        events,
+                        session,
+                        message.text,
+                        parts,
+                        message.queue_mode,
+                    )
+                    .await;
+                }
                 let opened_at = std::time::Instant::now();
                 match Box::pin(drive_stream(
                     &mut stream,
@@ -941,6 +1030,11 @@ async fn stream_loop(
                 .await
                 {
                     StreamOutcome::Switch(summary) => return StreamOutcome::Switch(summary),
+                    StreamOutcome::SwitchWithMessage(summary, message) => {
+                        return StreamOutcome::SwitchWithMessage(summary, message);
+                    }
+                    StreamOutcome::Cleared => return StreamOutcome::Cleared,
+                    StreamOutcome::Draft => return StreamOutcome::Draft,
                     StreamOutcome::Retry => {}
                 }
                 if opened_at.elapsed() >= healthy_stream {
@@ -1032,9 +1126,10 @@ async fn delete_secret(api: &RestClient, events: &Sender<ClientEvent>, provider:
 }
 
 /// Pump events from the stream while dispatching commands.
+#[allow(clippy::too_many_lines)]
 async fn apply_command(
     command: UiCommand,
-    active: &SessionKey,
+    active: Option<&SessionKey>,
     client: &Arc<RemoteClient>,
     api: &Arc<RestClient>,
     events: &Sender<ClientEvent>,
@@ -1058,6 +1153,19 @@ async fn apply_command(
                 events.clone(),
             );
         }
+        UiCommand::ClearData => match api.clear_data().await {
+            Ok(()) => {
+                client.clear_session_state();
+                return Some(StreamOutcome::Cleared);
+            }
+            Err(error) => {
+                let _ = events
+                    .send(ClientEvent::SendFailed {
+                        reason: ClientError::clear_data(error),
+                    })
+                    .await;
+            }
+        },
         UiCommand::CancelTurn { session, turn_id } => {
             cancel_turn(api, events, &session, turn_id).await;
         }
@@ -1073,25 +1181,56 @@ async fn apply_command(
         UiCommand::Send {
             session,
             text,
-            parts,
+            mut parts,
+            attachments,
             queue_mode,
         } => {
-            send_prompt(api, events, &session, text, parts, queue_mode).await;
+            if let Some(session) = session {
+                for attachment in attachments {
+                    let kind = attachment.kind.part_kind();
+                    let mime = attachment.mime.to_string();
+                    if let Some(receipt) =
+                        upload_attachment(api, events, &session, attachment, false).await
+                    {
+                        parts.push(UserInputPart::upload(kind, receipt.upload_id, mime));
+                    }
+                }
+                send_prompt(api, events, &session, text, parts, queue_mode).await;
+            } else {
+                match client.create_session(None).await {
+                    Ok(summary) => {
+                        return Some(StreamOutcome::SwitchWithMessage(
+                            Box::new(summary),
+                            PendingMessage {
+                                text,
+                                parts,
+                                attachments,
+                                queue_mode,
+                            },
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = events
+                            .send(ClientEvent::SendFailed {
+                                reason: ClientError::create_session(error),
+                            })
+                            .await;
+                    }
+                }
+            }
         }
         UiCommand::Upload {
             session,
             attachment,
         } => {
-            upload_attachment(api, events, &session, attachment).await;
+            let _ = upload_attachment(api, events, &session, attachment, true).await;
         }
         UiCommand::Refresh => {
             if let Ok(sessions) = client.list_sessions().await {
                 let _ = events.send(ClientEvent::Sessions(sessions)).await;
             }
         }
-        UiCommand::CreateSession { title } => {
-            return create_session(client, events, title).await;
-        }
+        UiCommand::NewDraft => return Some(StreamOutcome::Draft),
         UiCommand::AnswerQuestion {
             session,
             question,
@@ -1100,10 +1239,16 @@ async fn apply_command(
             answer_question(api, events, &session, question, answer).await;
         }
         UiCommand::RefreshViews => {
-            Box::pin(fetch_views(api, active.as_str(), events)).await;
+            if let Some(active) = active {
+                Box::pin(fetch_views(api, active.as_str(), events)).await;
+            } else {
+                Box::pin(fetch_global_views(api, events)).await;
+            }
         }
         UiCommand::RefreshRail => {
-            refresh_rail(api, active.as_str(), events).await;
+            if let Some(active) = active {
+                refresh_rail(api, active.as_str(), events).await;
+            }
         }
         UiCommand::SetModel {
             session,

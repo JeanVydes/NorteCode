@@ -75,4 +75,13 @@ impl RestClient {
         self.execute_empty(Endpoint::DeleteSession { id: session })
             .await
     }
+
+    /// Clears all persisted session and operational data on the service.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or a non-success status.
+    pub async fn clear_data(&self) -> Result<(), ApiError> {
+        self.execute_empty(Endpoint::ClearData).await
+    }
 }

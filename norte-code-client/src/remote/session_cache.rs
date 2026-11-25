@@ -58,6 +58,11 @@ impl<T> SessionCache<T> {
         self.order.retain(|key| key != session);
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()

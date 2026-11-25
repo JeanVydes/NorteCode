@@ -330,6 +330,9 @@ pub trait SessionDirectory: Send + Sync {
     ///
     /// Propagates a database failure.
     async fn delete_session(&self, key: &str) -> Result<()>;
+    /// Removes all session data, telemetry, artifacts and pending interactions.
+    /// Configuration stored in the settings table is preserved.
+    async fn clear_data(&self) -> Result<()>;
     /// Marks stored phases that cannot survive a process as idle.
     ///
     /// `streaming` describes a live turn; a hard kill leaves it behind, and no
@@ -471,6 +474,30 @@ impl SessionDirectory for InMemoryDirectory {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(key);
+        Ok(())
+    }
+
+    async fn clear_data(&self) -> Result<()> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.questions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.effects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.costs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         Ok(())
     }
 
@@ -1396,6 +1423,25 @@ impl SessionDirectory for SqliteStore {
                     .execute("DELETE FROM sessions WHERE id = ?1", params![north])
                     .map_err(Fault::from)?;
             }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn clear_data(&self) -> Result<()> {
+        self.transact(|transaction| {
+            transaction
+                .execute_batch(
+                    "DELETE FROM questions;
+                     DELETE FROM effects;
+                     DELETE FROM costs;
+                     DELETE FROM requests;
+                     DELETE FROM logical_sessions;
+                     DELETE FROM sessions;
+                     DELETE FROM nodes;
+                     DELETE FROM blobs;",
+                )
+                .map_err(Fault::from)?;
             Ok(())
         })
         .await

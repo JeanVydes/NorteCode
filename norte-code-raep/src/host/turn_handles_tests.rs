@@ -18,3 +18,28 @@ async fn finishing_a_turn_removes_only_its_handle() {
 
     assert_eq!(handles.len(), 1);
 }
+
+#[tokio::test]
+async fn clearing_waits_until_every_turn_task_is_cancelled() {
+    let handles = TurnHandles::default();
+    let (stopped_tx, mut stopped_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        let _guard = DropSignal(stopped_tx);
+        std::future::pending::<()>().await;
+    });
+    tokio::task::yield_now().await;
+    handles.insert(key("session", "00000000000000000000000000000001"), task);
+
+    handles.abort_all().await;
+
+    assert_eq!(stopped_rx.try_recv(), Ok(()));
+    assert_eq!(handles.len(), 0);
+}
+
+struct DropSignal(tokio::sync::mpsc::UnboundedSender<()>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}

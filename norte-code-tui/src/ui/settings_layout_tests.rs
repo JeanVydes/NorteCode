@@ -3,7 +3,7 @@
 use super::{SettingsLayout, SettingsSection};
 
 fn layout() -> SettingsLayout {
-    SettingsLayout::new(100, 4, 3, 2, 8)
+    SettingsLayout::new(100, 4, 3, 2, 8, 1)
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn body_rows_start_after_their_heading_and_header() {
 
 #[test]
 fn preference_columns_stay_inside_the_content_width() {
-    let layout = SettingsLayout::new(48, 0, 0, 0, 8);
+    let layout = SettingsLayout::new(48, 0, 0, 0, 8, 1);
     assert!(layout.value_x() <= 48 - SettingsLayout::MARGIN);
     assert!(layout.label_width() > 0);
 }

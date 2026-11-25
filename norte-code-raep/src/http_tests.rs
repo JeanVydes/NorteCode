@@ -1295,3 +1295,49 @@ async fn concurrent_session_creation_reuses_the_idempotency_key() {
     .expect("second session");
     assert_eq!(first.session_id, second.session_id);
 }
+
+#[tokio::test]
+async fn clear_data_removes_sessions_and_requires_an_authenticated_route() {
+    let host = test_host(None);
+    let app = router(Arc::clone(&host));
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/raep/v1/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("create request"),
+        )
+        .await
+        .expect("create session");
+    assert!(created.status().is_success());
+    assert_eq!(host.session_summaries("anonymous").await.len(), 1);
+
+    let cleared = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/raep/v1/data")
+                .body(Body::empty())
+                .expect("clear request"),
+        )
+        .await
+        .expect("clear data");
+    assert_eq!(cleared.status(), StatusCode::NO_CONTENT);
+    assert_eq!(host.session_summaries("anonymous").await.len(), 0);
+
+    let protected = router(test_host(Some("secret")))
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/raep/v1/data")
+                .body(Body::empty())
+                .expect("clear request"),
+        )
+        .await
+        .expect("protected clear");
+    assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+}

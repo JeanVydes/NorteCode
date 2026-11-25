@@ -217,6 +217,10 @@ pub(in crate::app) fn drain_server_events(
             Ok(ClientEvent::Attached { session }) => {
                 changed = apply_attached(tree, model, &session) || changed;
             }
+            Ok(ClientEvent::Ready) => {
+                model.attachment = SessionAttachmentState::Ready;
+                changed = true;
+            }
             Ok(ClientEvent::Detached { reason }) => {
                 changed = apply_detached(tree, model, &reason) || changed;
             }
@@ -227,6 +231,55 @@ pub(in crate::app) fn drain_server_events(
             Ok(ClientEvent::Sessions(sessions)) => {
                 refresh_active_model(model, &sessions);
                 model.sessions = sessions;
+                changed = true;
+            }
+            Ok(ClientEvent::DraftStarted) => {
+                model.active = None;
+                model.pending_attachments.clear();
+                model.active_model = None;
+                model.active_provider = None;
+                model.active_turn = None;
+                model.turn = TurnState::Idle;
+                model.plans.clear();
+                model.todos.clear();
+                model.jobs.clear();
+                model.context = crate::context::ContextUsage::default();
+                model.question = None;
+                model.attached_title = None;
+                model.attachment = SessionAttachmentState::Ready;
+                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                    stream.clear_all();
+                }
+                if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
+                    composer.clear_all();
+                }
+                changed = true;
+            }
+            Ok(ClientEvent::DataCleared) => {
+                model.sessions.clear();
+                model.active = None;
+                model.pending_attachments.clear();
+                model.active_model = None;
+                model.active_provider = None;
+                model.active_turn = None;
+                model.turn = TurnState::Idle;
+                model.plans.clear();
+                model.todos.clear();
+                model.jobs.clear();
+                model.telemetry = None;
+                model.telemetry_usage = crate::session_stats::SharedUsage::default();
+                model.cost = None;
+                model.quota = None;
+                model.question = None;
+                model.context = crate::context::ContextUsage::default();
+                model.attached_title = None;
+                model.attachment = SessionAttachmentState::Ready;
+                if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
+                    stream.clear_all();
+                }
+                if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
+                    composer.clear_all();
+                }
                 changed = true;
             }
             Ok(

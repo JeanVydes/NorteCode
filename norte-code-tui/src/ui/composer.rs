@@ -196,6 +196,13 @@ impl Composer {
         self.input.clear();
     }
 
+    /// Clears the draft, recalled messages and pending composer actions.
+    pub(crate) fn clear_all(&mut self) {
+        self.clear();
+        self.history = History::default();
+        self.actions.clear();
+    }
+
     /// Retain a sent message for Up/Down recall.
     pub(crate) fn push_history(&mut self, text: &str) {
         self.history.push(text);

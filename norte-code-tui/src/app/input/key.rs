@@ -260,18 +260,21 @@ fn send_current_prompt(
             )
         })
         .unwrap_or_default();
-    if prompt.is_empty() {
+    if prompt.is_empty() && parts.is_empty() && model.pending_attachments.is_empty() {
         return;
     }
-    let SessionAttachmentState::Attached = model.attachment else {
+    if !matches!(
+        model.attachment,
+        SessionAttachmentState::Attached | SessionAttachmentState::Ready
+    ) {
         notice(
             tree,
             "raep not attached; message not sent (Ctrl+R retries)".into(),
             ui::Tone::Warn,
         );
         return;
-    };
-    if !model.active_session_has_model() {
+    }
+    if model.active.is_some() && !model.active_session_has_model() {
         notice(
             tree,
             "no model selected; message not sent (3 Models, Enter to choose)".into(),
@@ -279,12 +282,15 @@ fn send_current_prompt(
         );
         return;
     }
-    let Some(session) = model.active.clone() else {
-        return;
+    let attachments = std::mem::take(&mut model.pending_attachments);
+    let display_prompt = if prompt.is_empty() {
+        format!("sent {} attachment(s)", attachments.len().max(parts.len()))
+    } else {
+        prompt.clone()
     };
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
         stream.push(ui::Item::User {
-            text: prompt.clone(),
+            text: display_prompt,
             turn: model
                 .active_turn
                 .as_ref()
@@ -292,15 +298,18 @@ fn send_current_prompt(
         });
         stream.start_thinking();
     }
-    if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
+    if !prompt.is_empty()
+        && let Some(composer) = tree.find_mut::<ui::Composer>("composer")
+    {
         composer.push_history(&prompt);
     }
     if let Some(commands) = commands.as_ref() {
         let queue_mode = model.preferences.send_mode.label();
         let _ = commands.try_send(UiCommand::Send {
-            session,
+            session: model.active.clone(),
             text: prompt,
             parts,
+            attachments,
             queue_mode: queue_mode.to_string(),
         });
     }

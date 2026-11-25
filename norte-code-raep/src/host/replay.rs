@@ -207,6 +207,31 @@ impl ReplayLog {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = fs::remove_file(self.path(session));
     }
+
+    /// Removes all replay journals while preserving non-replay files nearby.
+    pub(crate) fn clear(&self) -> Result<(), HostError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(HostError::Replay(format!("replay directory: {error}"))),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| HostError::Replay(error.to_string()))?;
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+            {
+                fs::remove_file(entry.path())
+                    .map_err(|error| HostError::Replay(format!("replay removal: {error}")))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

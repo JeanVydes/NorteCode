@@ -90,6 +90,118 @@ fn an_empty_catalogue_is_rejected() {
 }
 
 #[test]
+fn duplicate_model_identities_are_rejected() {
+    let providers = Providers {
+        providers: BTreeMap::from([("openai".to_owned(), provider("openai"))]),
+    };
+    let error = Catalog::new(
+        providers,
+        Models {
+            models: vec![model("same", "openai"), model("same", "openai")],
+        },
+    )
+    .expect_err("duplicate model identity");
+    assert!(matches!(error, CatalogError::DuplicateModel { .. }));
+}
+
+#[test]
+fn duplicate_provider_wire_schemas_are_rejected() {
+    let mut provider = provider("openai");
+    provider.wires.push(provider.wires[0].clone());
+    let error = Catalog::new(
+        Providers {
+            providers: BTreeMap::from([("openai".to_owned(), provider)]),
+        },
+        Models {
+            models: vec![model("gpt-4o", "openai")],
+        },
+    )
+    .expect_err("duplicate wire");
+    assert!(matches!(error, CatalogError::DuplicateWire { .. }));
+}
+
+#[test]
+fn provider_endpoints_must_be_http_urls_without_credentials() {
+    let mut invalid_url = provider("openai");
+    invalid_url.wires[0].api = "file:///tmp/catalog".to_owned();
+    let error = Catalog::new(
+        Providers {
+            providers: BTreeMap::from([("openai".to_owned(), invalid_url)]),
+        },
+        Models {
+            models: vec![model("gpt-4o", "openai")],
+        },
+    )
+    .expect_err("unsupported endpoint scheme");
+    assert!(matches!(
+        error,
+        CatalogError::InvalidWireEndpoint {
+            reason: WireEndpointError::UnsupportedScheme,
+            ..
+        }
+    ));
+
+    let mut embedded_credentials = provider("openai");
+    embedded_credentials.wires[0].api = "https://user:secret@example.invalid/v1".to_owned();
+    let error = Catalog::new(
+        Providers {
+            providers: BTreeMap::from([("openai".to_owned(), embedded_credentials)]),
+        },
+        Models {
+            models: vec![model("gpt-4o", "openai")],
+        },
+    )
+    .expect_err("embedded credentials");
+    assert!(matches!(
+        error,
+        CatalogError::InvalidWireEndpoint {
+            reason: WireEndpointError::EmbeddedCredentials,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn ids_with_surrounding_whitespace_are_rejected() {
+    let mut entry = model(" gpt-4o", "openai");
+    entry.id = " gpt-4o".to_owned();
+    let error = Catalog::new(
+        Providers {
+            providers: BTreeMap::from([("openai".to_owned(), provider("openai"))]),
+        },
+        Models {
+            models: vec![entry],
+        },
+    )
+    .expect_err("invalid model id");
+    assert!(matches!(error, CatalogError::InvalidModelId { .. }));
+}
+
+#[test]
+fn implausible_limits_are_cleaned_when_the_catalogue_is_built() {
+    let mut entry = model("gpt-4o", "openai");
+    entry.limit.context = Some(MAX_CONTEXT + 1);
+    let catalog = Catalog::new(
+        Providers {
+            providers: BTreeMap::from([("openai".to_owned(), provider("openai"))]),
+        },
+        Models {
+            models: vec![entry],
+        },
+    )
+    .expect("catalogue");
+    assert_eq!(catalog.warnings().len(), 1);
+    assert!(
+        catalog
+            .find("openai", "gpt-4o")
+            .expect("model")
+            .limit
+            .context
+            .is_none()
+    );
+}
+
+#[test]
 fn implausible_limits_are_dropped() {
     let mut cat = catalog();
     cat.models[0].limit.context = Some(MAX_CONTEXT + 1);

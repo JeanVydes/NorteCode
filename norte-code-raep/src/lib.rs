@@ -347,7 +347,9 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     host_config.auth_token = std::env::var("NORTE_CODE_AUTH_TOKEN").ok();
     host_config.auth_principals = auth_principals;
     host_config.allowed_origins = allowed_origins();
-    let replay_log = ReplayLog::new(database.with_extension("replay"), host_config.replay_bytes);
+    host_config.replay_dir = database.with_extension("replay");
+    host_config.legacy_pins_dir = Some(database.with_file_name("pins"));
+    let replay_log = ReplayLog::new(host_config.replay_dir.clone(), host_config.replay_bytes);
     let upload_index = Arc::new(SqliteUploadIndex::open(
         database.with_extension("uploads.db"),
     )?);

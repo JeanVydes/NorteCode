@@ -146,6 +146,7 @@ impl Service {
         // providers and models without restarting the application.
         let catalog = match load_catalog_files() {
             Ok(catalog) => {
+                warnings.extend(catalog.warnings().iter().cloned());
                 *self.lock_catalog_write() = Arc::new(catalog);
                 self.catalog()
             }

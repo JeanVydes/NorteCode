@@ -405,10 +405,7 @@ fn the_new_session_button_sends_the_command() {
     let (commands_tx, mut commands_rx) = mpsc::channel(4);
     let mut commands = Some(commands_tx);
     drain_sessions_actions(&mut tree, &mut commands, &mut model);
-    assert!(matches!(
-        commands_rx.try_recv(),
-        Ok(UiCommand::CreateSession { title: None })
-    ));
+    assert!(matches!(commands_rx.try_recv(), Ok(UiCommand::NewDraft)));
 }
 
 #[test]
@@ -427,10 +424,7 @@ fn creating_a_session_switches_to_chat_and_sends_the_command() {
 
     drain_sessions_actions(&mut tree, &mut commands, &mut model);
 
-    assert!(matches!(
-        commands_rx.try_recv(),
-        Ok(UiCommand::CreateSession { title: None })
-    ));
+    assert!(matches!(commands_rx.try_recv(), Ok(UiCommand::NewDraft)));
     assert_eq!(model.tab, crate::ui_model::Tab::Chat);
 }
 

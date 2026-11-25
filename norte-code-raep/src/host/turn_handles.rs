@@ -41,6 +41,22 @@ impl TurnHandles {
             .remove(key);
     }
 
+    pub(super) async fn abort_all(&self) {
+        let entries = std::mem::take(
+            &mut *self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let handles = entries.into_values().collect::<Vec<_>>();
+        for handle in &handles {
+            handle.abort();
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.entries

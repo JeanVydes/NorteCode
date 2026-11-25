@@ -38,7 +38,7 @@ use artifacts::{
     import_bundle, upload_artifact, upload_session_upload,
 };
 use resources::{
-    agent_versions, create_session, delete_session, list_agents, list_child_sessions,
+    agent_versions, clear_data, create_session, delete_session, list_agents, list_child_sessions,
     list_sessions, patch_session, read_agent, read_session,
 };
 use websocket::{agent_commands, commands, websocket};
@@ -146,6 +146,7 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
         .route("/raep/v1/health/live", get(health_live))
         .route("/raep/v1/health/ready", get(health_ready))
         .route("/raep/v1/agents", get(list_agents))
+        .route("/raep/v1/data", axum::routing::delete(clear_data))
         .route("/raep/v1/agents/{agent_id}", get(read_agent))
         .route("/raep/v1/agents/{agent_id}/versions", get(agent_versions))
         .route(

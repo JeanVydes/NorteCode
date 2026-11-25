@@ -16,7 +16,7 @@ use super::config_page::{ConfigAction, ConfigData, Setting};
 use super::detail_panel::Field;
 use super::host_info;
 use super::plugins_page::PluginsAction;
-use super::settings_layout::{SettingsLayout, SettingsSection};
+use super::settings_layout::{SectionRect, SettingsLayout, SettingsSection};
 use crate::ui_model::{DebugOverlayMode, PluginJob, UiModel};
 
 const HOST_CHILD: usize = 0;
@@ -29,6 +29,7 @@ enum Focus {
     #[default]
     Plugins,
     Preferences,
+    ClearData,
 }
 
 /// A prompt the user is filling in for a plugin operation.
@@ -39,6 +40,7 @@ enum Prompt {
     Repository,
     Package,
     ConfirmRemove,
+    ConfirmClearData,
 }
 
 #[derive(Clone, Copy)]
@@ -78,6 +80,8 @@ pub(crate) struct SettingsPage {
     plugin_actions: Vec<PluginsAction>,
     #[serde(skip)]
     config_actions: Vec<ConfigAction>,
+    #[serde(skip)]
+    clear_data_requested: bool,
     children: Vec<Node>,
 }
 
@@ -115,6 +119,7 @@ impl SettingsPage {
             prefs_y: 0,
             plugin_actions: Vec::new(),
             config_actions: Vec::new(),
+            clear_data_requested: false,
             children: vec![
                 node(
                     "host_panel",
@@ -185,7 +190,8 @@ impl SettingsPage {
     pub(crate) fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Preferences => Focus::Plugins,
-            Focus::Plugins => Focus::Preferences,
+            Focus::Plugins => Focus::ClearData,
+            Focus::ClearData => Focus::Preferences,
         };
         self.ensure_selected_visible();
     }
@@ -200,6 +206,10 @@ impl SettingsPage {
         std::mem::take(&mut self.config_actions)
     }
 
+    pub(crate) fn take_clear_data_requested(&mut self) -> bool {
+        std::mem::take(&mut self.clear_data_requested)
+    }
+
     fn layout(&self) -> SettingsLayout {
         SettingsLayout::new(
             self.area.width,
@@ -207,6 +217,7 @@ impl SettingsPage {
             self.plugins.len(),
             self.agents.len(),
             Setting::ALL.len(),
+            1,
         )
     }
 
@@ -223,10 +234,12 @@ impl SettingsPage {
         let first_row = match self.focus {
             Focus::Preferences => layout.preference_rows_y(),
             Focus::Plugins => layout.plugin_rows_y(),
+            Focus::ClearData => layout.section(SettingsSection::Data).y + 1,
         };
         let selected = match self.focus {
             Focus::Preferences => self.pref_selected,
             Focus::Plugins => self.plugin_selected,
+            Focus::ClearData => 0,
         };
         let row = first_row.saturating_add(u16::try_from(selected).unwrap_or(u16::MAX));
         let bottom = self.scroll.saturating_add(self.area.height);
@@ -317,6 +330,10 @@ impl SettingsPage {
                     self.config_actions.push(ConfigAction::Cycle(setting));
                 }
             }
+            Focus::ClearData => {
+                self.error = None;
+                self.prompt = Prompt::ConfirmClearData;
+            }
         }
     }
 
@@ -388,6 +405,10 @@ impl SettingsPage {
                     self.prompt = Prompt::None;
                 }
                 Prompt::ConfirmRemove => self.activate(),
+                Prompt::ConfirmClearData => {
+                    self.clear_data_requested = true;
+                    self.prompt = Prompt::None;
+                }
                 Prompt::None => {}
             },
             KeyCode::Backspace => match self.prompt {
@@ -424,6 +445,11 @@ impl SettingsPage {
                     .map_or("", |plugin| plugin.name.as_str());
                 ("remove plugin", name, "Enter removes, Esc cancels")
             }
+            Prompt::ConfirmClearData => (
+                "clear service data",
+                "Sessions, telemetry, replays and uploads will be erased.",
+                "All users of this service are affected. Enter confirms, Esc cancels",
+            ),
             Prompt::None => {
                 if let Some(job) = &self.job {
                     let box_rect = Rect {
@@ -517,41 +543,7 @@ impl SettingsPage {
         );
 
         let host = layout.section(SettingsSection::Host);
-        page.set_stringn(margin, host.y, "host", 4, heading);
-        let host_rows = self
-            .host
-            .iter()
-            .map(|field| {
-                node(
-                    format!("field-{}", field.label),
-                    TableRow::body(vec![
-                        node("label", TableCell::text(field.label.clone()).with_weight(3)),
-                        node("value", TableCell::text(field.value.clone()).with_weight(9)),
-                    ]),
-                )
-            })
-            .collect();
-        if let Some(panel) = self.children.get_mut(HOST_CHILD) {
-            if let Some(table) = panel
-                .view
-                .children_mut()
-                .first_mut()
-                .and_then(|node| node.view.as_any().downcast_mut::<Table>())
-            {
-                table.set_rows(host_rows);
-            }
-            panel.view.render(
-                Rect {
-                    x: margin,
-                    y: host.y + 1,
-                    width,
-                    height: host.height.saturating_sub(1),
-                },
-                page,
-                cx,
-                theme,
-            );
-        }
+        self.paint_host(page, host, margin, width, cx, theme);
 
         let agents = layout.section(SettingsSection::Agents);
         page.set_stringn(margin, agents.y, "agents", 6, heading);
@@ -593,6 +585,90 @@ impl SettingsPage {
                 theme,
             );
         }
+
+        self.paint_data(
+            page,
+            layout.section(SettingsSection::Data),
+            margin,
+            width,
+            theme,
+        );
+    }
+
+    fn paint_host(
+        &mut self,
+        page: &mut Buffer,
+        host: SectionRect,
+        margin: u16,
+        width: u16,
+        cx: &mut Context,
+        theme: &Theme,
+    ) {
+        let heading = Style::default()
+            .bg(theme.background)
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD);
+        page.set_stringn(margin, host.y, "host", 4, heading);
+        let host_rows = self
+            .host
+            .iter()
+            .map(|field| {
+                node(
+                    format!("field-{}", field.label),
+                    TableRow::body(vec![
+                        node("label", TableCell::text(field.label.clone()).with_weight(3)),
+                        node("value", TableCell::text(field.value.clone()).with_weight(9)),
+                    ]),
+                )
+            })
+            .collect();
+        if let Some(panel) = self.children.get_mut(HOST_CHILD) {
+            if let Some(table) = panel
+                .view
+                .children_mut()
+                .first_mut()
+                .and_then(|node| node.view.as_any().downcast_mut::<Table>())
+            {
+                table.set_rows(host_rows);
+            }
+            panel.view.render(
+                Rect {
+                    x: margin,
+                    y: host.y + 1,
+                    width,
+                    height: host.height.saturating_sub(1),
+                },
+                page,
+                cx,
+                theme,
+            );
+        }
+    }
+
+    fn paint_data(
+        &self,
+        page: &mut Buffer,
+        data: SectionRect,
+        margin: u16,
+        width: u16,
+        theme: &Theme,
+    ) {
+        let background = Style::default().bg(theme.background);
+        page.set_stringn(
+            margin,
+            data.y,
+            "danger zone",
+            11,
+            background.fg(theme.destructive),
+        );
+        let selected = self.focus == Focus::ClearData;
+        let row_style = if selected {
+            Style::default().fg(theme.destructive).bg(theme.secondary)
+        } else {
+            background.fg(theme.destructive)
+        };
+        let action = "[ clear data ]  erase sessions, telemetry, replays and uploads";
+        page.set_stringn(margin, data.y + 1, action, usize::from(width), row_style);
     }
 
     fn paint_agents(&mut self, page: &mut Buffer, rect: Rect, cx: &mut Context, theme: &Theme) {
@@ -793,6 +869,9 @@ impl SettingsPage {
                 } else if let Some(index) = layout.plugin_row(row) {
                     self.focus = Focus::Plugins;
                     self.plugin_selected = index;
+                } else if row == layout.section(SettingsSection::Data).y + 1 {
+                    self.focus = Focus::ClearData;
+                    self.prompt = Prompt::ConfirmClearData;
                 }
                 Outcome::Consumed
             }
@@ -810,18 +889,26 @@ impl SettingsPage {
         }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.focus == Focus::Plugins {
-                    self.move_plugin(-1);
-                } else {
-                    self.move_pref(-1);
+                match self.focus {
+                    Focus::Plugins => self.move_plugin(-1),
+                    Focus::Preferences => self.move_pref(-1),
+                    Focus::ClearData => {
+                        self.focus = Focus::Preferences;
+                        self.pref_selected = Setting::ALL.len().saturating_sub(1);
+                        self.ensure_selected_visible();
+                    }
                 }
                 Outcome::Consumed
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.focus == Focus::Plugins {
-                    self.move_plugin(1);
-                } else {
-                    self.move_pref(1);
+                match self.focus {
+                    Focus::Plugins => self.move_plugin(1),
+                    Focus::Preferences if self.pref_selected + 1 == Setting::ALL.len() => {
+                        self.focus = Focus::ClearData;
+                        self.ensure_selected_visible();
+                    }
+                    Focus::Preferences => self.move_pref(1),
+                    Focus::ClearData => {}
                 }
                 Outcome::Consumed
             }

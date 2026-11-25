@@ -151,6 +151,8 @@ pub struct HostConfig {
     pub replay_capacity: usize,
     /// Directory holding one replay file per session.
     pub replay_dir: std::path::PathBuf,
+    /// Optional path of the retired file-based session pins.
+    pub legacy_pins_dir: Option<std::path::PathBuf>,
     /// Maximum bytes retained per session's replay file.
     pub replay_bytes: u64,
     /// Maximum number of concurrently running jobs per session.
@@ -194,6 +196,7 @@ impl Default for HostConfig {
             // write into the source tree. The server binary points this at
             // the database's directory.
             replay_dir: std::env::temp_dir().join("norte-code-replay"),
+            legacy_pins_dir: None,
             replay_bytes: 8 * 1024 * 1024,
             max_concurrent_jobs: 8,
             job_output_retention_s: 86_400,

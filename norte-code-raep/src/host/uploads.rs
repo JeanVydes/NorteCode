@@ -61,6 +61,9 @@ pub trait UploadIndex: Send + Sync {
         owner: Option<&str>,
         ids: &[String],
     ) -> Result<(), HostError>;
+
+    /// Removes every persisted upload receipt.
+    async fn clear(&self) -> Result<(), HostError>;
 }
 /// In-memory upload index, useful for embedded hosts and tests.
 #[derive(Default)]
@@ -94,6 +97,11 @@ impl UploadIndex for MemoryUploadIndex {
                 .ok_or_else(|| HostError::Artifact("upload not found".to_owned()))?;
             record.referenced = true;
         }
+        Ok(())
+    }
+
+    async fn clear(&self) -> Result<(), HostError> {
+        self.uploads.lock().await.clear();
         Ok(())
     }
 }
@@ -255,6 +263,23 @@ impl UploadIndex for SqliteUploadIndex {
             transaction
                 .commit()
                 .map_err(|error| HostError::Artifact(error.to_string()))
+        })
+        .await
+        .map_err(|error| HostError::Artifact(error.to_string()))?
+    }
+
+    async fn clear(&self) -> Result<(), HostError> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = rusqlite::Connection::open(path)
+                .map_err(|error| HostError::Artifact(error.to_string()))?;
+            connection
+                .busy_timeout(std::time::Duration::from_secs(5))
+                .map_err(|error| HostError::Artifact(error.to_string()))?;
+            connection
+                .execute("DELETE FROM raep_uploads", [])
+                .map_err(|error| HostError::Artifact(error.to_string()))?;
+            Ok(())
         })
         .await
         .map_err(|error| HostError::Artifact(error.to_string()))?

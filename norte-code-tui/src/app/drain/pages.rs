@@ -66,7 +66,7 @@ fn create_session(
     model: &mut UiModel,
 ) {
     if let Some(commands) = commands {
-        let _ = commands.try_send(UiCommand::CreateSession { title: None });
+        let _ = commands.try_send(UiCommand::NewDraft);
     }
     switch_to_chat(tree, model);
 }
@@ -99,6 +99,12 @@ pub(in crate::app) fn drain_plugins_actions(
     tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
 ) {
+    let clear_data = tree
+        .find_mut::<ui::SettingsPage>("settings")
+        .is_some_and(ui::SettingsPage::take_clear_data_requested);
+    if clear_data && let Some(commands) = commands.as_ref() {
+        let _ = commands.try_send(UiCommand::ClearData);
+    }
     let actions = tree
         .find_mut::<ui::SettingsPage>("settings")
         .map_or_else(Vec::new, ui::SettingsPage::take_plugin_actions);

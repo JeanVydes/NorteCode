@@ -66,6 +66,14 @@ impl EngineCounters {
         })
         .unwrap_or(Value::Null)
     }
+
+    fn clear(&self) {
+        self.requests.store(0, Ordering::Relaxed);
+        self.stream_deltas.store(0, Ordering::Relaxed);
+        self.tool_calls.store(0, Ordering::Relaxed);
+        self.commits.store(0, Ordering::Relaxed);
+        self.errors.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Shared request records and engine counters.
@@ -83,6 +91,15 @@ impl Telemetry {
             records.pop_front();
         }
         records.push_back(record);
+    }
+
+    /// Clears request samples and aggregate counters.
+    pub fn clear(&self) {
+        self.records
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.counters.clear();
     }
 
     /// Takes every completed request for a Norte session, oldest first.

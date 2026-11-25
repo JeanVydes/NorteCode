@@ -169,6 +169,50 @@ fn settings_fill_unpainted_cells_with_the_selected_theme() {
 }
 
 #[test]
+fn clear_data_requires_confirmation_and_is_listed_last() {
+    let (mut tree, _, theme) = settings_tree();
+    let area = Rect::new(0, 0, 80, 80);
+    let mut buffer = Buffer::empty(area);
+    tree.render(area, &mut buffer, &theme);
+    let text = (0..area.height)
+        .map(|y| row_text(&buffer, area, y))
+        .collect::<String>();
+    assert!(text.contains("danger zone"));
+    assert!(text.contains("clear data"));
+
+    let key = |code| {
+        InputEvent::Key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    };
+    for _ in 0..super::super::config_page::Setting::ALL.len() {
+        tree.handle_event(&key(crossterm::event::KeyCode::Down));
+    }
+    tree.handle_event(&key(crossterm::event::KeyCode::Down));
+    tree.handle_event(&key(crossterm::event::KeyCode::Enter));
+    assert_eq!(
+        tree.find::<SettingsPage>("settings")
+            .expect("settings page")
+            .prompt,
+        super::Prompt::ConfirmClearData
+    );
+    assert!(
+        !tree
+            .find_mut::<SettingsPage>("settings")
+            .expect("settings page")
+            .take_clear_data_requested()
+    );
+
+    tree.handle_event(&key(crossterm::event::KeyCode::Enter));
+    assert!(
+        tree.find_mut::<SettingsPage>("settings")
+            .expect("settings page")
+            .take_clear_data_requested()
+    );
+}
+
+#[test]
 fn plugin_marker_shows_check_when_enabled_and_x_when_disabled() {
     let mut model = UiModel::detached();
     model.tab = Tab::Settings;
