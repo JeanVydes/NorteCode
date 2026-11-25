@@ -82,6 +82,7 @@ pub(super) enum TelemetryView {
 #[serde(rename_all = "snake_case")]
 enum ChartGlyphs {
     #[default]
+    Braille,
     Halftone,
     Blocks,
     Lines,
@@ -90,6 +91,7 @@ enum ChartGlyphs {
 impl ChartGlyphs {
     fn render_style(self) -> RenderStyle {
         match self {
+            Self::Braille => RenderStyle::Braille,
             Self::Halftone => RenderStyle::Halftone,
             Self::Blocks => RenderStyle::Blocks,
             Self::Lines => RenderStyle::Lines,
@@ -98,6 +100,7 @@ impl ChartGlyphs {
 
     const fn label(self) -> &'static str {
         match self {
+            Self::Braille => "braille",
             Self::Halftone => "dots",
             Self::Blocks => "blocks",
             Self::Lines => "lines",
@@ -106,9 +109,10 @@ impl ChartGlyphs {
 
     const fn next(self) -> Self {
         match self {
+            Self::Braille => Self::Halftone,
             Self::Halftone => Self::Blocks,
             Self::Blocks => Self::Lines,
-            Self::Lines => Self::Halftone,
+            Self::Lines => Self::Braille,
         }
     }
 }
