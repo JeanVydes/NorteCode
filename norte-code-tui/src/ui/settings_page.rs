@@ -8,6 +8,7 @@ use ratatui::style::{Modifier, Style};
 use serde::Serialize;
 use terminalui::components::panel::Panel;
 use terminalui::components::scroll::{Scroll, ScrollbarStyle, render_scrollbar};
+use terminalui::components::slider::Slider;
 use terminalui::components::table::{Table, TableCell, TableRow};
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 
@@ -96,6 +97,9 @@ impl SettingsPage {
                 debug: DebugOverlayMode::Off,
                 show_tool_output: false,
                 tool_verbosity: false,
+                chart_density: 4,
+                chart_contrast: 4,
+                chart_dot_size: 1,
             },
             plugin_selected: 0,
             pref_selected: 0,
@@ -302,10 +306,51 @@ impl SettingsPage {
                     }
                 }
             }
-            Focus::Preferences => self
-                .config_actions
-                .push(ConfigAction::Cycle(Setting::ALL[self.pref_selected])),
+            Focus::Preferences => {
+                let setting = Setting::ALL[self.pref_selected];
+                if matches!(
+                    setting,
+                    Setting::ChartDensity | Setting::ChartContrast | Setting::ChartDotSize
+                ) {
+                    self.adjust_chart_slider(1);
+                } else {
+                    self.config_actions.push(ConfigAction::Cycle(setting));
+                }
+            }
         }
+    }
+
+    fn adjust_chart_slider(&mut self, delta: i8) {
+        let setting = Setting::ALL[self.pref_selected];
+        let value = match setting {
+            Setting::ChartDensity => {
+                self.prefs.chart_density = self
+                    .prefs
+                    .chart_density
+                    .saturating_add_signed(delta)
+                    .clamp(2, 6);
+                self.prefs.chart_density
+            }
+            Setting::ChartContrast => {
+                self.prefs.chart_contrast = self
+                    .prefs
+                    .chart_contrast
+                    .saturating_add_signed(delta)
+                    .clamp(1, 16);
+                self.prefs.chart_contrast
+            }
+            Setting::ChartDotSize => {
+                self.prefs.chart_dot_size = self
+                    .prefs
+                    .chart_dot_size
+                    .saturating_add_signed(delta)
+                    .min(2);
+                self.prefs.chart_dot_size
+            }
+            _ => return,
+        };
+        self.config_actions
+            .push(ConfigAction::SetChartValue(setting, value));
     }
 
     fn start_install(&mut self) {
@@ -461,7 +506,15 @@ impl SettingsPage {
         let prefs = layout.section(SettingsSection::Preferences);
         page.set_stringn(margin, prefs.y, "preferences", 11, heading);
         self.prefs_y = prefs.y + 1;
-        self.paint_preferences(page, &layout, prefs.y + 1, width, &preference_style);
+        self.paint_preferences(
+            page,
+            &layout,
+            prefs.y + 1,
+            width,
+            &preference_style,
+            cx,
+            theme,
+        );
 
         let host = layout.section(SettingsSection::Host);
         page.set_stringn(margin, host.y, "host", 4, heading);
@@ -591,6 +644,7 @@ impl SettingsPage {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn paint_preferences(
         &self,
         page: &mut Buffer,
@@ -598,16 +652,21 @@ impl SettingsPage {
         y: u16,
         width: u16,
         style: &PreferenceStyle,
+        cx: &mut Context,
+        theme: &Theme,
     ) {
         let values = [
-            self.prefs.theme.as_str(),
-            self.prefs.thinking.as_str(),
-            self.prefs.send_mode.as_str(),
-            self.prefs.diff_mode.as_str(),
-            self.prefs.rail_position.as_str(),
-            self.prefs.debug.label(),
-            tool_output_label(self.prefs.show_tool_output),
-            tool_verbosity_label(self.prefs.tool_verbosity),
+            self.prefs.theme.clone(),
+            self.prefs.thinking.clone(),
+            self.prefs.send_mode.clone(),
+            self.prefs.diff_mode.clone(),
+            self.prefs.rail_position.clone(),
+            self.prefs.debug.label().to_owned(),
+            tool_output_label(self.prefs.show_tool_output).to_owned(),
+            tool_verbosity_label(self.prefs.tool_verbosity).to_owned(),
+            self.prefs.chart_density.to_string(),
+            format!("{:.2}×", f32::from(self.prefs.chart_contrast) / 4.0),
+            dot_size_label(self.prefs.chart_dot_size).to_owned(),
         ];
         let value_width = width.saturating_sub(layout.label_width().saturating_add(2));
         for (index, setting) in Setting::ALL.iter().enumerate() {
@@ -636,13 +695,41 @@ impl SettingsPage {
                 usize::from(layout.label_width()),
                 label_style,
             );
-            page.set_stringn(
-                layout.value_x(),
-                row,
-                values[index],
-                usize::from(value_width),
-                style.value,
-            );
+            if matches!(setting, Setting::ChartDensity | Setting::ChartContrast)
+                && value_width >= 16
+            {
+                let (min, max, value) = if *setting == Setting::ChartDensity {
+                    (2.0, 6.0, f64::from(self.prefs.chart_density))
+                } else {
+                    (1.0, 16.0, f64::from(self.prefs.chart_contrast))
+                };
+                let slider_width = value_width.min(14);
+                let mut slider = Slider::new(min, max, 1.0).with_value(value);
+                slider.render(
+                    Rect::new(layout.value_x(), row, slider_width, 1),
+                    page,
+                    cx,
+                    theme,
+                );
+                page.set_stringn(
+                    layout
+                        .value_x()
+                        .saturating_add(slider_width)
+                        .saturating_add(1),
+                    row,
+                    &values[index],
+                    usize::from(value_width.saturating_sub(slider_width + 1)),
+                    style.value,
+                );
+            } else {
+                page.set_stringn(
+                    layout.value_x(),
+                    row,
+                    &values[index],
+                    usize::from(value_width),
+                    style.value,
+                );
+            }
         }
     }
 
@@ -674,6 +761,35 @@ impl SettingsPage {
                 if let Some(index) = layout.preference_row(row) {
                     self.focus = Focus::Preferences;
                     self.pref_selected = index;
+                    let selected = Setting::ALL[index];
+                    if matches!(selected, Setting::ChartDensity | Setting::ChartContrast) {
+                        let start = self.area.x.saturating_add(layout.value_x());
+                        let width = self.area.width.saturating_sub(layout.value_x()).min(14);
+                        if mouse.column >= start && width > 1 {
+                            let offset = mouse.column.saturating_sub(start).min(width - 1);
+                            let max = if selected == Setting::ChartDensity {
+                                6
+                            } else {
+                                16
+                            };
+                            let min = if selected == Setting::ChartDensity {
+                                2
+                            } else {
+                                1
+                            };
+                            let position =
+                                u8::try_from(offset * u16::from(max - min) / (width - 1))
+                                    .unwrap_or(max - min);
+                            let value = min + position;
+                            if selected == Setting::ChartDensity {
+                                self.prefs.chart_density = value;
+                            } else {
+                                self.prefs.chart_contrast = value;
+                            }
+                            self.config_actions
+                                .push(ConfigAction::SetChartValue(selected, value));
+                        }
+                    }
                 } else if let Some(index) = layout.plugin_row(row) {
                     self.focus = Focus::Plugins;
                     self.plugin_selected = index;
@@ -707,6 +823,16 @@ impl SettingsPage {
                 } else {
                     self.move_pref(1);
                 }
+                Outcome::Consumed
+            }
+            KeyCode::Left | KeyCode::Right
+                if self.focus == Focus::Preferences
+                    && matches!(
+                        Setting::ALL[self.pref_selected],
+                        Setting::ChartDensity | Setting::ChartContrast | Setting::ChartDotSize
+                    ) =>
+            {
+                self.adjust_chart_slider(if key.code == KeyCode::Left { -1 } else { 1 });
                 Outcome::Consumed
             }
             KeyCode::Tab => {
@@ -771,6 +897,14 @@ fn tool_output_label(expanded: bool) -> &'static str {
 
 fn tool_verbosity_label(grouped: bool) -> &'static str {
     if grouped { "grouped" } else { "standard" }
+}
+
+fn dot_size_label(size: u8) -> &'static str {
+    match size {
+        0 => "small",
+        2.. => "large",
+        _ => "medium",
+    }
 }
 
 impl View for SettingsPage {

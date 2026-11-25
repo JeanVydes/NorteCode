@@ -191,7 +191,12 @@ fn fold_tool_started(
             .or_else(|| command.map(str::to_owned));
         let console = if matches!(tool, "shell" | "bash") {
             command.map(|command| {
-                Box::new(terminalui::components::console::Console::new(command).with_max_visible(6))
+                Box::new(
+                    terminalui::components::console::Console::new(command)
+                        .with_max_visible(6)
+                        .with_header_label("stdout")
+                        .with_output_visible(model.preferences.show_tool_output),
+                )
             })
         } else {
             None
@@ -206,7 +211,7 @@ fn fold_tool_started(
             name: tool.to_owned(),
             target,
             state: ui::ToolState::Running,
-            expanded: false,
+            expanded: model.preferences.show_tool_output,
             meta: origin
                 .map(|origin| format!("plugin: {}", origin.plugin))
                 .or(meta),

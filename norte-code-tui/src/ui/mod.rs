@@ -360,6 +360,9 @@ fn update_config(tree: &mut Tree, model: &UiModel) {
                 debug: model.preferences.debug,
                 show_tool_output: model.preferences.show_tool_output,
                 tool_verbosity: model.preferences.tool_verbosity,
+                chart_density: model.preferences.chart_density,
+                chart_contrast: model.preferences.chart_contrast,
+                chart_dot_size: model.preferences.chart_dot_size,
             },
         );
     }
@@ -372,6 +375,13 @@ fn update_config(tree: &mut Tree, model: &UiModel) {
     }
     if let Some(chat) = tree.find_mut::<ChatLayout>("chat") {
         chat.set_position(model.preferences.rail_position);
+    }
+    if let Some(telemetry) = tree.find_mut::<TelemetryPage>("telemetry") {
+        telemetry.set_chart_preferences(
+            model.preferences.chart_density,
+            model.preferences.chart_contrast,
+            model.preferences.chart_dot_size,
+        );
     }
 }
 

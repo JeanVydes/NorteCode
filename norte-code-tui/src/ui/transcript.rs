@@ -576,6 +576,8 @@ impl Transcript {
                         Box::new(
                             Console::new(command)
                                 .with_max_visible(6)
+                                .with_header_label("stdout")
+                                .with_output_visible(self.tool_preferences.output_expanded)
                                 .with_max_retained_lines(Some(self.retention.console_max_lines)),
                         )
                     })
@@ -594,7 +596,7 @@ impl Transcript {
                     },
                     target,
                     state: ToolState::Done,
-                    expanded: false,
+                    expanded: self.tool_preferences.output_expanded,
                     meta: None,
                     diff,
                     output: None,
@@ -965,7 +967,7 @@ impl Transcript {
                 };
                 let extra = body
                     + console.as_ref().map_or(0, |console| {
-                        usize::from(console.wrapped_height(console_width)) + 1
+                        usize::from(console.wrapped_height(console_width)) + 2
                     });
                 u16::try_from(extra + 2).unwrap_or(u16::MAX)
             }
@@ -1195,7 +1197,8 @@ impl Transcript {
         if let Some(console) = console {
             let console_width = rect.width.saturating_sub(4);
             let rows = console.wrapped_height(console_width);
-            let y = rect.y.saturating_add(1).saturating_add(body_rows);
+            // Keep a visual gutter between the tool summary and its stdout panel.
+            let y = rect.y.saturating_add(2).saturating_add(body_rows);
             if y < paint.clip {
                 console.render(
                     Rect {
@@ -2129,11 +2132,17 @@ fn toggle_console_in_item(
             } else {
                 0
             };
-            if usize::from(row) >= body.saturating_add(1) {
-                console.toggle_expanded();
-                true
-            } else {
-                false
+            let console_start = body.saturating_add(2);
+            match usize::from(row).cmp(&console_start) {
+                std::cmp::Ordering::Equal => {
+                    console.toggle_output_visible();
+                    true
+                }
+                std::cmp::Ordering::Greater => {
+                    console.toggle_expanded();
+                    true
+                }
+                std::cmp::Ordering::Less => false,
             }
         }
         _ => false,

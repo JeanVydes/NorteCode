@@ -10,7 +10,7 @@ use ratatui::style::Style;
 use terminalui::components::candlechart::{CandleChart, CandleChartStyle};
 use terminalui::components::linechart::{LineChart, LineChartStyle};
 use terminalui::components::piechart::{PieChart, PieSlice};
-use terminalui::components::presentation::DotSize;
+use terminalui::components::presentation::{DotSize, StyleTuning};
 use terminalui::{Context, Theme, View};
 
 use crate::telemetry::{ChartInterval, short_label};
@@ -32,6 +32,42 @@ struct ChartSlotLayout {
 }
 
 impl TelemetryPage {
+    pub(crate) fn set_chart_preferences(
+        &mut self,
+        density: u8,
+        contrast_quarters: u8,
+        dot_size: u8,
+    ) {
+        let tuning = StyleTuning {
+            density: density.clamp(2, 6),
+            contrast: f32::from(contrast_quarters.clamp(1, 16)) / 4.0,
+            dotsize: match dot_size.min(2) {
+                0 => DotSize::Small,
+                2 => DotSize::Large,
+                _ => DotSize::Medium,
+            },
+        };
+        self.chart_tuning = tuning;
+        let presentation = self.chart_glyphs.render_style();
+        for node in &mut self.children {
+            if let Some(chart) = node.view.as_any().downcast_mut::<CandleChart>() {
+                chart.tuning = tuning;
+                chart.presentation = presentation;
+            } else if let Some(chart) = node.view.as_any().downcast_mut::<LineChart>() {
+                chart.tuning = tuning;
+                chart.presentation = presentation;
+            }
+        }
+        for chart in &mut self.additional_charts {
+            chart.tuning = tuning;
+            chart.presentation = presentation;
+        }
+        self.provider_cost_chart.set_tuning(tuning);
+        self.model_cost_chart.set_tuning(tuning);
+        self.provider_cost_chart.set_presentation(presentation);
+        self.model_cost_chart.set_presentation(presentation);
+    }
+
     pub(super) fn cycle_chart_glyphs(&mut self) {
         self.chart_glyphs = self.chart_glyphs.next();
     }

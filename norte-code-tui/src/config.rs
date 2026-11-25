@@ -8,6 +8,7 @@ use std::{
 
 use norte_code_client::config::{CliRuntimeConfig, ReconnectConfig, RetentionConfig};
 use serde::Deserialize;
+use terminalui::components::presentation::DotSize;
 use thiserror::Error;
 
 use crate::theme::CustomThemeConfig;
@@ -81,6 +82,22 @@ pub(crate) struct UiConfig {
     /// Group reasoning and tool activity in expandable transcript blocks.
     #[serde(default)]
     pub(crate) tool_verbosity: bool,
+    /// Chart glyph density, clamped to 2..=6 by the renderer.
+    #[serde(default = "default_chart_density")]
+    pub(crate) chart_density: u8,
+    /// Chart contrast from 0.25 through 4.0.
+    #[serde(default = "default_chart_contrast")]
+    pub(crate) chart_contrast: f32,
+    /// Halftone dot glyph size.
+    #[serde(default)]
+    pub(crate) chart_dot_size: DotSize,
+}
+
+fn default_chart_density() -> u8 {
+    4
+}
+fn default_chart_contrast() -> f32 {
+    1.0
 }
 
 /// The client configuration.

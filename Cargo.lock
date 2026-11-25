@@ -2784,7 +2784,7 @@ dependencies = [
 [[package]]
 name = "terminalui"
 version = "0.1.0"
-source = "git+https://github.com/JeanVydes/terminalui.git?rev=549f7c341d8b03aef43531acbea63dffb2308dec#549f7c341d8b03aef43531acbea63dffb2308dec"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=8bfa8eb#8bfa8eb5bb215e0bd6c08f1001447ac22480860d"
 dependencies = [
  "terminalui-animations",
  "terminalui-components",
@@ -2794,7 +2794,7 @@ dependencies = [
 [[package]]
 name = "terminalui-animations"
 version = "0.1.0"
-source = "git+https://github.com/JeanVydes/terminalui.git?rev=549f7c341d8b03aef43531acbea63dffb2308dec#549f7c341d8b03aef43531acbea63dffb2308dec"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=8bfa8eb#8bfa8eb5bb215e0bd6c08f1001447ac22480860d"
 dependencies = [
  "crossterm 0.29.0",
  "ratatui",
@@ -2805,7 +2805,7 @@ dependencies = [
 [[package]]
 name = "terminalui-components"
 version = "0.1.0"
-source = "git+https://github.com/JeanVydes/terminalui.git?rev=549f7c341d8b03aef43531acbea63dffb2308dec#549f7c341d8b03aef43531acbea63dffb2308dec"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=8bfa8eb#8bfa8eb5bb215e0bd6c08f1001447ac22480860d"
 dependencies = [
  "crossterm 0.29.0",
  "ratatui",
@@ -2818,7 +2818,7 @@ dependencies = [
 [[package]]
 name = "terminalui-core"
 version = "0.1.0"
-source = "git+https://github.com/JeanVydes/terminalui.git?rev=549f7c341d8b03aef43531acbea63dffb2308dec#549f7c341d8b03aef43531acbea63dffb2308dec"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=8bfa8eb#8bfa8eb5bb215e0bd6c08f1001447ac22480860d"
 dependencies = [
  "crossterm 0.29.0",
  "erased-serde",

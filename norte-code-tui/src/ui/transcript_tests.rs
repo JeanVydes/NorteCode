@@ -366,10 +366,11 @@ fn replayed_shell_calls_keep_the_command_and_its_result() {
     assert_eq!(target.as_deref(), Some("echo hi"));
     let console = console.as_ref().expect("console");
     assert_eq!(console.lines(), &["hi".to_string()]);
+    assert!(!console.is_output_visible());
 }
 
 #[test]
-fn clicking_shell_output_toggles_its_expansion() {
+fn shell_console_can_be_hidden_and_its_rows_expanded_separately() {
     let mut transcript = Transcript::new();
     let lines: Vec<String> = (0..12).map(|index| format!("row {index}")).collect();
     transcript.push(Item::Tool {
@@ -392,16 +393,24 @@ fn clicking_shell_output_toggles_its_expansion() {
         }) if console.is_expanded()
     ));
 
-    assert!(transcript.toggle_console_at(1));
+    assert!(transcript.toggle_console_at(2));
     assert!(matches!(
         transcript.items.first(),
         Some(Item::Tool {
             console: Some(console),
             ..
-        }) if console.is_expanded()
+        }) if !console.is_output_visible()
     ));
-    assert!(transcript.toggle_console_at(1));
-    assert!(!matches!(
+    assert!(transcript.toggle_console_at(2));
+    assert!(matches!(
+        transcript.items.first(),
+        Some(Item::Tool {
+            console: Some(console),
+            ..
+        }) if console.is_output_visible() && !console.is_expanded()
+    ));
+    assert!(transcript.toggle_console_at(3));
+    assert!(matches!(
         transcript.items.first(),
         Some(Item::Tool {
             console: Some(console),

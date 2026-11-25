@@ -165,26 +165,43 @@ pub(in crate::app) fn drain_config_actions(
     let mut theme_changed = false;
     for action in actions {
         changed = true;
-        let ConfigAction::Cycle(setting) = action;
-        match setting {
-            Setting::Theme => {
-                let choice = model.preferences.theme.clone();
-                model.preferences.theme = model.preferences.catalog.next(&choice);
-                theme_changed = true;
-            }
-            Setting::Thinking => model.preferences.reasoning = model.preferences.reasoning.next(),
-            Setting::SendMode => model.preferences.send_mode = model.preferences.send_mode.next(),
-            Setting::DiffMode => model.preferences.diff_mode = model.preferences.diff_mode.next(),
-            Setting::RailPosition => {
-                model.preferences.rail_position = model.preferences.rail_position.next();
-            }
-            Setting::Debug => model.preferences.debug = model.preferences.debug.next(),
-            Setting::ShowToolOutput => {
-                model.preferences.show_tool_output = !model.preferences.show_tool_output;
-            }
-            Setting::ToolVerbosity => {
-                model.preferences.tool_verbosity = !model.preferences.tool_verbosity;
-            }
+        match action {
+            ConfigAction::SetChartValue(setting, value) => match setting {
+                Setting::ChartDensity => model.preferences.chart_density = value.clamp(2, 6),
+                Setting::ChartContrast => model.preferences.chart_contrast = value.clamp(1, 16),
+                Setting::ChartDotSize => model.preferences.chart_dot_size = value.min(2),
+                _ => {}
+            },
+            ConfigAction::Cycle(setting) => match setting {
+                Setting::Theme => {
+                    let choice = model.preferences.theme.clone();
+                    model.preferences.theme = model.preferences.catalog.next(&choice);
+                    theme_changed = true;
+                }
+                Setting::Thinking => {
+                    model.preferences.reasoning = model.preferences.reasoning.next();
+                }
+                Setting::SendMode => {
+                    model.preferences.send_mode = model.preferences.send_mode.next();
+                }
+                Setting::DiffMode => {
+                    model.preferences.diff_mode = model.preferences.diff_mode.next();
+                }
+                Setting::RailPosition => {
+                    model.preferences.rail_position = model.preferences.rail_position.next();
+                }
+                Setting::Debug => model.preferences.debug = model.preferences.debug.next(),
+                Setting::ShowToolOutput => {
+                    model.preferences.show_tool_output = !model.preferences.show_tool_output;
+                }
+                Setting::ToolVerbosity => {
+                    model.preferences.tool_verbosity = !model.preferences.tool_verbosity;
+                }
+                Setting::ChartDensity | Setting::ChartContrast => {}
+                Setting::ChartDotSize => {
+                    model.preferences.chart_dot_size = (model.preferences.chart_dot_size + 1) % 3;
+                }
+            },
         }
     }
     if theme_changed {

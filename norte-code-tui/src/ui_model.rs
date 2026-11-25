@@ -230,6 +230,12 @@ pub(crate) struct Preferences {
     pub(crate) show_tool_output: bool,
     /// Whether non-text activity is grouped in expandable blocks.
     pub(crate) tool_verbosity: bool,
+    /// Shared chart shading density.
+    pub(crate) chart_density: u8,
+    /// Chart contrast in quarter steps.
+    pub(crate) chart_contrast: u8,
+    /// Dot size ordinal: small, medium, large.
+    pub(crate) chart_dot_size: u8,
 }
 
 /// The turn the host is running, when known.
@@ -478,6 +484,9 @@ impl UiModel {
                 debug: DebugOverlayMode::Off,
                 show_tool_output: false,
                 tool_verbosity: false,
+                chart_density: 4,
+                chart_contrast: 4,
+                chart_dot_size: 1,
             },
             attachment: SessionAttachmentState::Disconnected,
             turn: TurnState::Idle,

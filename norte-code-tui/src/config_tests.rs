@@ -31,6 +31,20 @@ fn tool_preferences_default_compact_and_load_from_ui_json() {
 }
 
 #[test]
+fn chart_preferences_use_readable_values_in_ui_json() {
+    let configured: UiConfig = serde_json::from_str(
+        r#"{"chart_density":5,"chart_contrast":1.5,"chart_dot_size":"large"}"#,
+    )
+    .expect("chart preferences");
+    assert_eq!(configured.chart_density, 5);
+    assert_eq!(configured.chart_contrast, 1.5);
+    assert_eq!(
+        configured.chart_dot_size,
+        terminalui::components::presentation::DotSize::Large
+    );
+}
+
+#[test]
 fn absent_runtime_blocks_keep_the_documented_defaults() {
     let config: ClientConfig = serde_json::from_str(MINIMAL_CONFIG).expect("minimal config");
 

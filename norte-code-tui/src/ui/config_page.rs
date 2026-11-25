@@ -23,10 +23,16 @@ pub(crate) enum Setting {
     ShowToolOutput,
     /// Whether reasoning and tool activity is grouped.
     ToolVerbosity,
+    /// Telemetry chart glyph density.
+    ChartDensity,
+    /// Telemetry chart contrast.
+    ChartContrast,
+    /// Telemetry chart dot size.
+    ChartDotSize,
 }
 
 impl Setting {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Theme,
         Self::Thinking,
         Self::SendMode,
@@ -35,6 +41,9 @@ impl Setting {
         Self::Debug,
         Self::ShowToolOutput,
         Self::ToolVerbosity,
+        Self::ChartDensity,
+        Self::ChartContrast,
+        Self::ChartDotSize,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
@@ -47,6 +56,9 @@ impl Setting {
             Self::Debug => "debug overlay",
             Self::ShowToolOutput => "tool output expanded",
             Self::ToolVerbosity => "tool verbosity",
+            Self::ChartDensity => "chart density",
+            Self::ChartContrast => "chart contrast",
+            Self::ChartDotSize => "chart dot size",
         }
     }
 }
@@ -56,6 +68,8 @@ impl Setting {
 pub(crate) enum ConfigAction {
     /// Cycle the value of this setting.
     Cycle(Setting),
+    /// Set a chart tuning value adjusted by its slider.
+    SetChartValue(Setting, u8),
 }
 
 /// The values to show, supplied by the host.
@@ -77,4 +91,10 @@ pub(crate) struct ConfigData {
     pub(crate) show_tool_output: bool,
     /// Whether non-text activity is grouped.
     pub(crate) tool_verbosity: bool,
+    /// Density from 2 through 6.
+    pub(crate) chart_density: u8,
+    /// Contrast in quarter steps, from 1 through 16.
+    pub(crate) chart_contrast: u8,
+    /// Dot size ordinal, 0 through 2.
+    pub(crate) chart_dot_size: u8,
 }

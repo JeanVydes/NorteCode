@@ -185,6 +185,13 @@ fn attach_client(
             model.preferences.debug = loaded.ui.debug.into();
             model.preferences.show_tool_output = loaded.ui.show_tool_output;
             model.preferences.tool_verbosity = loaded.ui.tool_verbosity;
+            model.preferences.chart_density = loaded.ui.chart_density.clamp(2, 6);
+            model.preferences.chart_contrast = contrast_quarters(loaded.ui.chart_contrast);
+            model.preferences.chart_dot_size = match loaded.ui.chart_dot_size {
+                terminalui::components::presentation::DotSize::Small => 0,
+                terminalui::components::presentation::DotSize::Large => 2,
+                _ => 1,
+            };
             model.service_url.clone_from(&loaded.service.url);
             let (commands, events) = start(loaded.clone());
             model.attachment = SessionAttachmentState::Connecting;
@@ -197,6 +204,19 @@ fn attach_client(
             (None, None, None)
         }
     }
+}
+
+fn contrast_quarters(value: f32) -> u8 {
+    const CUTS: &[f32] = &[
+        0.375, 0.625, 0.875, 1.125, 1.375, 1.625, 1.875, 2.125, 2.375, 2.625, 2.875, 3.125, 3.375,
+        3.625, 3.875,
+    ];
+    let value = value.clamp(0.25, 4.0);
+    let step = CUTS
+        .iter()
+        .position(|cut| value < *cut)
+        .unwrap_or(CUTS.len());
+    u8::try_from(step + 1).unwrap_or(4)
 }
 
 fn prepare_debug(
