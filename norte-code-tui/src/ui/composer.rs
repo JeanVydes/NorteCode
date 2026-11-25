@@ -479,6 +479,7 @@ impl View for Composer {
         self.input.style = input_style(theme);
         if self.visible {
             self.input.render(area, buf, cx, theme);
+            self.paint_chips(area, buf, theme);
         } else {
             // Erase the box left by previous frames, then keep the focus
             // counter in step with the tree's count_focusable.
@@ -530,6 +531,71 @@ impl View for Composer {
 
     fn focusable(&self) -> bool {
         self.input.focusable()
+    }
+}
+
+impl Composer {
+    fn paint_chips(
+        &self,
+        area: ratatui::layout::Rect,
+        buf: &mut ratatui::buffer::Buffer,
+        theme: &Theme,
+    ) {
+        use crate::chip::ChipKind;
+        use ratatui::style::{Color, Modifier};
+        let width = usize::from(area.width.saturating_sub(4)).max(1);
+        let height = usize::from(area.height.saturating_sub(2));
+        let mut row = 0usize;
+        let mut col = 0usize;
+        for (index, ch) in self.draft.text().chars().enumerate() {
+            if ch == '\n' {
+                row += 1;
+                col = 0;
+                continue;
+            }
+            if col == width {
+                row += 1;
+                col = 0;
+            }
+            if row >= self.input.state.scroll
+                && row < self.input.state.scroll + height
+                && index != self.input.state.cursor
+                && !self
+                    .input
+                    .selection()
+                    .is_some_and(|(start, end)| start <= index && index < end)
+                && let Some(span) = self
+                    .draft
+                    .spans()
+                    .iter()
+                    .find(|span| span.start <= index && index < span.end)
+                && let Some(chip) = self.draft.chip(span.id)
+            {
+                let color = match chip.kind() {
+                    ChipKind::Text => theme.accent,
+                    ChipKind::Image => Color::LightMagenta,
+                    ChipKind::File => Color::LightBlue,
+                    ChipKind::Audio => Color::LightGreen,
+                    ChipKind::Video => Color::LightYellow,
+                };
+                let x = area
+                    .x
+                    .saturating_add(2)
+                    .saturating_add(u16::try_from(col).unwrap_or(u16::MAX));
+                let y = area.y.saturating_add(1).saturating_add(
+                    u16::try_from(row - self.input.state.scroll).unwrap_or(u16::MAX),
+                );
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
+                    cell.set_style(
+                        Style::default()
+                            .fg(color)
+                            .bg(theme.secondary)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                }
+            }
+            col += 1;
+        }
     }
 }
 

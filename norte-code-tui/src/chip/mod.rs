@@ -8,6 +8,7 @@ mod unit;
 pub(crate) use content::OriginalText;
 pub(crate) use draft::Draft;
 pub(crate) use label::ChipLabel;
+pub(crate) use unit::ChipKind;
 
 #[cfg(test)]
 #[path = "chip_tests.rs"]

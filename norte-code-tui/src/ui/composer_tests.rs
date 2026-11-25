@@ -112,6 +112,21 @@ fn type_text(tree: &mut Tree, text: &str) {
 }
 
 #[test]
+fn shift_enter_inserts_a_newline_in_the_composer() {
+    let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::default());
+    let mut tree = composer_tree(clipboard);
+    type_text(&mut tree, "first");
+    press(&mut tree, KeyCode::Enter, KeyModifiers::SHIFT);
+    type_text(&mut tree, "second");
+    assert_eq!(
+        tree.find_mut::<Composer>("composer")
+            .expect("composer")
+            .text(),
+        "first\nsecond"
+    );
+}
+
+#[test]
 fn text_of_thirty_two_chars_stays_inline() {
     let mut tree = composer_tree(Arc::new(FakeClipboard::default()));
     let text = "a".repeat(32);
