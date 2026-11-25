@@ -873,7 +873,7 @@ pub(crate) fn doctor() -> Result<(), String> {
     Ok(())
 }
 
-pub fn prepare_for_tui() -> Result<(), String> {
+pub fn prepare_for_tui(active: bool) -> Result<(), String> {
     let path = norte_code_protocol::config::user_cli_path();
     let config = norte_code_protocol::config::CliConfig::load(path.as_deref(), None)
         .map_err(|error| format!("could not read client config: {error}"))?
@@ -886,6 +886,9 @@ pub fn prepare_for_tui() -> Result<(), String> {
             Err(format!("remote service is not reachable at {url}"))
         };
     }
+    if active {
+        return if probe(&url) { Ok(()) } else { up() };
+    }
     restart_local(&url, down, probe, up)?;
     // Wait a bit more in case probe lagged.
     for _ in 0..20 {
@@ -895,6 +898,18 @@ pub fn prepare_for_tui() -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     Err(format!("service did not become ready at {url}"))
+}
+
+pub(crate) fn stop_after_tui() -> Result<(), String> {
+    let path = norte_code_protocol::config::user_cli_path();
+    let config = norte_code_protocol::config::CliConfig::load(path.as_deref(), None)
+        .map_err(|error| format!("could not read client config: {error}"))?
+        .config;
+    if config.service_type == norte_code_protocol::config::ServiceType::Remote {
+        Ok(())
+    } else {
+        down()
+    }
 }
 
 fn restart_local(

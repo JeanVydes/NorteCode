@@ -20,6 +20,7 @@ mod diff;
 mod frame_limiter;
 mod job_notice;
 mod leaderboard;
+pub mod lifecycle;
 mod metrics;
 mod palette;
 mod process_stats;
@@ -46,5 +47,25 @@ mod test_support;
 /// # Errors
 /// Returns the error the loop reported to the caller.
 pub fn run_tui() -> Result<(), TuiError> {
-    app::run()
+    lifecycle::run_with_lifecycle(
+        |_| Ok(()),
+        || {
+            let path = norte_code_protocol::config::user_cli_path();
+            let config = norte_code_protocol::config::CliConfig::load(path.as_deref(), None)
+                .map_err(std::io::Error::other)?
+                .config;
+            if config.service_type == norte_code_protocol::config::ServiceType::Remote {
+                return Ok(());
+            }
+            let status = std::process::Command::new("norte")
+                .args(["service", "down"])
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("could not stop local service"))
+            }
+        },
+    )
+    .map_err(Into::into)
 }

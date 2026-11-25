@@ -29,6 +29,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 signal-hook = { workspace = true }
+rustix = { version = "1", features = ["fs"] }
 thiserror = { workspace = true }
 futures-util = { workspace = true }
 unicode-width = "0.2"
