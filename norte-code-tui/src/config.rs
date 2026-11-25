@@ -3,6 +3,7 @@
 
 use std::{
     fs, io,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -62,7 +63,8 @@ pub(crate) struct ServiceConfig {
 }
 
 /// The interface configuration, under the `ui` key.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub(crate) struct UiConfig {
     /// Name of the active theme, built-in or configured.
     #[serde(default)]
@@ -91,6 +93,28 @@ pub(crate) struct UiConfig {
     /// Halftone dot glyph size.
     #[serde(default)]
     pub(crate) chart_dot_size: DotSize,
+    pub(crate) reasoning: Option<crate::ui_model::ReasoningLevel>,
+    pub(crate) send_mode: Option<crate::ui_model::SendMode>,
+    pub(crate) diff_mode: Option<crate::diff::DiffMode>,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            themes: Vec::new(),
+            rail_position: None,
+            debug: false,
+            show_tool_output: false,
+            tool_verbosity: false,
+            chart_density: 4,
+            chart_contrast: 1.0,
+            chart_dot_size: DotSize::Medium,
+            reasoning: None,
+            send_mode: None,
+            diff_mode: None,
+        }
+    }
 }
 
 fn default_chart_density() -> u8 {
@@ -104,7 +128,14 @@ fn default_chart_contrast() -> f32 {
 #[derive(Clone, Deserialize)]
 pub(crate) struct ClientConfig {
     /// The raep service the UI attaches to.
+    #[serde(default)]
     pub(crate) service: ServiceConfig,
+    /// CLI-compatible flat service address.
+    #[serde(default)]
+    service_url: Option<String>,
+    /// CLI-compatible flat bearer token.
+    #[serde(default)]
+    service_auth: Option<String>,
     /// The agent id to attach to; `norte-code` by default.
     #[serde(default = "default_agent")]
     pub(crate) agent_id: String,
@@ -123,6 +154,15 @@ fn default_agent() -> String {
     "norte-code".to_owned()
 }
 
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://127.0.0.1:8787".to_owned(),
+            token: None,
+        }
+    }
+}
+
 impl ClientConfig {
     /// The configuration for one attachment attempt.
     ///
@@ -137,25 +177,27 @@ impl ClientConfig {
     pub(crate) fn load() -> Result<Self, ConfigError> {
         let path = config_path().unwrap_or_else(default_path);
         if !path.exists() {
-            return Ok(Self {
-                service: ServiceConfig {
-                    url: "http://127.0.0.1:8787".to_owned(),
-                    token: None,
-                },
-                agent_id: default_agent(),
-                ui: UiConfig::default(),
-                reconnect: ReconnectConfig::default(),
-                retention: RetentionConfig::default(),
-            });
+            create_default(&path)?;
         }
         let raw = fs::read_to_string(&path).map_err(|source| ConfigError::Io {
             path: path.clone(),
             source,
         })?;
-        let config: Self = serde_json::from_str(&raw).map_err(|source| ConfigError::Json {
+        let mut config: Self = serde_json::from_str(&raw).map_err(|source| ConfigError::Json {
             path: path.clone(),
             source,
         })?;
+        let root: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|source| ConfigError::Json {
+                path: path.clone(),
+                source,
+            })?;
+        if root.get("service").is_none() {
+            if let Some(url) = config.service_url.take() {
+                config.service.url = url;
+            }
+            config.service.token = config.service_auth.take();
+        }
         parse_runtime(&path, &raw)?;
         Ok(config)
     }
@@ -181,8 +223,152 @@ fn default_path() -> PathBuf {
 }
 
 fn config_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    Some(home.join(".config").join("norte-code").join(CONFIG_FILE))
+    norte_code_protocol::config::user_cli_path()
+}
+
+fn create_default(path: &Path) -> Result<(), ConfigError> {
+    let create = || -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => file.write_all(include_bytes!("../../default/cli.json")),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error),
+        }
+    };
+    create().map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Persist the user preferences while preserving settings owned by other clients.
+pub(crate) fn save_preferences(
+    preferences: &crate::ui_model::Preferences,
+) -> Result<(), ConfigError> {
+    let path = config_path().unwrap_or_else(default_path);
+    save_preferences_at(&path, preferences)
+}
+
+fn save_preferences_at(
+    path: &Path,
+    preferences: &crate::ui_model::Preferences,
+) -> Result<(), ConfigError> {
+    if !path.exists() {
+        create_default(path)?;
+    }
+    let raw = fs::read_to_string(path).map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut document: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|source| ConfigError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let object = document.as_object_mut().ok_or_else(|| ConfigError::Io {
+        path: path.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::InvalidData,
+            "configuration must be an object",
+        ),
+    })?;
+    let ui = object
+        .entry("ui")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let ui = ui.as_object_mut().ok_or_else(|| ConfigError::Io {
+        path: path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::InvalidData, "ui must be an object"),
+    })?;
+    let saved = SavedPreferences::from(preferences);
+    let serialized = serde_json::to_value(saved).map_err(|source| ConfigError::Json {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if let serde_json::Value::Object(fields) = serialized {
+        ui.extend(fields);
+    }
+    let output = serde_json::to_vec_pretty(&document).map_err(|source| ConfigError::Json {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    atomic_write(path, &output).map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[derive(serde::Serialize)]
+struct SavedPreferences<'a> {
+    theme: &'a str,
+    rail_position: RailPosition,
+    debug: bool,
+    show_tool_output: bool,
+    tool_verbosity: bool,
+    chart_density: u8,
+    chart_contrast: f32,
+    chart_dot_size: DotSize,
+    reasoning: crate::ui_model::ReasoningLevel,
+    send_mode: crate::ui_model::SendMode,
+    diff_mode: crate::diff::DiffMode,
+}
+
+impl<'a> From<&'a crate::ui_model::Preferences> for SavedPreferences<'a> {
+    fn from(p: &'a crate::ui_model::Preferences) -> Self {
+        Self {
+            theme: crate::theme::theme_name(&p.theme),
+            rail_position: p.rail_position,
+            debug: p.debug.enabled(),
+            show_tool_output: p.show_tool_output,
+            tool_verbosity: p.tool_verbosity,
+            chart_density: p.chart_density,
+            chart_contrast: f32::from(p.chart_contrast) / 4.0,
+            chart_dot_size: match p.chart_dot_size {
+                0 => DotSize::Small,
+                2 => DotSize::Large,
+                _ => DotSize::Medium,
+            },
+            reasoning: p.reasoning,
+            send_mode: p.send_mode,
+            diff_mode: p.diff_mode,
+        }
+    }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut attempt = 0u32;
+    loop {
+        let temporary = parent.join(format!(".cli.json.{}.{}.tmp", std::process::id(), attempt));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(mut file) => {
+                let result = (|| {
+                    file.set_permissions(fs::metadata(path)?.permissions())?;
+                    file.write_all(bytes)?;
+                    file.write_all(b"\n")?;
+                    file.sync_all()?;
+                    fs::rename(&temporary, path)
+                })();
+                if result.is_err() {
+                    let _ = fs::remove_file(&temporary);
+                }
+                return result;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempt < 100 => {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -48,7 +48,8 @@ pub(in crate::app) fn poll_event(
     if !event::poll(timeout)? {
         return Ok(PollOutcome::Idle);
     }
-    match event::read()? {
+    let previous = model.preferences.clone();
+    let outcome = match event::read()? {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             let quit = handle_key(tree, key, commands, events, model, config);
             Ok(if quit {
@@ -84,7 +85,17 @@ pub(in crate::app) fn poll_event(
             ui::sync_views(tree, model);
             Ok(PollOutcome::Event(InputKind::Other))
         }
+    };
+    if model.preferences != previous
+        && let Err(error) = crate::config::save_preferences(&model.preferences)
+    {
+        super::event_fold::toast(
+            tree,
+            &format!("Could not save preferences: {error}"),
+            ui::Tone::Warn,
+        );
     }
+    outcome
 }
 
 pub(in crate::app) fn cycle_theme(tree: &mut terminalui::Tree, model: &mut UiModel) {

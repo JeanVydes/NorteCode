@@ -25,7 +25,8 @@ pub(crate) struct EditReplacement {
 }
 
 /// How a code change is drawn.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum DiffMode {
     /// Changed lines one after another, with context.
     #[default]

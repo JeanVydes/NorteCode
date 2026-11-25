@@ -102,7 +102,8 @@ impl ReasoningLevel {
 }
 
 /// The effort level the reasoning selector offers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ReasoningLevel {
     /// Let the model decide.
     Auto,
@@ -161,7 +162,8 @@ impl SendMode {
 }
 
 /// What to do with a message sent while a turn is running.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SendMode {
     /// Steer the running turn.
     Steer,

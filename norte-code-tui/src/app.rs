@@ -185,6 +185,15 @@ fn attach_client(
             model.preferences.debug = loaded.ui.debug.into();
             model.preferences.show_tool_output = loaded.ui.show_tool_output;
             model.preferences.tool_verbosity = loaded.ui.tool_verbosity;
+            if let Some(value) = loaded.ui.reasoning {
+                model.preferences.reasoning = value;
+            }
+            if let Some(value) = loaded.ui.send_mode {
+                model.preferences.send_mode = value;
+            }
+            if let Some(value) = loaded.ui.diff_mode {
+                model.preferences.diff_mode = value;
+            }
             model.preferences.chart_density = loaded.ui.chart_density.clamp(2, 6);
             model.preferences.chart_contrast = contrast_quarters(loaded.ui.chart_contrast);
             model.preferences.chart_dot_size = match loaded.ui.chart_dot_size {

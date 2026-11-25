@@ -9,6 +9,26 @@ use super::{ClientConfig, ConfigError, UiConfig, parse_runtime};
 const MINIMAL_CONFIG: &str = r#"{"service":{"url":"http://127.0.0.1:8787"}}"#;
 
 #[test]
+fn preferences_create_a_config_and_survive_reload_without_erasing_other_fields() {
+    let dir = std::env::temp_dir().join(format!("norte-preferences-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("cli.json");
+    let mut model = crate::ui_model::UiModel::detached();
+    model.preferences.show_tool_output = true;
+    model.preferences.send_mode = crate::ui_model::SendMode::Queue;
+    model.preferences.diff_mode = crate::diff::DiffMode::Split;
+    super::save_preferences_at(&path, &model.preferences).expect("save");
+    let raw = std::fs::read_to_string(&path).expect("config");
+    let saved: ClientConfig = serde_json::from_str(&raw).expect("reload");
+    assert!(saved.ui.show_tool_output);
+    assert_eq!(saved.ui.send_mode, Some(crate::ui_model::SendMode::Queue));
+    assert_eq!(saved.ui.diff_mode, Some(crate::diff::DiffMode::Split));
+    let document: serde_json::Value = serde_json::from_str(&raw).expect("document");
+    assert!(document.get("service_lifecycle").is_some());
+    std::fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
 fn debug_defaults_off_and_can_be_enabled_in_json() {
     let plain: UiConfig = serde_json::from_str("{}").expect("empty UI config");
     assert!(!plain.debug);
