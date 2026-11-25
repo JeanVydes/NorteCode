@@ -119,6 +119,7 @@ impl NorteCodeRaepHost {
     ) -> Result<Vec<Envelope<Value>>, HostError> {
         let mut state = self.state.lock().await;
         state.attached.remove(&frame.session_id);
+        state.attachment_ids.remove(&frame.session_id);
         state.attachment_modes.remove(&frame.session_id);
         Ok(Vec::new())
     }
@@ -158,6 +159,7 @@ impl NorteCodeRaepHost {
         {
             let mut state = self.state.lock().await;
             state.attached.remove(&frame.session_id);
+            state.attachment_ids.remove(&frame.session_id);
             state.attachment_modes.remove(&frame.session_id);
         }
         self.remove_replay(&frame.session_id).await?;

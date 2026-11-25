@@ -129,6 +129,17 @@ pub fn take_sse_events(buffer: &mut Vec<u8>) -> Vec<DecodedEvent> {
         .collect()
 }
 
+#[derive(serde::Deserialize)]
+struct ReplayStatus {
+    #[serde(default)]
+    truncated: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct AttachmentReplay {
+    replay: ReplayStatus,
+}
+
 struct SseFrame {
     event: Option<DecodedEvent>,
     seq: Option<u64>,
@@ -157,23 +168,45 @@ fn take_sse_frames(buffer: &mut Vec<u8>) -> Vec<SseFrame> {
         };
         let frame = frame.into_envelope();
         let seq = frame.seq;
-        let event = match decode_frame(&frame) {
-            Ok(event) => event,
-            Err(error) => Some(DecodedEvent {
+        let replay_truncated = frame.kind
+            == raep_types::FrameType::Standard(raep_types::StandardFrameType::SessionAttached)
+            && serde_json::from_value::<AttachmentReplay>(frame.payload.clone())
+                .is_ok_and(|attached| attached.replay.truncated);
+        let event = if replay_truncated {
+            Some(DecodedEvent {
                 event: ServerEvent {
                     request_id: 0,
                     session: (!frame.session_id.is_empty())
                         .then(|| SessionKey::new(frame.session_id.clone())),
                     kind: norte_code_wire::ServerEventKind::Error {
-                        code: ErrorCode::Internal,
-                        message: error.to_string(),
+                        code: ErrorCode::ReplayUnavailable,
+                        message: "Some events are no longer available; the session history needs to be reloaded.".to_owned(),
                     },
                 },
                 seq,
                 turn_id: frame.turn_id.as_ref().map(ToString::to_string),
                 job_id: frame.job_id.as_ref().map(ToString::to_string),
                 timestamp: frame.timestamp,
-            }),
+            })
+        } else {
+            match decode_frame(&frame) {
+                Ok(event) => event,
+                Err(error) => Some(DecodedEvent {
+                    event: ServerEvent {
+                        request_id: 0,
+                        session: (!frame.session_id.is_empty())
+                            .then(|| SessionKey::new(frame.session_id.clone())),
+                        kind: norte_code_wire::ServerEventKind::Error {
+                            code: ErrorCode::Internal,
+                            message: error.to_string(),
+                        },
+                    },
+                    seq,
+                    turn_id: frame.turn_id.as_ref().map(ToString::to_string),
+                    job_id: frame.job_id.as_ref().map(ToString::to_string),
+                    timestamp: frame.timestamp,
+                }),
+            }
         };
         events.push(SseFrame { event, seq });
     }

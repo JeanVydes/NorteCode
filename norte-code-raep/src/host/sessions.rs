@@ -316,7 +316,12 @@ impl NorteCodeRaepHost {
             },
         )
         .await?;
-        self.state.lock().await.attached.remove(session_id);
+        {
+            let mut state = self.state.lock().await;
+            state.attached.remove(session_id);
+            state.attachment_ids.remove(session_id);
+            state.attachment_modes.remove(session_id);
+        }
         self.remove_replay(session_id).await?;
         Ok(true)
     }
@@ -475,6 +480,9 @@ impl NorteCodeRaepHost {
         {
             let mut state = self.state.lock().await;
             state.attached.insert(session_id.clone());
+            state
+                .attachment_ids
+                .insert(session_id.clone(), frame.id.clone());
             state
                 .attachment_modes
                 .insert(session_id.clone(), mode.clone());

@@ -43,7 +43,7 @@ async fn websocket_session(
     if send_frame(&mut socket, host.hello()).await.is_err() {
         return;
     }
-    let mut attached_sessions = std::collections::HashSet::new();
+    let mut attached_sessions = std::collections::HashMap::new();
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + std::time::Duration::from_secs(20),
         std::time::Duration::from_secs(20),
@@ -94,7 +94,7 @@ async fn websocket_session(
                                             && frame.kind
                                                 == FrameType::Standard(StandardFrameType::SessionAttached)
                                         {
-                                            attached_sessions.insert(frame.session_id.clone());
+                                            attached_sessions.insert(frame.session_id.clone(), request_id.clone());
                                             session_hint.clone_from(&frame.session_id);
                                         }
                                         if emitted.insert(frame.id.clone())
@@ -188,16 +188,8 @@ async fn websocket_session(
             }
         }
     }
-    for session_id in attached_sessions {
-        let mut frame = Envelope::new(
-            FrameType::Standard(StandardFrameType::SessionDetach),
-            payload(EmptyPayload {}),
-            0,
-        );
-        frame.session_id = session_id.clone();
-        if let Err(error) = host.handle_as(frame, Some(&principal)).await {
-            tracing::warn!(session = %session_id, %error, "failed to detach closed WebSocket session");
-        }
+    for (session_id, attachment) in attached_sessions {
+        host.detach_stream(&session_id, &attachment).await;
     }
 }
 

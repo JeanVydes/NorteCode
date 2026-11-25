@@ -97,3 +97,22 @@ fn tui_and_other_service_subcommands_are_not_the_daemon() {
         "restart"
     ])));
 }
+
+#[test]
+fn probe_resolves_hostnames_and_preserves_the_base_path() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection");
+        let mut request = [0; 4096];
+        let count = stream.read(&mut request).expect("request");
+        let request = String::from_utf8_lossy(&request[..count]);
+        assert!(request.starts_with("GET /proxy/raep/v1/health/live HTTP/1.1"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"status\":\"live\"}")
+            .expect("response");
+    });
+    assert!(super::probe(&format!("http://localhost:{port}/proxy")));
+    server.join().expect("server thread");
+}

@@ -5,6 +5,7 @@
 //! A small HTTP server built on the runtime keeps the client free of a test
 //! dependency.
 
+use std::fmt::Write as _;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -47,6 +48,16 @@ pub(crate) async fn start_with_stream() -> MockHost {
     serve(Answer::Stream).await
 }
 
+/// Starts a host that replays a missing frame on the next stream.
+pub(crate) async fn start_with_gap() -> MockHost {
+    serve(Answer::Gap).await
+}
+
+/// Starts a host whose replay no longer includes the missing frame.
+pub(crate) async fn start_with_truncated_gap() -> MockHost {
+    serve(Answer::TruncatedGap).await
+}
+
 /// What the mock host answers.
 #[derive(Clone, Copy)]
 enum Answer {
@@ -58,6 +69,8 @@ enum Answer {
     Jobs,
     /// Keep the event stream open after a terminal frame.
     Stream,
+    Gap,
+    TruncatedGap,
 }
 
 async fn serve(answer: Answer) -> MockHost {
@@ -81,6 +94,40 @@ async fn serve(answer: Answer) -> MockHost {
             let commands = Arc::clone(&commands);
             tokio::spawn(async move {
                 let request = read_request(&mut stream).await;
+                if matches!(answer, Answer::Gap | Answer::TruncatedGap)
+                    && request.contains("/events")
+                {
+                    let count = attaches.fetch_add(1, Ordering::SeqCst);
+                    let seqs: &[u64] = if count == 0 {
+                        &[1, 3]
+                    } else if matches!(answer, Answer::TruncatedGap) {
+                        &[3]
+                    } else {
+                        &[2, 3]
+                    };
+                    let mut body = String::new();
+                    for seq in seqs {
+                        let mut frame = raep_types::Envelope::new(
+                            raep_types::FrameType::Standard(
+                                raep_types::StandardFrameType::TokenDelta,
+                            ),
+                            serde_json::json!({"delta": seq.to_string(), "index": 0, "channel": "text"}),
+                            0,
+                        );
+                        frame.session_id = "session-1".to_owned();
+                        frame.seq = Some(*seq);
+                        frame.turn_id = raep_types::TurnId::new("1").ok();
+                        write!(
+                            body,
+                            "data: {}\n\n",
+                            serde_json::to_string(&frame).expect("frame")
+                        )
+                        .expect("write frame");
+                    }
+                    let response = response(200, &body);
+                    let _ = stream.write_all(&response).await;
+                    return;
+                }
                 if matches!(answer, Answer::Stream) && request.contains("/events") {
                     stream_events(&mut stream).await;
                     return;

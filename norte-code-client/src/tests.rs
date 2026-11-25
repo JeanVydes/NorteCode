@@ -672,3 +672,38 @@ fn an_empty_plan_list_still_decodes() {
         other => panic!("expected a plan list, got {other:?}"),
     }
 }
+
+#[test]
+fn a_truncated_attachment_requests_history_recovery() {
+    #[derive(serde::Serialize)]
+    struct Replay {
+        truncated: bool,
+    }
+    #[derive(serde::Serialize)]
+    struct Attached {
+        replay: Replay,
+    }
+    let mut frame = Envelope::new(
+        FrameType::Standard(StandardFrameType::SessionAttached),
+        serde_json::to_value(Attached {
+            replay: Replay { truncated: true },
+        })
+        .expect("payload"),
+        0,
+    );
+    frame.session_id = "session-1".to_owned();
+    frame.seq = Some(5);
+    let mut buffer = format!(
+        "data: {}\n\n",
+        serde_json::to_string(&frame).expect("frame")
+    )
+    .into_bytes();
+    let events = take_sse_events(&mut buffer);
+    assert!(matches!(
+        events.first().map(|event| &event.event.kind),
+        Some(norte_code_wire::ServerEventKind::Error {
+            code: norte_code_wire::ErrorCode::ReplayUnavailable,
+            ..
+        })
+    ));
+}

@@ -387,6 +387,27 @@ notice rather than opening a prompt: raise the budget and resume to continue.
 Cost is only the amount the provider reports; Norte Code never derives a price
 from the catalogue.
 
+## Remote service
+
+Set `service_type` to `remote`, `service_url` to the service base URL, and
+`service_auth` to the raw bearer token when authentication is enabled. The
+service runs in its own working directory: its workspace, project instructions,
+skills, tools, providers, and session database belong to that machine. A
+client's current directory is not sent as a workspace during session attach.
+
+The server listens on `127.0.0.1:8787` by default. `NORTE_CODE_BIND` changes
+the listening address; `NORTE_CODE_AUTH_TOKEN` configures a bearer token.
+For network access use TLS through a reverse proxy or an encrypted tunnel.
+The service itself serves HTTP. Protect the server's environment and files,
+since its tools execute with the server process's permissions.
+
+The TUI reconnects its event stream and asks for events after its last
+contiguous sequence. If the replay journal no longer holds them, the client
+warns and reloads the saved history after an active turn finishes. Output that
+was never persisted cannot be reconstructed. Session creation retries reuse an
+idempotency key while the server process remains running; its key cache is not
+persisted across a server restart.
+
 ## `cli.json`
 
 The CLI-only file contains:

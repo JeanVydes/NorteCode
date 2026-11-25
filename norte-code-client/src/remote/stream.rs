@@ -16,17 +16,8 @@ use crate::sse::{SeqStep, drain_sse_buffer, seq_step};
 /// The outcome of the command a stream was opened for.
 type CommandOutcome = Arc<Mutex<Option<Result<(), ClientError>>>>;
 
-const MAX_PENDING_EVENTS: usize = 512;
-
-/// Queue one event, shedding an older non-terminal event when the queue is full.
+/// Queue decoded events until the consumer has processed them.
 fn queue_event(pending: &mut VecDeque<(ServerEvent, bool)>, event: ServerEvent, terminal: bool) {
-    if pending.len() >= MAX_PENDING_EVENTS {
-        let oldest = pending
-            .iter()
-            .position(|(_, is_terminal)| !*is_terminal)
-            .unwrap_or(0);
-        pending.remove(oldest);
-    }
     pending.push_back((event, terminal));
 }
 
@@ -56,6 +47,7 @@ struct EventReader {
     ack_url: String,
     ack_token: Option<HeaderValue>,
     session_seq: Arc<Mutex<SessionCache<u64>>>,
+    recovery_seq: Arc<Mutex<SessionCache<u64>>>,
     attached_sessions: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -187,6 +179,7 @@ impl RemoteClient {
             ack_url: self.command_url(session_id),
             ack_token: self.bearer_token.clone(),
             session_seq: Arc::clone(&self.session_seq),
+            recovery_seq: Arc::clone(&self.recovery_seq),
             attached_sessions: Arc::clone(&self.attached_sessions),
         }
     }
@@ -236,6 +229,10 @@ impl RemoteClient {
                 "RAEP event stream returned HTTP {status}: {detail}"
             )));
         }
+        self.attached_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.to_owned());
         Ok(response)
     }
 }
@@ -255,6 +252,7 @@ impl EventReader {
     ) -> impl futures_util::Stream<Item = ServerEvent> + Send {
         let session = norte_code_wire::SessionKey::new(session_id);
         let session_seq = reader.session_seq;
+        let recovery_seq = reader.recovery_seq;
         let attached_sessions = reader.attached_sessions;
         let ack_http = reader.http;
         let ack_url = reader.ack_url;
@@ -281,6 +279,7 @@ impl EventReader {
                 command_result,
                 mut command_reported,
             )| {
+                let recovery_seq = recovery_seq.clone();
                 let ack_http = ack_http.clone();
                 let ack_url = ack_url.clone();
                 let ack_token = ack_token.clone();
@@ -341,27 +340,35 @@ impl EventReader {
                                 match seq_step(seqs.get(session.as_str()).copied(), seq) {
                                     SeqStep::Duplicate => continue,
                                     SeqStep::Gap { expected } => {
-                                        // A gap cannot always be replayed:
-                                        // the host may have pruned the frame.
-                                        // Keep the stream and resync on the
-                                        // next frame, or the reader loses
-                                        // the turn entirely.
+                                        let mut recovering = recovery_seq
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                        if recovering.get(session.as_str()) != Some(&expected) {
+                                            recovering
+                                                .insert(session.as_str().to_owned(), expected);
+                                            finished = true;
+                                            break;
+                                        }
+                                        recovering.remove(session.as_str());
                                         queue_event(
                                             &mut pending,
                                             ServerEvent {
                                                 request_id: 0,
                                                 session: Some(session.clone()),
                                                 kind: norte_code_wire::ServerEventKind::Error {
-                                                    code: norte_code_wire::ErrorCode::Internal,
-                                                    message: format!(
-                                                        "RAEP sequence gap: expected {expected}, received {seq}"
-                                                    ),
+                                                    code: norte_code_wire::ErrorCode::ReplayUnavailable,
+                                                    message: format!("Events starting at {expected} are no longer available; the session history needs to be reloaded."),
                                                 },
                                             },
                                             false,
                                         );
                                     }
-                                    SeqStep::Apply => {}
+                                    SeqStep::Apply => {
+                                        recovery_seq
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .remove(session.as_str());
+                                    }
                                 }
                                 seqs.insert(session.as_str().to_owned(), seq);
                                 drop(seqs);

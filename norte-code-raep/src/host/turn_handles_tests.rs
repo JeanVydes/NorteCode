@@ -1,4 +1,4 @@
-//! Turn tasks are released when they finish or their stream closes.
+//! Turn tasks are released when they finish.
 
 use super::{TurnHandles, TurnKey};
 
@@ -16,23 +16,5 @@ async fn finishing_a_turn_removes_only_its_handle() {
 
     handles.finish(&first);
 
-    assert_eq!(handles.len(), 1);
-}
-
-#[tokio::test]
-async fn closing_a_stream_drains_only_its_sessions_handles() {
-    let handles = TurnHandles::default();
-    handles.insert(
-        key("one", "00000000000000000000000000000001"),
-        tokio::spawn(std::future::pending()),
-    );
-    handles.insert(
-        key("two", "00000000000000000000000000000002"),
-        tokio::spawn(std::future::pending()),
-    );
-
-    let drained = handles.drain_session("one");
-
-    assert_eq!(drained.len(), 1);
     assert_eq!(handles.len(), 1);
 }

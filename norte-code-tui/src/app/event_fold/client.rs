@@ -61,9 +61,7 @@ fn apply_detached(
     model.attachment = SessionAttachmentState::Failed {
         reason: reason.clone(),
     };
-    model.turn = TurnState::Idle;
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-        stream.stop_thinking();
         stream.push(ui::Item::Notice {
             text: reason,
             tone: ui::Tone::Error,
@@ -197,6 +195,7 @@ fn fold_send_failure(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(in crate::app) fn drain_server_events(
     events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
@@ -219,6 +218,10 @@ pub(in crate::app) fn drain_server_events(
             }
             Ok(ClientEvent::Detached { reason }) => {
                 changed = apply_detached(tree, model, &reason) || changed;
+            }
+            Ok(ClientEvent::Reconnected) => {
+                model.attachment = SessionAttachmentState::Attached;
+                changed = true;
             }
             Ok(ClientEvent::Sessions(sessions)) => {
                 refresh_active_model(model, &sessions);

@@ -38,6 +38,7 @@ pub struct RemoteClient {
     attached_sessions: Arc<Mutex<HashSet<String>>>,
     session_agents: Mutex<SessionCache<String>>,
     session_seq: Arc<Mutex<SessionCache<u64>>>,
+    recovery_seq: Arc<Mutex<SessionCache<u64>>>,
     session_info: Mutex<SessionCache<norte_code_wire::SessionInfo>>,
     session_reasoning: Mutex<SessionCache<norte_code_wire::Reasoning>>,
     session_stats: Mutex<SessionCache<RemoteSessionStats>>,
@@ -90,7 +91,11 @@ impl RemoteClient {
             })
             .transpose()?;
         Ok(Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(60))
+                .build()
+                .map_err(|error| ClientError::new(format!("HTTP client: {error}")))?,
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             bearer_token,
             agent_id: "norte-code".to_owned(),
@@ -98,6 +103,7 @@ impl RemoteClient {
             attached_sessions: Arc::new(Mutex::new(HashSet::new())),
             session_agents: Mutex::new(SessionCache::new()),
             session_seq: Arc::new(Mutex::new(SessionCache::new())),
+            recovery_seq: Arc::new(Mutex::new(SessionCache::new())),
             session_info: Mutex::new(SessionCache::new()),
             session_reasoning: Mutex::new(SessionCache::new()),
             session_stats: Mutex::new(SessionCache::new()),
@@ -282,6 +288,7 @@ impl RemoteClient {
     }
 
     /// Records a frame's sequence for its session, keeping the maximum seen.
+    #[cfg(test)]
     pub(crate) fn note_seq(&self, session: &str, seq: u64) {
         let mut seqs = self
             .session_seq
@@ -295,6 +302,7 @@ impl RemoteClient {
     }
 
     /// Records the sequence of one raw RAEP frame, if it carries one.
+    #[cfg(test)]
     pub(crate) fn note_frame_seq(&self, frame: &Envelope<Value>) {
         let Some(seq) = frame.seq else {
             return;
@@ -551,9 +559,6 @@ impl RemoteClient {
             .map_err(|error| ClientError::new(format!("invalid RAEP attach response: {error}")))?;
         if !status.is_success() {
             return Err(ClientError::new(body.error_message()));
-        }
-        for frame in &body.events {
-            self.note_frame_seq(frame);
         }
         self.attached_sessions
             .lock()

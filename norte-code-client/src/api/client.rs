@@ -44,7 +44,11 @@ impl RestClient {
             ));
         }
         Ok(Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|error| ApiError::Request(error.to_string()))?,
             base_url: trimmed.trim_end_matches('/').to_owned(),
             bearer_token: (!bearer_token.trim().is_empty()).then(|| bearer_token.trim().to_owned()),
         })

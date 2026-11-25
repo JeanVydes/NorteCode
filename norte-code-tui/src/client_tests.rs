@@ -69,7 +69,9 @@ async fn stream_events_flow_while_a_command_is_still_running() {
     let (events_tx, mut events_rx) = mpsc::channel(32);
 
     let pump =
-        tokio::spawn(async move { drive_stream(&mut stream, &mut outcome_rx, &events_tx).await });
+        tokio::spawn(
+            async move { drive_stream(&mut stream, &mut outcome_rx, &events_tx, None).await },
+        );
 
     for turn in 1..=3 {
         stream_tx

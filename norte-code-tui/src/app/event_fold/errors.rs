@@ -14,6 +14,10 @@ pub(in crate::app) fn fold_error_event(
     model: &mut UiModel,
 ) -> bool {
     match kind {
+        ServerEventKind::Error {
+            code: norte_code_wire::ErrorCode::ReplayUnavailable,
+            message,
+        } => notice(tree, message.clone(), ui::Tone::Warn),
         ServerEventKind::Error { message, .. }
             if message.starts_with("RAEP sequence gap")
                 || message.contains("fell behind and dropped") =>

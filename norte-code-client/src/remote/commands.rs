@@ -100,9 +100,6 @@ impl RemoteClient {
             .iter()
             .filter_map(|frame| server_event_from_frame(frame).transpose())
             .collect::<Result<Vec<_>, _>>()?;
-        for frame in &response_body.events {
-            self.note_frame_seq(frame);
-        }
         self.remember_sessions(&events);
         Ok(Box::pin(iter(events)))
     }

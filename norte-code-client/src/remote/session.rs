@@ -224,6 +224,12 @@ impl AgentClient for RemoteClient {
             .send()
             .await
             .map_err(|error| ClientError::new(format!("RAEP list sessions failed: {error}")))?;
+        if !response.status().is_success() {
+            return Err(ClientError::new(format!(
+                "RAEP list sessions returned HTTP {}",
+                response.status()
+            )));
+        }
         let body: SessionListBody = response
             .json()
             .await
@@ -232,29 +238,8 @@ impl AgentClient for RemoteClient {
     }
 
     async fn create_session(&self, title: Option<&str>) -> Result<SessionSummary, ClientError> {
-        let mut headers = HeaderMap::new();
-        if let Some(token) = &self.bearer_token {
-            headers.insert(AUTHORIZATION, token.clone());
-        }
-        let response = self
-            .http
-            .post(format!("{}/raep/v1/sessions", self.base_url))
-            .headers(headers)
-            .json(&CreateSessionBody {
-                agent_id: self.agent_id.clone(),
-                title: title.map(str::to_owned),
-            })
-            .send()
+        self.create_session_with_key(title, &Self::create_session_key())
             .await
-            .map_err(|error| ClientError::new(format!("RAEP create session failed: {error}")))?;
-        let status = response.status();
-        let body: SessionSummary = response.json().await.map_err(|error| {
-            ClientError::new(format!("invalid RAEP create session response: {error}"))
-        })?;
-        if !status.is_success() {
-            return Err(ClientError::new("RAEP create session was rejected"));
-        }
-        Ok(body)
     }
 
     async fn rename_session(&self, session: &str, title: &str) -> Result<(), ClientError> {
@@ -332,4 +317,52 @@ struct CreateSessionBody {
 #[derive(Debug, serde::Serialize)]
 struct RenameSessionBody {
     title: String,
+}
+
+impl RemoteClient {
+    /// Creates a fresh key for retrying a single session creation.
+    #[must_use]
+    pub fn create_session_key() -> String {
+        raep_types::FrameId::generate().to_string()
+    }
+
+    /// Creates a session using a key that can be reused after a transport failure.
+    ///
+    /// # Errors
+    /// Returns a transport error or a refusal from the server.
+    pub async fn create_session_with_key(
+        &self,
+        title: Option<&str>,
+        key: &str,
+    ) -> Result<SessionSummary, ClientError> {
+        let mut headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            headers.insert(AUTHORIZATION, token.clone());
+        }
+        headers.insert(
+            "idempotency-key",
+            reqwest::header::HeaderValue::from_str(key)
+                .map_err(|error| ClientError::new(format!("invalid idempotency key: {error}")))?,
+        );
+        let response = self
+            .http
+            .post(format!("{}/raep/v1/sessions", self.base_url))
+            .headers(headers)
+            .json(&CreateSessionBody {
+                agent_id: self.agent_id.clone(),
+                title: title.map(str::to_owned),
+            })
+            .send()
+            .await
+            .map_err(|error| ClientError::new(format!("RAEP create session failed: {error}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ClientError::new(format!(
+                "RAEP create session returned HTTP {status}"
+            )));
+        }
+        response.json().await.map_err(|error| {
+            ClientError::new(format!("invalid RAEP create session response: {error}"))
+        })
+    }
 }

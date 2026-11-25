@@ -852,6 +852,8 @@ pub enum ErrorCode {
     Provider,
     /// The service failed internally.
     Internal,
+    /// Events are no longer available for replay.
+    ReplayUnavailable,
     /// The feature is not implemented yet.
     Unsupported,
 }

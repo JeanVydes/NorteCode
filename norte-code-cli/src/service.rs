@@ -114,38 +114,24 @@ pub(crate) fn service_url() -> String {
 }
 
 pub(crate) fn probe(url: &str) -> bool {
-    use std::io::{Read, Write};
-    // Minimal HTTP GET to /raep/v1/health/live. We don't parse the body,
-    // just the status line — 2xx means "alive".
-    let addr = url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_end_matches('/')
-        .to_owned();
-    let addr = if addr.contains(':') {
-        addr
-    } else {
-        format!("{addr}:80")
-    };
-    let Ok(stream) = TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 8787))),
-        Duration::from_millis(250),
-    ) else {
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
         return false;
     };
-    let mut stream = stream;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let request =
-        format!("GET /raep/v1/health/live HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+    let endpoint = format!("{}/raep/v1/health/live", url.trim_end_matches('/'));
+    #[derive(serde::Deserialize)]
+    struct Health {
+        status: String,
     }
-    let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).unwrap_or(0);
-    let body = String::from_utf8_lossy(&buf[..n]);
-    body.contains("\"live\"") || body.contains("\"status\":\"live\"")
+    client.get(endpoint).send().is_ok_and(|response| {
+        response.status().is_success()
+            && response
+                .json::<Health>()
+                .is_ok_and(|body| body.status == "live")
+    })
 }
 
 /// Re-exec this binary in "serve" mode and return the child's PID.
@@ -880,11 +866,7 @@ pub fn prepare_for_tui(active: bool) -> Result<(), String> {
         .config;
     let url = service_url();
     if config.service_type == norte_code_protocol::config::ServiceType::Remote {
-        return if probe(&url) {
-            Ok(())
-        } else {
-            Err(format!("remote service is not reachable at {url}"))
-        };
+        return Ok(());
     }
     if active {
         return if probe(&url) { Ok(()) } else { up() };

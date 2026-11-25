@@ -112,6 +112,7 @@ pub(super) async fn create_session(
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+    let _create_guard = host.create_session_lock.lock().await;
     if let Some(key) = &idempotency
         && let Some(session) = host.session_for_create_key(key).await
     {

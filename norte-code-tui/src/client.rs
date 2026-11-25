@@ -37,6 +37,8 @@ pub(crate) enum ClientEvent {
         /// What went wrong, in words a person can act on.
         reason: ClientError,
     },
+    /// The current session stream is connected again.
+    Reconnected,
     /// A server event arrived.
     Server(Box<norte_code_wire::ServerEvent>),
     /// The session list changed.
@@ -559,27 +561,11 @@ async fn connection(
             return;
         }
     };
-    let sessions = match client.list_sessions().await {
-        Ok(sessions) => sessions,
-        Err(error) => {
-            let _ = events
-                .send(ClientEvent::Detached {
-                    reason: ClientError::list_sessions(error),
-                })
-                .await;
-            return;
-        }
+    let Some(sessions) = wait_for_sessions(&client, &events, &reconnect).await else {
+        return;
     };
-    let fresh = match client.create_session(None).await {
-        Ok(fresh) => fresh,
-        Err(error) => {
-            let _ = events
-                .send(ClientEvent::Detached {
-                    reason: ClientError::create_session(error),
-                })
-                .await;
-            return;
-        }
+    let Some(fresh) = wait_for_new_session(&client, &events, &reconnect).await else {
+        return;
     };
     let _ = events.send(ClientEvent::Sessions(sessions)).await;
     let mut session = attach_shared(&client, &events, Box::new(fresh)).await;
@@ -626,6 +612,61 @@ async fn connection(
         }
     }
     command_task.abort();
+}
+
+async fn wait_for_new_session(
+    client: &RemoteClient,
+    events: &Sender<ClientEvent>,
+    reconnect: &ReconnectConfig,
+) -> Option<SessionSummary> {
+    let key = RemoteClient::create_session_key();
+    let mut attempt = 0u32;
+    loop {
+        match client.create_session_with_key(None, &key).await {
+            Ok(session) => return Some(session),
+            Err(error) => {
+                attempt = attempt.saturating_add(1);
+                if attempt == reconnect.give_up_attempts {
+                    let _ = events
+                        .send(ClientEvent::Detached {
+                            reason: ClientError::create_session(error),
+                        })
+                        .await;
+                }
+                if events.is_closed() {
+                    return None;
+                }
+                tokio::time::sleep(retry_delay(reconnect, attempt.saturating_sub(1))).await;
+            }
+        }
+    }
+}
+
+async fn wait_for_sessions(
+    client: &RemoteClient,
+    events: &Sender<ClientEvent>,
+    reconnect: &ReconnectConfig,
+) -> Option<Vec<norte_code_wire::SessionSummary>> {
+    let mut attempt = 0u32;
+    loop {
+        match client.list_sessions().await {
+            Ok(sessions) => return Some(sessions),
+            Err(error) => {
+                attempt = attempt.saturating_add(1);
+                if attempt == reconnect.give_up_attempts {
+                    let _ = events
+                        .send(ClientEvent::Detached {
+                            reason: ClientError::list_sessions(error),
+                        })
+                        .await;
+                }
+                if events.is_closed() {
+                    return None;
+                }
+                tokio::time::sleep(retry_delay(reconnect, attempt.saturating_sub(1))).await;
+            }
+        }
+    }
 }
 
 /// Largest attachment the client will read before asking the host to store it.
@@ -874,9 +915,16 @@ async fn stream_loop(
     let mut attempt = 0u32;
     let mut announced = false;
     let mut primed = false;
+    let mut recovery = StreamRecovery::default();
     loop {
+        if events.is_closed() {
+            return StreamOutcome::Retry;
+        }
         match client.open_events(session.as_str()).await {
             Ok(mut stream) => {
+                if announced {
+                    let _ = events.send(ClientEvent::Reconnected).await;
+                }
                 if !primed {
                     // The host only honours these once the stream is attached.
                     Box::pin(fetch_history(api, session.as_str(), events)).await;
@@ -884,7 +932,14 @@ async fn stream_loop(
                     primed = true;
                 }
                 let opened_at = std::time::Instant::now();
-                match Box::pin(drive_stream(&mut stream, outcomes, events)).await {
+                match Box::pin(drive_stream(
+                    &mut stream,
+                    outcomes,
+                    events,
+                    Some((api, session, &mut recovery)),
+                ))
+                .await
+                {
                     StreamOutcome::Switch(summary) => return StreamOutcome::Switch(summary),
                     StreamOutcome::Retry => {}
                 }
@@ -1086,13 +1141,21 @@ async fn apply_command(
 /// channel. Command handling happens in its own task so a slow HTTP call
 /// never stalls the stream: events keep being forwarded as they arrive
 /// instead of piling up in the socket and landing all at once.
+#[derive(Default)]
+struct StreamRecovery {
+    turn_running: bool,
+    history_needed: bool,
+}
+
 async fn drive_stream(
     stream: &mut EventStream,
     outcomes: &mut Receiver<StreamOutcome>,
     events: &Sender<ClientEvent>,
+    mut recovery: Option<(&Arc<RestClient>, &SessionKey, &mut StreamRecovery)>,
 ) -> StreamOutcome {
     loop {
         tokio::select! {
+            () = events.closed() => return StreamOutcome::Retry,
             outcome = outcomes.recv() => {
                 if let Some(outcome) = outcome {
                     return outcome;
@@ -1101,7 +1164,23 @@ async fn drive_stream(
             frame = stream.next() => {
                 match frame {
                     Some(event) => {
+                        let unavailable = matches!(event.kind, norte_code_wire::ServerEventKind::Error {
+                            code: norte_code_wire::ErrorCode::ReplayUnavailable, ..
+                        });
+                        let started = matches!(event.kind, norte_code_wire::ServerEventKind::TurnStarted { .. });
+                        let terminal = matches!(event.kind,
+                            norte_code_wire::ServerEventKind::TurnFinished { .. }
+                            | norte_code_wire::ServerEventKind::TurnStopped { .. });
                         let _ = events.send(ClientEvent::Server(Box::new(event))).await;
+                        if let Some((api, session, state)) = recovery.as_mut() {
+                            if started { state.turn_running = true; }
+                            if terminal { state.turn_running = false; }
+                            state.history_needed |= unavailable;
+                            if state.history_needed && !state.turn_running {
+                                fetch_history(api, session.as_str(), events).await;
+                                state.history_needed = false;
+                            }
+                        }
                     }
                     None => return StreamOutcome::Retry,
                 }

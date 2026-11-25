@@ -1231,3 +1231,67 @@ async fn create_session(app: &Router) -> String {
         .expect("session id")
         .to_owned()
 }
+
+#[tokio::test]
+async fn closing_a_superseded_stream_keeps_the_new_attachment() {
+    let app = router(test_host(None));
+    let session = create_session(&app).await;
+    let open = || {
+        Request::builder()
+            .uri(format!("/raep/v1/sessions/{session}/events"))
+            .header("accept", "text/event-stream")
+            .body(Body::empty())
+            .expect("stream request")
+    };
+    let first = app.clone().oneshot(open()).await.expect("first stream");
+    let second = app.clone().oneshot(open()).await.expect("second stream");
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let third = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/raep/v1/sessions/{session}/events?takeover=false"))
+                .header("accept", "text/event-stream")
+                .body(Body::empty())
+                .expect("third stream request"),
+        )
+        .await
+        .expect("third stream");
+    assert_ne!(third.status(), StatusCode::OK);
+    drop(second);
+}
+
+#[tokio::test]
+async fn concurrent_session_creation_reuses_the_idempotency_key() {
+    let app = router(test_host(None));
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/raep/v1/sessions")
+            .header("content-type", "application/json")
+            .header("idempotency-key", "concurrent-session")
+            .body(Body::from("{}"))
+            .expect("request")
+    };
+    let (first, second) = tokio::join!(app.clone().oneshot(request()), app.oneshot(request()));
+    let first = first.expect("first response");
+    let second = second.expect("second response");
+    assert!(first.status().is_success());
+    assert!(second.status().is_success());
+    let first: norte_code_wire::SessionSummary = serde_json::from_slice(
+        &axum::body::to_bytes(first.into_body(), 1024 * 1024)
+            .await
+            .expect("first body"),
+    )
+    .expect("first session");
+    let second: norte_code_wire::SessionSummary = serde_json::from_slice(
+        &axum::body::to_bytes(second.into_body(), 1024 * 1024)
+            .await
+            .expect("second body"),
+    )
+    .expect("second session");
+    assert_eq!(first.session_id, second.session_id);
+}

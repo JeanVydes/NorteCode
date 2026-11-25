@@ -41,19 +41,6 @@ impl TurnHandles {
             .remove(key);
     }
 
-    pub(super) fn drain_session(&self, session: &str) -> Vec<JoinHandle<()>> {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let keys: Vec<_> = entries
-            .keys()
-            .filter(|key| key.session == session)
-            .cloned()
-            .collect();
-        keys.iter().filter_map(|key| entries.remove(key)).collect()
-    }
-
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.entries

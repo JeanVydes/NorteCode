@@ -74,6 +74,7 @@ impl ArtifactStore for BlobArtifactStore {
 #[derive(Default)]
 pub(super) struct HostState {
     pub(super) attached: HashSet<String>,
+    pub(super) attachment_ids: HashMap<String, FrameId>,
     pub(super) attachment_modes: HashMap<String, AttachMode>,
     pub(super) sequences: super::bounded_map::BoundedMap<String, u64>,
     pub(super) idempotency: HashMap<(String, FrameId), CachedRequest>,

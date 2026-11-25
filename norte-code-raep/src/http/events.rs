@@ -17,7 +17,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use super::seen_frames::SeenFrames;
-use super::{EmptyPayload, correlated_error_frame, error_frame, error_status, payload, principal};
+use super::{correlated_error_frame, error_frame, error_status, payload, principal};
 use crate::{HostError, NorteCodeRaepHost};
 
 #[derive(serde::Serialize)]
@@ -38,27 +38,18 @@ pub(super) struct EventsQuery {
 
 struct StreamAttachmentGuard {
     host: Arc<NorteCodeRaepHost>,
-    principal: String,
     session_id: String,
+    attachment: raep_types::FrameId,
 }
 
 impl Drop for StreamAttachmentGuard {
     fn drop(&mut self) {
         let host = Arc::clone(&self.host);
-        let principal = self.principal.clone();
         let session_id = self.session_id.clone();
+        let attachment = self.attachment.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let mut frame = Envelope::new(
-                    FrameType::Standard(StandardFrameType::SessionDetach),
-                    payload(EmptyPayload {}),
-                    0,
-                );
-                frame.session_id = session_id.clone();
-                host.close_stream_turns(&session_id);
-                if let Err(error) = host.handle_as(frame, Some(&principal)).await {
-                    tracing::warn!(session = %session_id, %error, "failed to detach closed SSE session");
-                }
+                host.detach_stream(&session_id, &attachment).await;
             });
         }
     }
@@ -168,8 +159,8 @@ pub(super) async fn events(
         .any(|frame| frame.kind == FrameType::Standard(StandardFrameType::SessionAttached))
         .then(|| StreamAttachmentGuard {
             host: Arc::clone(&host),
-            principal,
             session_id: stream_session_id.clone(),
+            attachment: request_id,
         });
     let seen = Arc::new(std::sync::Mutex::new(SeenFrames::from_initial(
         initial.iter().map(|frame| frame.id.clone()),

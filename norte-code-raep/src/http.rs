@@ -43,9 +43,6 @@ use resources::{
 };
 use websocket::{agent_commands, commands, websocket};
 
-#[derive(serde::Serialize)]
-struct EmptyPayload {}
-
 /// A health/live payload.
 #[derive(Debug, serde::Serialize)]
 struct LivePayload {

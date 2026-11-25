@@ -283,6 +283,7 @@ pub struct NorteCodeRaepHost {
     services: HashMap<String, Arc<Service>>,
     config: HostConfig,
     state: Mutex<HostState>,
+    pub(crate) create_session_lock: Mutex<()>,
     events: broadcast::Sender<Envelope<Value>>,
     replay: Arc<ReplayLog>,
     emission_locks: std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>,
@@ -362,6 +363,7 @@ impl NorteCodeRaepHost {
             service,
             config,
             state: Mutex::new(HostState::default()),
+            create_session_lock: Mutex::new(()),
             events,
             replay: Arc::new(replay),
             emission_locks: std::sync::Mutex::new(HashMap::new()),
@@ -447,20 +449,12 @@ impl NorteCodeRaepHost {
         self.turn_handles.finish(key);
     }
 
-    pub(crate) fn close_stream_turns(&self, session: &str) {
-        self.service
-            .cancel_turn_and_watch(&norte_code_wire::SessionKey::new(session.to_owned()));
-        let handles = Arc::clone(&self.turn_handles);
-        let session = session.to_owned();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                for handle in handles.drain_session(&session) {
-                    if !handle.is_finished() {
-                        handle.abort();
-                    }
-                }
-            });
+    pub(crate) async fn detach_stream(&self, session: &str, attachment: &raep_types::FrameId) {
+        let mut state = self.state.lock().await;
+        if state.attachment_ids.get(session) == Some(attachment) {
+            state.attachment_ids.remove(session);
+            state.attached.remove(session);
+            state.attachment_modes.remove(session);
         }
     }
 
