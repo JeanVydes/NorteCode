@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 use ratatui::style::Style;
 use terminalui::components::candlechart::{CandleChart, CandleChartStyle};
 use terminalui::components::linechart::{LineChart, LineChartStyle};
@@ -200,10 +199,6 @@ impl TelemetryPage {
                 chart.set_gapped_series(values);
             }
         }
-        self.provider_cost_chart
-            .set_slices(cost_slices(self.report.as_deref(), CostBreakdown::Provider));
-        self.model_cost_chart
-            .set_slices(cost_slices(self.report.as_deref(), CostBreakdown::Model));
     }
 
     pub(super) fn chart_window(&self, width: u16) -> (usize, usize) {
@@ -448,6 +443,16 @@ impl TelemetryPage {
                 latest: Some(line),
             };
         }
+        self.provider_cost_chart.set_slices(cost_slices(
+            self.report.as_deref(),
+            CostBreakdown::Provider,
+            theme,
+        ));
+        self.model_cost_chart.set_slices(cost_slices(
+            self.report.as_deref(),
+            CostBreakdown::Model,
+            theme,
+        ));
     }
 
     fn paint_chart_grid(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
@@ -643,6 +648,7 @@ enum CostBreakdown {
 fn cost_slices(
     report: Option<&norte_code_wire::TelemetryReport>,
     breakdown: CostBreakdown,
+    theme: &Theme,
 ) -> Vec<PieSlice> {
     let mut grouped = BTreeMap::<String, f64>::new();
     if let Some(report) = report {
@@ -671,11 +677,11 @@ fn cost_slices(
     let mut values: Vec<_> = grouped.into_iter().collect();
     values.sort_by(|left, right| right.1.total_cmp(&left.1));
     let colors = [
-        Color::Cyan,
-        Color::Green,
-        Color::Yellow,
-        Color::Magenta,
-        Color::Blue,
+        theme.accent,
+        theme.success,
+        theme.warning,
+        theme.destructive,
+        theme.foreground,
     ];
     let mut slices: Vec<_> = values
         .drain(..)
@@ -685,7 +691,7 @@ fn cost_slices(
         .collect();
     let other: f64 = values.into_iter().map(|(_, cost)| cost).sum();
     if other > 0.0 {
-        slices.push(PieSlice::new("Other", other, Color::Gray));
+        slices.push(PieSlice::new("Other", other, theme.muted));
     }
     slices
 }

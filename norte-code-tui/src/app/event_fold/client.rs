@@ -148,7 +148,8 @@ fn fold_secret_event(
         }
         ClientEvent::SecretSaveFailed { reason } => {
             if let Some(prompt) = tree.find_mut::<ui::KeyPrompt>("key_prompt") {
-                prompt.fail(reason.to_string());
+                let theme = model.preferences.catalog.theme(&model.preferences.theme);
+                prompt.fail(reason.to_string(), theme.destructive);
             }
             true
         }

@@ -139,9 +139,9 @@ impl KeyPrompt {
     }
 
     /// Keep the prompt open and show why the host refused the key.
-    pub(crate) fn fail(&mut self, reason: impl fmt::Display) {
+    pub(crate) fn fail(&mut self, reason: impl fmt::Display, color: Color) {
         self.saving = false;
-        self.set_message(reason.to_string(), TextStyle::default().fg(Color::Red));
+        self.set_message(reason.to_string(), TextStyle::default().fg(color));
     }
 
     fn close(&mut self) {
@@ -208,7 +208,6 @@ impl KeyPrompt {
         }
         field.set_error(None::<String>);
         self.saving = true;
-        self.set_message(KEY_SAVING.to_owned(), TextStyle::default());
         self.pending.push(KeyPromptAction::Submit { provider, key });
     }
 }
@@ -239,6 +238,9 @@ impl View for KeyPrompt {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
+        if self.saving {
+            self.set_message(KEY_SAVING.to_owned(), TextStyle::default().fg(theme.accent));
+        }
         let Some(dialog) = self
             .children
             .first_mut()
