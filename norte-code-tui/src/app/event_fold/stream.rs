@@ -194,7 +194,7 @@ fn fold_tool_started(
                 Box::new(
                     terminalui::components::console::Console::new(command)
                         .with_max_visible(6)
-                        .with_header_label("stdout")
+                        .with_output_preview()
                         .with_output_visible(model.preferences.show_tool_output),
                 )
             })

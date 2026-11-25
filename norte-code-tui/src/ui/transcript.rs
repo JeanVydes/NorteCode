@@ -576,7 +576,7 @@ impl Transcript {
                         Box::new(
                             Console::new(command)
                                 .with_max_visible(6)
-                                .with_header_label("stdout")
+                                .with_output_preview()
                                 .with_output_visible(self.tool_preferences.output_expanded)
                                 .with_max_retained_lines(Some(self.retention.console_max_lines)),
                         )
