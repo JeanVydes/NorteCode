@@ -9,6 +9,8 @@ fn managed_skill_is_created_preserved_and_removed() {
     sync_at(&root, true).expect("install");
     let dir = root.join(DIRECTORY);
     assert!(dir.join(MARKER).is_file());
+    assert!(dir.join("references/configuration.md").is_file());
+    assert!(dir.join("references/tui.md").is_file());
     let registry = norte_code_protocol::skills::SkillRegistry::discover(
         std::slice::from_ref(&root),
         10,
