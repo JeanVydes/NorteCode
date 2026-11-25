@@ -226,6 +226,10 @@ pub(crate) struct Preferences {
     pub(crate) rail_position: RailPosition,
     /// Whether the floating performance overlay is shown.
     pub(crate) debug: DebugOverlayMode,
+    /// Whether tool result panels start expanded.
+    pub(crate) show_tool_output: bool,
+    /// Whether non-text activity is grouped in expandable blocks.
+    pub(crate) tool_verbosity: bool,
 }
 
 /// The turn the host is running, when known.
@@ -472,6 +476,8 @@ impl UiModel {
                 diff_mode: DiffMode::Unified,
                 rail_position: RailPosition::Left,
                 debug: DebugOverlayMode::Off,
+                show_tool_output: false,
+                tool_verbosity: false,
             },
             attachment: SessionAttachmentState::Disconnected,
             turn: TurnState::Idle,

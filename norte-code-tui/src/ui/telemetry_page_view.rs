@@ -1,12 +1,13 @@
 //! Telemetry view implementation: rendering and event routing.
 
 use std::any::Any;
+use std::time::Duration;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use terminalui::components::table::Table;
-use terminalui::{Context, InputEvent, Node, Outcome, Theme, View};
+use terminalui::{Context, Direction, Effect, InputEvent, Node, Outcome, Theme, View};
 use unicode_width::UnicodeWidthStr;
 
 use crate::ui::leaderboard_section::LeaderboardClick;
@@ -26,7 +27,7 @@ impl TelemetryPage {
             .clamp(30, 52)
             .min(area.width.saturating_sub(32));
         let left_width = area.width.saturating_sub(detail_width + 1);
-        let lower_h = lower_y.saturating_sub(area.y).min(area.height);
+        let lower_h = area.y.saturating_add(area.height).saturating_sub(lower_y);
 
         let mut sessions_style = Style::default().fg(theme.muted);
         let mut requests_style = Style::default().fg(theme.muted);
@@ -118,6 +119,36 @@ impl TelemetryPage {
         }
     }
 
+    fn paint_body(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
+        match self.view {
+            TelemetryView::Charts => {
+                let heatmap_height = HEATMAP_ROWS.min(area.height);
+                self.paint_heatmap(
+                    Rect {
+                        height: heatmap_height,
+                        ..area
+                    },
+                    buf,
+                    theme,
+                );
+                self.paint_charts(
+                    Rect {
+                        y: area.y + heatmap_height,
+                        height: area.height.saturating_sub(heatmap_height),
+                        ..area
+                    },
+                    buf,
+                    cx,
+                    theme,
+                );
+            }
+            TelemetryView::Leaderboards => self.paint_leaderboards(area, buf, cx, theme),
+            TelemetryView::Sessions | TelemetryView::Requests => {
+                self.paint_lower(area, area.y, buf, cx, theme);
+            }
+        }
+    }
+
     pub(super) fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Option<Outcome> {
         use crossterm::event::MouseEventKind;
         match self.view {
@@ -189,10 +220,11 @@ impl View for TelemetryPage {
         let caption = self.caption();
         let hint = match self.view {
             TelemetryView::Charts => {
-                "wheel · ↑↓ history · [ ] interval · d density · c contrast · v size · g glyphs"
+                "Tab view · wheel/↑↓ history · [ ] interval · d density · c contrast · v size · g glyphs"
             }
-            TelemetryView::Leaderboards => "↑↓ group · ←→ entity · j/k rows · [ ] interval",
-            TelemetryView::Sessions | TelemetryView::Requests => "j/k select · [ ] interval",
+            TelemetryView::Leaderboards => "Tab view · 1-8 metric · ←→ type · j/k rows",
+            TelemetryView::Sessions => "Tab view · j/k sessions · [ ] interval",
+            TelemetryView::Requests => "Tab view · j/k requests · [ ] interval",
         };
         let hint_width = u16::try_from(UnicodeWidthStr::width(hint)).unwrap_or(u16::MAX);
         let show_hint = area.width > hint_width.saturating_add(10);
@@ -222,32 +254,25 @@ impl View for TelemetryPage {
             height: area.height.saturating_sub(1),
             ..area
         };
-        match self.view {
-            TelemetryView::Charts => {
-                let heatmap_height = HEATMAP_ROWS.min(body.height);
-                self.paint_heatmap(
-                    Rect {
-                        height: heatmap_height,
-                        ..body
-                    },
-                    buf,
-                    theme,
-                );
-                self.paint_charts(
-                    Rect {
-                        y: body.y + heatmap_height,
-                        height: body.height - heatmap_height,
-                        ..body
-                    },
-                    buf,
-                    cx,
-                    theme,
-                );
-            }
-            TelemetryView::Leaderboards => self.paint_leaderboards(body, buf, cx, theme),
-            TelemetryView::Sessions | TelemetryView::Requests => {
-                self.paint_lower(area, area.y + 1, buf, cx, theme);
-            }
+        let progress = self
+            .transition
+            .as_ref()
+            .map(terminalui::Animation::progress);
+        if let Some(progress) = progress {
+            terminalui::render_with(
+                &Effect::SlideIn {
+                    direction: Direction::Right,
+                    distance: 3,
+                    easing: terminalui::Easing::EaseOutCubic,
+                },
+                progress,
+                buf,
+                body,
+                theme,
+                |area, buf, theme| self.paint_body(area, buf, cx, theme),
+            );
+        } else {
+            self.paint_body(body, buf, cx, theme);
         }
     }
 
@@ -350,5 +375,15 @@ impl View for TelemetryPage {
             }
         }
         Outcome::Ignored
+    }
+
+    fn tick(&mut self, delta: Duration, _cx: &mut Context) {
+        if self
+            .transition
+            .as_mut()
+            .is_some_and(|animation| !animation.tick(delta))
+        {
+            self.transition = None;
+        }
     }
 }

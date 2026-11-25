@@ -1,6 +1,7 @@
 //! The request table and detail are built from the report the host supplies.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use norte_code_wire::{TelemetryRecord, TelemetryReport};
@@ -27,12 +28,14 @@ fn report() -> TelemetryReport {
         records: vec![
             TelemetryRecord {
                 id: "req-2".to_owned(),
+                session: "8f4b12c7-3ee4-4c82-a090-123456789abc".to_owned(),
                 model: "openrouter/model".to_owned(),
                 started_at: "2026-11-19T09:00:01Z".to_owned(),
                 ..TelemetryRecord::default()
             },
             TelemetryRecord {
                 id: "req-1".to_owned(),
+                session: "8f4b12c7-3ee4-4c82-a090-123456789abc".to_owned(),
                 model: "nvidia/model".to_owned(),
                 started_at: "2026-11-19T10:00:01Z".to_owned(),
                 input_tokens: Some(100),
@@ -138,6 +141,39 @@ fn key(code: KeyCode) -> InputEvent {
     InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
+#[test]
+fn tab_cycles_charts_sessions_requests_and_rankings() {
+    let (mut tree, _, _) = chart_tree();
+    assert_eq!(
+        page(&tree).view,
+        super::telemetry_page::TelemetryView::Charts
+    );
+
+    if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
+        page.toggle_focus();
+    }
+    assert_eq!(
+        page(&tree).view,
+        super::telemetry_page::TelemetryView::Sessions
+    );
+
+    if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
+        page.toggle_focus();
+    }
+    assert_eq!(
+        page(&tree).view,
+        super::telemetry_page::TelemetryView::Requests
+    );
+
+    if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
+        page.toggle_focus();
+    }
+    assert_eq!(
+        page(&tree).view,
+        super::telemetry_page::TelemetryView::Leaderboards
+    );
+}
+
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> InputEvent {
     InputEvent::Mouse(MouseEvent {
         kind,
@@ -191,6 +227,49 @@ fn a_zero_height_session_view_does_not_underflow_its_lower_panel() {
     tree.render(area, &mut buf, &theme);
 }
 
+#[test]
+fn sessions_view_uses_a_short_id_and_shows_request_count() {
+    let (mut tree, _, theme) = chart_tree();
+    if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
+        page.toggle_focus();
+    }
+    tree.tick(Duration::from_millis(200));
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buffer = Buffer::empty(area);
+
+    tree.render(area, &mut buffer, &theme);
+
+    let rendered = buffer
+        .content
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
+    assert!(rendered.contains("Session 8f4b12c7"));
+    assert!(rendered.contains("2 requests"));
+}
+
+#[test]
+fn requests_view_renders_rows_and_request_details_in_available_height() {
+    let (mut tree, _, theme) = chart_tree();
+    if let Some(page) = tree.find_mut::<TelemetryPage>("telemetry") {
+        page.toggle_focus();
+        page.toggle_focus();
+    }
+    tree.tick(Duration::from_millis(200));
+    let area = Rect::new(0, 0, 120, 30);
+    let mut buffer = Buffer::empty(area);
+
+    tree.render(area, &mut buffer, &theme);
+
+    let rendered = buffer
+        .content
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
+    assert!(rendered.contains("nvidia/model"));
+    assert!(rendered.contains("req-1"));
+}
+
 fn page(tree: &Tree) -> &TelemetryPage {
     tree.find::<TelemetryPage>("telemetry")
         .expect("telemetry page")
@@ -214,10 +293,13 @@ fn up_and_down_switch_the_group_tabs() {
     assert_eq!(group(&tree), LeaderboardGroup::Usage);
 
     tree.handle_event(&key(KeyCode::Up));
-    assert_eq!(group(&tree), LeaderboardGroup::Cost);
+    assert_eq!(group(&tree), LeaderboardGroup::CacheRate);
 
     tree.handle_event(&key(KeyCode::Down));
     assert_eq!(group(&tree), LeaderboardGroup::Usage);
+
+    tree.handle_event(&key(KeyCode::Char('2')));
+    assert_eq!(group(&tree), LeaderboardGroup::Input);
 }
 
 #[test]
@@ -231,7 +313,7 @@ fn clicks_select_group_and_subject_tabs() {
         .expect("telemetry page")
         .leaderboard_area();
 
-    tree.handle_event(&click(board.x + 11, board.y + 1));
+    tree.handle_event(&click(board.x + 19, board.y + 1));
     assert_eq!(group(&tree), LeaderboardGroup::Cost);
 
     tree.handle_event(&click(board.x + 12, board.y + 2));

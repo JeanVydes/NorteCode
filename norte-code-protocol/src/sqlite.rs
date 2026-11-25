@@ -178,12 +178,30 @@ pub struct RequestRecord {
     pub started_at: DateTime<Utc>,
     /// How long the request took, including streaming.
     pub duration_ms: u64,
-    /// Time to the first answer delta, when one arrived.
+    /// Time to the first output event, including text, reasoning, tool, or media output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_token_ms: Option<u64>,
+    /// Time to the first visible text or refusal delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_text_ms: Option<u64>,
     /// Time to the last answer delta, when one arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_token_ms: Option<u64>,
+    /// HTTP status returned for the request, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Connection retries performed before the response, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<u32>,
+    /// Number of output chunks observed in the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_chunk_count: Option<u64>,
+    /// Longest observed gap between output chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inter_chunk_gap_ms: Option<u64>,
+    /// Model name reported by the response when it differs from the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
     /// Prompt tokens the provider reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
@@ -665,6 +683,12 @@ impl SqliteStore {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         ensure_column(&connection, "requests", "last_token_ms", "INTEGER")?;
+        ensure_column(&connection, "requests", "first_text_ms", "INTEGER")?;
+        ensure_column(&connection, "requests", "http_status", "INTEGER")?;
+        ensure_column(&connection, "requests", "retry_count", "INTEGER")?;
+        ensure_column(&connection, "requests", "stream_chunk_count", "INTEGER")?;
+        ensure_column(&connection, "requests", "max_inter_chunk_gap_ms", "INTEGER")?;
+        ensure_column(&connection, "requests", "resolved_model", "TEXT")?;
         ensure_column(
             &connection,
             "requests",
@@ -821,7 +845,13 @@ CREATE TABLE IF NOT EXISTS requests (
     started_at              TEXT NOT NULL,
     duration_ms             INTEGER NOT NULL,
     first_token_ms          INTEGER,
+    first_text_ms           INTEGER,
     last_token_ms           INTEGER,
+    http_status             INTEGER,
+    retry_count             INTEGER,
+    stream_chunk_count      INTEGER,
+    max_inter_chunk_gap_ms  INTEGER,
+    resolved_model          TEXT,
     input_tokens            INTEGER,
     output_tokens           INTEGER,
     reasoning_tokens        INTEGER,
@@ -1536,7 +1566,9 @@ impl SessionDirectory for SqliteStore {
                 .execute(
                     "INSERT INTO requests (
                          id, session, north_session, turn, provider, model, endpoint, started_at,
-                         duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
+                         duration_ms, first_token_ms, first_text_ms, last_token_ms, http_status,
+                         retry_count, stream_chunk_count, max_inter_chunk_gap_ms, resolved_model,
+                         input_tokens, output_tokens,
                          reasoning_tokens, cache_read_tokens, cache_write_tokens,
                          estimated_input_tokens, cache_hit, tool_calls, reasoning,
                          params, extensions, metadata, cost_usd, finish_reason, status, error,
@@ -1544,7 +1576,7 @@ impl SessionDirectory for SqliteStore {
                      ) VALUES (
                          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
-                         ?28, ?29, ?30, ?31
+                         ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37
                      )
                      ON CONFLICT(id) DO UPDATE SET
                          session = excluded.session,
@@ -1556,7 +1588,13 @@ impl SessionDirectory for SqliteStore {
                          started_at = excluded.started_at,
                          duration_ms = excluded.duration_ms,
                          first_token_ms = excluded.first_token_ms,
+                         first_text_ms = excluded.first_text_ms,
                          last_token_ms = excluded.last_token_ms,
+                         http_status = excluded.http_status,
+                         retry_count = excluded.retry_count,
+                         stream_chunk_count = excluded.stream_chunk_count,
+                         max_inter_chunk_gap_ms = excluded.max_inter_chunk_gap_ms,
+                         resolved_model = excluded.resolved_model,
                          input_tokens = excluded.input_tokens,
                          output_tokens = excluded.output_tokens,
                          reasoning_tokens = excluded.reasoning_tokens,
@@ -1588,7 +1626,13 @@ impl SessionDirectory for SqliteStore {
                         record.started_at.to_rfc3339(),
                         sqlite_u64(record.duration_ms),
                         record.first_token_ms.map(sqlite_u64),
+                        record.first_text_ms.map(sqlite_u64),
                         record.last_token_ms.map(sqlite_u64),
+                        record.http_status.map(i64::from),
+                        record.retry_count.map(i64::from),
+                        record.stream_chunk_count.map(sqlite_u64),
+                        record.max_inter_chunk_gap_ms.map(sqlite_u64),
+                        record.resolved_model,
                         record.input_tokens.map(sqlite_u64),
                         record.output_tokens.map(sqlite_u64),
                         record.reasoning_tokens.map(sqlite_u64),
@@ -1630,7 +1674,13 @@ impl SessionDirectory for SqliteStore {
             String,         // started_at
             i64,            // duration_ms
             Option<i64>,    // first_token_ms
+            Option<i64>,    // first_text_ms
             Option<i64>,    // last_token_ms
+            Option<i64>,    // http_status
+            Option<i64>,    // retry_count
+            Option<i64>,    // stream_chunk_count
+            Option<i64>,    // max_inter_chunk_gap_ms
+            Option<String>, // resolved_model
             Option<i64>,    // input_tokens
             Option<i64>,    // output_tokens
             Option<i64>,    // reasoning_tokens
@@ -1655,7 +1705,9 @@ impl SessionDirectory for SqliteStore {
             .run(move |connection| {
                 let sql = if session.is_some() {
                     "SELECT id, session, north_session, turn, provider, model, endpoint, started_at,
-                            duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
+                            duration_ms, first_token_ms, first_text_ms, last_token_ms, http_status,
+                            retry_count, stream_chunk_count, max_inter_chunk_gap_ms, resolved_model,
+                            input_tokens, output_tokens,
                             reasoning_tokens, cache_read_tokens, cache_write_tokens,
                             estimated_input_tokens, cache_hit, tool_calls, reasoning,
                             params, extensions, metadata, cost_usd, finish_reason, status, error,
@@ -1663,7 +1715,9 @@ impl SessionDirectory for SqliteStore {
                      FROM requests WHERE session = ?1 ORDER BY started_at, id"
                 } else {
                     "SELECT id, session, north_session, turn, provider, model, endpoint, started_at,
-                            duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
+                            duration_ms, first_token_ms, first_text_ms, last_token_ms, http_status,
+                            retry_count, stream_chunk_count, max_inter_chunk_gap_ms, resolved_model,
+                            input_tokens, output_tokens,
                             reasoning_tokens, cache_read_tokens, cache_write_tokens,
                             estimated_input_tokens, cache_hit, tool_calls, reasoning,
                             params, extensions, metadata, cost_usd, finish_reason, status, error,
@@ -1704,6 +1758,12 @@ impl SessionDirectory for SqliteStore {
                         row.get(28)?,
                         row.get(29)?,
                         row.get(30)?,
+                        row.get(31)?,
+                        row.get(32)?,
+                        row.get(33)?,
+                        row.get(34)?,
+                        row.get(35)?,
+                        row.get(36)?,
                     ))
                 };
                 let mapped = if let Some(session) = session.as_deref() {
@@ -1735,7 +1795,13 @@ impl SessionDirectory for SqliteStore {
                     started_at,
                     duration_ms,
                     first_token_ms,
+                    first_text_ms,
                     last_token_ms,
+                    http_status,
+                    retry_count,
+                    stream_chunk_count,
+                    max_inter_chunk_gap_ms,
+                    resolved_model,
                     input_tokens,
                     output_tokens,
                     reasoning_tokens,
@@ -1777,7 +1843,27 @@ impl SessionDirectory for SqliteStore {
                     })?,
                     duration_ms: rust_u64(duration_ms, "request duration")?,
                     first_token_ms: token(first_token_ms, "first token")?,
+                    first_text_ms: token(first_text_ms, "first text")?,
                     last_token_ms: token(last_token_ms, "last token")?,
+                    http_status: http_status
+                        .map(|value| {
+                            u16::try_from(value).map_err(|_| Fault::Corrupt {
+                                what: "HTTP status".to_owned(),
+                                reason: "outside u16 range".to_owned(),
+                            })
+                        })
+                        .transpose()?,
+                    retry_count: retry_count
+                        .map(|value| {
+                            u32::try_from(value).map_err(|_| Fault::Corrupt {
+                                what: "retry count".to_owned(),
+                                reason: "outside u32 range".to_owned(),
+                            })
+                        })
+                        .transpose()?,
+                    stream_chunk_count: token(stream_chunk_count, "stream chunk count")?,
+                    max_inter_chunk_gap_ms: token(max_inter_chunk_gap_ms, "maximum stream gap")?,
+                    resolved_model,
                     input_tokens: token(input_tokens, "input tokens")?,
                     output_tokens: token(output_tokens, "output tokens")?,
                     reasoning_tokens: token(reasoning_tokens, "reasoning tokens")?,
@@ -1987,7 +2073,13 @@ impl From<&RequestRecord> for norte_code_wire::TelemetryRecord {
             started_at: row.started_at.to_rfc3339(),
             duration_ms: row.duration_ms,
             first_token_ms: row.first_token_ms,
+            first_text_ms: row.first_text_ms,
             last_token_ms: row.last_token_ms,
+            http_status: row.http_status,
+            retry_count: row.retry_count,
+            stream_chunk_count: row.stream_chunk_count,
+            max_inter_chunk_gap_ms: row.max_inter_chunk_gap_ms,
+            resolved_model: row.resolved_model.clone(),
             input_tokens: row.input_tokens,
             output_tokens: row.output_tokens,
             reasoning_tokens: row.reasoning_tokens,
@@ -2040,7 +2132,13 @@ impl TryFrom<norte_code_wire::TelemetryRecord> for RequestRecord {
                 .with_timezone(&chrono::Utc),
             duration_ms: record.duration_ms,
             first_token_ms: record.first_token_ms,
+            first_text_ms: record.first_text_ms,
             last_token_ms: record.last_token_ms,
+            http_status: record.http_status,
+            retry_count: record.retry_count,
+            stream_chunk_count: record.stream_chunk_count,
+            max_inter_chunk_gap_ms: record.max_inter_chunk_gap_ms,
+            resolved_model: record.resolved_model,
             input_tokens: record.input_tokens,
             output_tokens: record.output_tokens,
             reasoning_tokens: record.reasoning_tokens,

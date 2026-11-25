@@ -322,12 +322,30 @@ pub struct TelemetryRecord {
     /// How long it took, including streaming.
     #[serde(default)]
     pub duration_ms: u64,
-    /// Time to the first answer delta.
+    /// Time to the first output event, including text, reasoning, tool, or media output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_token_ms: Option<u64>,
+    /// Time to the first visible text or refusal delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_text_ms: Option<u64>,
     /// Time to the last answer delta.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_token_ms: Option<u64>,
+    /// HTTP status returned for the request, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Connection retries performed before the response, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<u32>,
+    /// Number of output chunks observed in the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_chunk_count: Option<u64>,
+    /// Longest observed gap between output chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inter_chunk_gap_ms: Option<u64>,
+    /// Model name reported by the response when it differs from the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
     /// Prompt tokens the provider reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
@@ -548,6 +566,9 @@ pub struct TelemetrySummary {
     /// Total time spent, in milliseconds.
     #[serde(default)]
     pub duration_ms: u64,
+    /// Requests whose duration was measured live rather than reconstructed.
+    #[serde(default)]
+    pub duration_samples: u64,
     /// Prompt tokens, as the providers reported them.
     #[serde(default)]
     pub input_tokens: u64,

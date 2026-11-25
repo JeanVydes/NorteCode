@@ -75,6 +75,12 @@ pub(crate) struct UiConfig {
     /// Show the floating frame and memory metrics box.
     #[serde(default)]
     pub(crate) debug: bool,
+    /// Expand tool results by default.
+    #[serde(default)]
+    pub(crate) show_tool_output: bool,
+    /// Group reasoning and tool activity in expandable transcript blocks.
+    #[serde(default)]
+    pub(crate) tool_verbosity: bool,
 }
 
 /// The client configuration.

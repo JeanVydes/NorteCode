@@ -1,14 +1,17 @@
 //! Telemetry charts: series building, shared time windows, and painting.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Style;
 use terminalui::components::candlechart::{CandleChart, CandleChartStyle};
 use terminalui::components::linechart::{LineChart, LineChartStyle};
+use terminalui::components::piechart::{PieChart, PieSlice};
 use terminalui::components::presentation::DotSize;
-use terminalui::{Context, Theme};
+use terminalui::{Context, Theme, View};
 
 use crate::telemetry::{ChartInterval, short_label};
 use crate::telemetry_series::{chart_window as compute_chart_window, series};
@@ -129,6 +132,42 @@ impl TelemetryPage {
             chart.set_x_label(move |index| labels.get(index).cloned().unwrap_or_default());
             chart.set_series(cost);
         }
+        if let Some(chart) = self
+            .children
+            .get_mut(1)
+            .and_then(|node| node.view.as_any().downcast_mut::<LineChart>())
+        {
+            chart.set_series(self.chart_data.input.clone());
+        }
+        if let Some(chart) = self
+            .children
+            .get_mut(2)
+            .and_then(|node| node.view.as_any().downcast_mut::<LineChart>())
+        {
+            chart.set_gapped_series(self.chart_data.cache.clone());
+        }
+        let line_series = [
+            (
+                0,
+                self.chart_data.output.iter().copied().map(Some).collect(),
+            ),
+            (
+                1,
+                self.chart_data.requests.iter().copied().map(Some).collect(),
+            ),
+            (2, self.chart_data.latency.clone()),
+            (3, self.chart_data.first_output.clone()),
+            (4, self.chart_data.first_text.clone()),
+        ];
+        for (index, values) in line_series {
+            if let Some(chart) = self.additional_charts.get_mut(index) {
+                chart.set_gapped_series(values);
+            }
+        }
+        self.provider_cost_chart
+            .set_slices(cost_slices(self.report.as_deref(), CostBreakdown::Provider));
+        self.model_cost_chart
+            .set_slices(cost_slices(self.report.as_deref(), CostBreakdown::Model));
     }
 
     pub(super) fn chart_window(&self, width: u16) -> (usize, usize) {
@@ -151,9 +190,9 @@ impl TelemetryPage {
             return;
         }
         let (start, end) = window;
-        let tokens = self
+        let input = self
             .chart_data
-            .tokens
+            .input
             .get(start..end)
             .unwrap_or_default()
             .to_vec();
@@ -163,19 +202,61 @@ impl TelemetryPage {
             .get(start..end)
             .unwrap_or_default()
             .to_vec();
+        let output = self
+            .chart_data
+            .output
+            .get(start..end)
+            .unwrap_or_default()
+            .to_vec();
+        let requests = self
+            .chart_data
+            .requests
+            .get(start..end)
+            .unwrap_or_default()
+            .to_vec();
+        let latency = self
+            .chart_data
+            .latency
+            .get(start..end)
+            .unwrap_or_default()
+            .to_vec();
+        let first_output = self
+            .chart_data
+            .first_output
+            .get(start..end)
+            .unwrap_or_default()
+            .to_vec();
+        let first_text = self
+            .chart_data
+            .first_text
+            .get(start..end)
+            .unwrap_or_default()
+            .to_vec();
         if let Some(chart) = self
             .children
             .get_mut(1)
             .and_then(|node| node.view.as_any().downcast_mut::<LineChart>())
         {
-            chart.set_series(tokens);
+            chart.set_series(input);
         }
         if let Some(chart) = self
             .children
             .get_mut(2)
             .and_then(|node| node.view.as_any().downcast_mut::<LineChart>())
         {
-            chart.set_series(cache);
+            chart.set_gapped_series(cache);
+        }
+        let line_series = [
+            (0, output.into_iter().map(Some).collect()),
+            (1, requests.into_iter().map(Some).collect()),
+            (2, latency),
+            (3, first_output),
+            (4, first_text),
+        ];
+        for (index, values) in line_series {
+            if let Some(chart) = self.additional_charts.get_mut(index) {
+                chart.set_gapped_series(values);
+            }
         }
         self.line_window = Some(window);
     }
@@ -221,8 +302,38 @@ impl TelemetryPage {
         let page = &mut self.chart_page;
         let body = paint_slot_title(page, layout.y, layout.area.width, layout.title, theme);
         let body_y = layout.y + 1;
-        if let Some(child) = self.children.get_mut(layout.index) {
-            child.view.render(body, page, cx, theme);
+        match layout.index {
+            0 | 1 | 3 => {
+                let child_index = match layout.index {
+                    0 => 0,
+                    1 => 1,
+                    _ => 2,
+                };
+                if let Some(child) = self.children.get_mut(child_index) {
+                    child.view.render(body, page, cx, theme);
+                }
+            }
+            2 | 4..=7 => {
+                let chart_index = match layout.index {
+                    2 => 0,
+                    4 => 1,
+                    5 => 2,
+                    6 => 3,
+                    _ => 4,
+                };
+                if let Some(chart) = self.additional_charts.get_mut(chart_index) {
+                    chart.render(body, page, cx, theme);
+                }
+            }
+            8 => paint_cost_mix(
+                &mut self.provider_cost_chart,
+                &mut self.model_cost_chart,
+                body,
+                page,
+                cx,
+                theme,
+            ),
+            _ => {}
         }
         if layout.index == 0
             && let Some(chart) = self
@@ -237,7 +348,7 @@ impl TelemetryPage {
                 height: CHART_SLOT - 1,
             };
         }
-        if layout.index > 0 {
+        if layout.index > 0 && layout.index < 8 {
             paint_time_labels(
                 &self.bucket_labels,
                 page,
@@ -284,14 +395,35 @@ impl TelemetryPage {
                 };
             }
         }
+        for (index, chart) in self.additional_charts.iter_mut().enumerate() {
+            let line = [
+                theme.accent,
+                theme.success,
+                theme.warning,
+                theme.destructive,
+                theme.primary,
+            ][index % 5];
+            chart.presentation = presentation;
+            chart.tuning = tuning;
+            chart.style = LineChartStyle {
+                line: Some(line),
+                grid: Some(theme.border),
+                label: Some(theme.muted),
+                latest: Some(line),
+            };
+        }
     }
 
     fn paint_chart_grid(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
         const GAP: u16 = 2;
-        let available = area.width.saturating_sub(GAP * 2);
-        let base_width = available / 3;
-        let extra = available % 3;
-        if base_width == 0 || area.height < 8 {
+        const GRID: usize = 3;
+        let available_width = area.width.saturating_sub(GAP * 2);
+        let available_height = area.height.saturating_sub(GAP * 2);
+        let base_width = available_width / 3;
+        let extra_width = available_width % 3;
+        let base_height = available_height / 3;
+        let extra_height = available_height % 3;
+        if base_width < 24 || base_height < 8 {
             return;
         }
         self.chart_grid = true;
@@ -299,44 +431,59 @@ impl TelemetryPage {
         self.chart_areas.clear();
         buf.set_style(area, Style::default().bg(theme.background));
         let window = self.line_window.unwrap_or((0, 0));
-        let widths = [
-            base_width + u16::from(extra > 0),
-            base_width + u16::from(extra > 1),
-            base_width,
-        ];
-        let mut x = area.x;
-        let chart_height = area.height.saturating_sub(3);
-        for (index, width) in widths.into_iter().enumerate() {
-            let title = Rect::new(x, area.y, width, 1);
+        for (index, title_text) in CHART_TITLES.iter().enumerate() {
+            let column = index % GRID;
+            let row = index / GRID;
+            let width = base_width + u16::from(column < usize::from(extra_width));
+            let height = base_height + u16::from(row < usize::from(extra_height));
+            let x = area.x
+                + (base_width * u16::try_from(column).unwrap_or(0))
+                + GAP * u16::try_from(column).unwrap_or(0)
+                + u16::try_from(column.min(usize::from(extra_width))).unwrap_or(0);
+            let y = area.y
+                + (base_height * u16::try_from(row).unwrap_or(0))
+                + GAP * u16::try_from(row).unwrap_or(0)
+                + u16::try_from(row.min(usize::from(extra_height))).unwrap_or(0);
+            let title = Rect::new(x, y, width, 1);
             buf.set_style(title, Style::default().bg(theme.secondary));
             buf.set_stringn(
                 x.saturating_add(1),
-                area.y,
-                CHART_TITLES[index],
+                y,
+                title_text,
                 usize::from(width.saturating_sub(2)),
                 Style::default()
                     .fg(theme.accent)
                     .bg(theme.secondary)
                     .add_modifier(ratatui::style::Modifier::BOLD),
             );
-            let chart_area = Rect::new(x, area.y.saturating_add(1), width, chart_height);
-            if let Some(child) = self.children.get_mut(index) {
-                child.view.render(chart_area, buf, cx, theme);
+            let chart_height = height.saturating_sub(2);
+            let chart_area = Rect::new(x, y.saturating_add(1), width, chart_height);
+            if index == 8 {
+                paint_cost_mix(
+                    &mut self.provider_cost_chart,
+                    &mut self.model_cost_chart,
+                    chart_area,
+                    buf,
+                    cx,
+                    theme,
+                );
+            } else if index == 0 {
+                if let Some(child) = self.children.first_mut() {
+                    child.view.render(chart_area, buf, cx, theme);
+                }
+            } else if let Some(chart) = self.chart_by_index_mut(index) {
+                chart.render(chart_area, buf, cx, theme);
             }
             self.chart_areas.push(chart_area);
-            paint_time_labels_at(
-                &self.bucket_labels,
-                buf,
-                Rect::new(
-                    x,
-                    area.y.saturating_add(area.height.saturating_sub(1)),
-                    width,
-                    1,
-                ),
-                window,
-                theme,
-            );
-            x = x.saturating_add(width).saturating_add(GAP);
+            if index > 0 && index < 8 {
+                paint_time_labels_at(
+                    &self.bucket_labels,
+                    buf,
+                    Rect::new(x, y.saturating_add(height.saturating_sub(1)), width, 1),
+                    window,
+                    theme,
+                );
+            }
         }
     }
 
@@ -347,7 +494,7 @@ impl TelemetryPage {
         cx: &mut Context,
         theme: &Theme,
     ) {
-        if area.width >= 90 && area.height >= 8 {
+        if area.width >= 84 && area.height >= 27 {
             let window_width = area.width.saturating_sub(4) / 3;
             let window = self.chart_window(window_width);
             self.sync_line_window(window);
@@ -384,4 +531,125 @@ impl TelemetryPage {
         blit_rows(&self.chart_page, buf, area, offset);
         self.chart_scroll.paint(area, buf, theme, CHART_ROWS);
     }
+}
+
+fn paint_cost_mix(
+    provider_chart: &mut PieChart,
+    model_chart: &mut PieChart,
+    area: Rect,
+    buf: &mut Buffer,
+    cx: &mut Context,
+    theme: &Theme,
+) {
+    if area.width < 24 || area.height < 2 {
+        return;
+    }
+    let half = area.width / 2;
+    let chart_width = half.saturating_sub(1);
+    let header_style = Style::default().fg(theme.muted);
+    buf.set_stringn(
+        area.x,
+        area.y,
+        "provider",
+        usize::from(chart_width),
+        header_style,
+    );
+    buf.set_stringn(
+        area.x + half,
+        area.y,
+        "model",
+        usize::from(area.width.saturating_sub(half)),
+        header_style,
+    );
+    let chart_area = |x, width| Rect::new(x, area.y + 1, width, area.height.saturating_sub(1));
+    provider_chart.render(chart_area(area.x, chart_width), buf, cx, theme);
+    model_chart.render(
+        chart_area(area.x + half, area.width.saturating_sub(half)),
+        buf,
+        cx,
+        theme,
+    );
+}
+
+impl TelemetryPage {
+    fn chart_by_index_mut(&mut self, index: usize) -> Option<&mut LineChart> {
+        match index {
+            1 => self
+                .children
+                .get_mut(1)?
+                .view
+                .as_any()
+                .downcast_mut::<LineChart>(),
+            2 | 4..=7 => self.additional_charts.get_mut(match index {
+                2 => 0,
+                4 => 1,
+                5 => 2,
+                6 => 3,
+                _ => 4,
+            }),
+            3 => self
+                .children
+                .get_mut(2)?
+                .view
+                .as_any()
+                .downcast_mut::<LineChart>(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CostBreakdown {
+    Provider,
+    Model,
+}
+
+fn cost_slices(
+    report: Option<&norte_code_wire::TelemetryReport>,
+    breakdown: CostBreakdown,
+) -> Vec<PieSlice> {
+    let mut grouped = BTreeMap::<String, f64>::new();
+    if let Some(report) = report {
+        for record in &report.records {
+            let cost = record.cost_usd.unwrap_or(0.0);
+            if cost > 0.0 {
+                let name = match breakdown {
+                    CostBreakdown::Provider if record.provider.is_empty() => "Unknown provider",
+                    CostBreakdown::Provider => record.provider.as_str(),
+                    CostBreakdown::Model => {
+                        record.resolved_model.as_deref().unwrap_or(&record.model)
+                    }
+                };
+                let name = if name.is_empty() {
+                    match breakdown {
+                        CostBreakdown::Provider => "Unknown provider",
+                        CostBreakdown::Model => "Unknown model",
+                    }
+                } else {
+                    name
+                };
+                *grouped.entry(name.to_owned()).or_default() += cost;
+            }
+        }
+    }
+    let mut values: Vec<_> = grouped.into_iter().collect();
+    values.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let colors = [
+        Color::Cyan,
+        Color::Green,
+        Color::Yellow,
+        Color::Magenta,
+        Color::Blue,
+    ];
+    let mut slices: Vec<_> = values
+        .drain(..)
+        .take(colors.len())
+        .enumerate()
+        .map(|(index, (label, cost))| PieSlice::new(label, cost, colors[index]))
+        .collect();
+    let other: f64 = values.into_iter().map(|(_, cost)| cost).sum();
+    if other > 0.0 {
+        slices.push(PieSlice::new("Other", other, Color::Gray));
+    }
+    slices
 }

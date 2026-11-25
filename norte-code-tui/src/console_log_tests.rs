@@ -3,7 +3,7 @@
 use norte_code_client::config::RetentionConfig;
 use terminalui::components::console::{Console, ConsoleStatus};
 
-use super::push_line;
+use super::{push_chunk, push_line};
 
 #[test]
 fn a_flooding_command_keeps_only_its_recent_output() {
@@ -12,6 +12,7 @@ fn a_flooding_command_keeps_only_its_recent_output() {
         push_line(
             &mut console,
             format!("line {index}"),
+            norte_code_wire::OutputStream::Stdout,
             RetentionConfig::default(),
         );
     }
@@ -31,6 +32,7 @@ fn trimming_keeps_the_command_status_and_spinner_state() {
         push_line(
             &mut console,
             format!("line {index}"),
+            norte_code_wire::OutputStream::Stdout,
             RetentionConfig::default(),
         );
     }
@@ -48,7 +50,12 @@ fn trimming_keeps_expanded_output_expanded() {
     };
     let mut console = Console::new("build").with_expanded(true);
     for index in 0..20 {
-        push_line(&mut console, format!("line {index}"), retention);
+        push_line(
+            &mut console,
+            format!("line {index}"),
+            norte_code_wire::OutputStream::Stdout,
+            retention,
+        );
     }
 
     assert!(console.is_expanded());
@@ -64,10 +71,49 @@ fn configured_retention_decides_when_output_is_trimmed_and_how_much_survives() {
     };
     let mut console = Console::new("short command");
     for index in 0..20 {
-        push_line(&mut console, format!("line {index}"), retention);
+        push_line(
+            &mut console,
+            format!("line {index}"),
+            norte_code_wire::OutputStream::Stdout,
+            retention,
+        );
     }
 
     assert_eq!(console.lines().len(), 5);
     assert_eq!(console.lines()[0], "line 15");
     assert_eq!(console.lines()[4], "line 19");
+}
+
+#[test]
+fn streaming_chunks_join_lines_and_keep_error_style() {
+    let mut console = Console::new("command");
+    let retention = RetentionConfig::default();
+    push_chunk(
+        &mut console,
+        "out",
+        norte_code_wire::OutputStream::Stdout,
+        retention,
+    );
+    push_chunk(
+        &mut console,
+        "put\n",
+        norte_code_wire::OutputStream::Stdout,
+        retention,
+    );
+    push_chunk(
+        &mut console,
+        "err",
+        norte_code_wire::OutputStream::Stderr,
+        retention,
+    );
+    push_chunk(
+        &mut console,
+        "or\n",
+        norte_code_wire::OutputStream::Stderr,
+        retention,
+    );
+
+    assert_eq!(console.lines(), ["output", "error"]);
+    assert!(!console.line_is_error(0));
+    assert!(console.line_is_error(1));
 }

@@ -179,6 +179,12 @@ pub(in crate::app) fn drain_config_actions(
                 model.preferences.rail_position = model.preferences.rail_position.next();
             }
             Setting::Debug => model.preferences.debug = model.preferences.debug.next(),
+            Setting::ShowToolOutput => {
+                model.preferences.show_tool_output = !model.preferences.show_tool_output;
+            }
+            Setting::ToolVerbosity => {
+                model.preferences.tool_verbosity = !model.preferences.tool_verbosity;
+            }
         }
     }
     if theme_changed {

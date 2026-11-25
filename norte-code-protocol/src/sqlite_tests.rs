@@ -49,7 +49,13 @@ async fn request_rows_keep_the_sandbox_flags() {
         started_at: Utc::now(),
         duration_ms: 10,
         first_token_ms: Some(1),
+        first_text_ms: Some(3),
         last_token_ms: Some(9),
+        http_status: Some(200),
+        retry_count: Some(1),
+        stream_chunk_count: Some(4),
+        max_inter_chunk_gap_ms: Some(7),
+        resolved_model: Some("model-revision".to_owned()),
         input_tokens: Some(10),
         output_tokens: Some(2),
         reasoning_tokens: None,
@@ -77,6 +83,34 @@ async fn request_rows_keep_the_sandbox_flags() {
     assert!(rows[0].sandbox);
     assert!(rows[0].sandbox_network);
     assert_eq!(rows[0].tool_calls, ["command"]);
+    assert_eq!(rows[0].first_token_ms, Some(1));
+    assert_eq!(rows[0].first_text_ms, Some(3));
+    assert_eq!(rows[0].http_status, Some(200));
+    assert_eq!(rows[0].retry_count, Some(1));
+    assert_eq!(rows[0].stream_chunk_count, Some(4));
+    assert_eq!(rows[0].max_inter_chunk_gap_ms, Some(7));
+    assert_eq!(rows[0].resolved_model.as_deref(), Some("model-revision"));
+}
+
+#[tokio::test]
+async fn telemetry_columns_are_added_to_an_existing_request_table() {
+    let mut legacy_schema = SCHEMA.to_owned();
+    for column in [
+        "    first_text_ms           INTEGER,\n",
+        "    http_status             INTEGER,\n",
+        "    retry_count             INTEGER,\n",
+        "    stream_chunk_count      INTEGER,\n",
+        "    max_inter_chunk_gap_ms  INTEGER,\n",
+        "    resolved_model          TEXT,\n",
+    ] {
+        legacy_schema = legacy_schema.replace(column, "");
+    }
+    let connection = Connection::open_in_memory().expect("open");
+    connection
+        .execute_batch(&legacy_schema)
+        .expect("legacy schema");
+    let store = SqliteStore::from_connection(connection).expect("migrate");
+    assert_eq!(store.requests(None).await.expect("requests").len(), 0);
 }
 
 #[tokio::test]
@@ -477,7 +511,13 @@ async fn seed_rows(store: &SqliteStore, key: &str, north: SessionId) {
             started_at: Utc::now(),
             duration_ms: 10,
             first_token_ms: Some(1),
+            first_text_ms: None,
             last_token_ms: Some(9),
+            http_status: None,
+            retry_count: None,
+            stream_chunk_count: None,
+            max_inter_chunk_gap_ms: None,
+            resolved_model: None,
             input_tokens: Some(10),
             output_tokens: Some(2),
             reasoning_tokens: None,

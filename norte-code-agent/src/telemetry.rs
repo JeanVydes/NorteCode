@@ -204,7 +204,14 @@ impl Layer for TelemetryLayer {
                 started,
                 started_at,
                 first_token: None,
+                first_text: None,
                 last_token: None,
+                last_chunk: None,
+                chunk_count: 0,
+                max_chunk_gap: None,
+                http_status: None,
+                retry_count: None,
+                resolved_model: None,
                 usage: None,
                 finish_reason: None,
                 tool_calls: Vec::new(),
@@ -229,6 +236,10 @@ impl Layer for TelemetryLayer {
                 record.retry_after_ms = error
                     .retry_after()
                     .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
+                if let norte::Error::Provider(provider) = &error {
+                    record.http_status = provider.status;
+                    record.retry_count = Some(provider.transport_retries);
+                }
                 self.telemetry.push(record);
                 Err(error)
             }
@@ -299,7 +310,13 @@ impl RequestMetadata {
             started_at,
             duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             first_token_ms: None,
+            first_text_ms: None,
             last_token_ms: None,
+            http_status: None,
+            retry_count: None,
+            stream_chunk_count: None,
+            max_inter_chunk_gap_ms: None,
+            resolved_model: None,
             input_tokens: None,
             output_tokens: None,
             reasoning_tokens: None,
@@ -336,7 +353,14 @@ struct TelemetryStream {
     started: Instant,
     started_at: DateTime<Utc>,
     first_token: Option<Duration>,
+    first_text: Option<Duration>,
     last_token: Option<Duration>,
+    last_chunk: Option<Duration>,
+    chunk_count: u64,
+    max_chunk_gap: Option<Duration>,
+    http_status: Option<u16>,
+    retry_count: Option<u32>,
+    resolved_model: Option<String>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
     tool_calls: Vec<String>,
@@ -371,6 +395,20 @@ impl TelemetryStream {
         record.last_token_ms = self
             .last_token
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+        record.first_text_ms = self
+            .first_text
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+        record.http_status = self.http_status;
+        record.retry_count = self.retry_count;
+        record.stream_chunk_count = Some(self.chunk_count);
+        record.max_inter_chunk_gap_ms = self
+            .max_chunk_gap
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+        record.resolved_model = self
+            .resolved_model
+            .as_ref()
+            .filter(|model| *model != &self.spec.model)
+            .cloned();
         record.tool_calls.clone_from(&self.tool_calls);
         if let Some(usage) = &self.usage {
             record.input_tokens = usage.input_tokens;
@@ -397,17 +435,45 @@ impl Stream for TelemetryStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(event))) => {
+                let elapsed = self.started.elapsed();
                 if starts_output(&event) {
-                    let elapsed = self.started.elapsed();
                     if self.first_token.is_none() {
                         self.first_token = Some(elapsed);
                     }
                     self.last_token = Some(elapsed);
                 }
+                if starts_visible_text(&event) && self.first_text.is_none() {
+                    self.first_text = Some(elapsed);
+                }
+                if is_stream_chunk(&event) {
+                    if let Some(previous) = self.last_chunk {
+                        self.max_chunk_gap = Some(
+                            self.max_chunk_gap
+                                .map_or(elapsed.saturating_sub(previous), |gap| {
+                                    gap.max(elapsed.saturating_sub(previous))
+                                }),
+                        );
+                    }
+                    self.last_chunk = Some(elapsed);
+                    self.chunk_count = self.chunk_count.saturating_add(1);
+                }
                 match &event {
                     StreamEvent::Usage(usage) => self.usage = Some(usage.clone()),
                     StreamEvent::Finish(reason) => self.finish_reason = Some(finish_label(reason)),
                     StreamEvent::ToolCallStart { name, .. } => self.tool_calls.push(name.clone()),
+                    StreamEvent::ResponseMetadata {
+                        http_status,
+                        retry_count,
+                        resolved_model,
+                    } => {
+                        self.http_status = http_status.or(self.http_status);
+                        self.retry_count = retry_count.or(self.retry_count);
+                        if let Some(model) =
+                            resolved_model.as_ref().filter(|model| !model.is_empty())
+                        {
+                            self.resolved_model = Some(model.clone());
+                        }
+                    }
                     _ => {}
                 }
                 Poll::Ready(Some(Ok(event)))
@@ -419,6 +485,10 @@ impl Stream for TelemetryStream {
                 self.retry_after_ms = error
                     .retry_after()
                     .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
+                if let norte::Error::Provider(provider) = &error {
+                    self.http_status = provider.status.or(self.http_status);
+                    self.retry_count = Some(provider.transport_retries);
+                }
                 self.finish(RequestStatus::Error);
                 Poll::Ready(Some(Err(error)))
             }
@@ -448,6 +518,30 @@ fn starts_output(event: &StreamEvent) -> bool {
             | StreamEvent::RefusalDelta { .. }
             | StreamEvent::ToolCallStart { .. }
             | StreamEvent::MediaChunk { .. }
+    )
+}
+
+fn starts_visible_text(event: &StreamEvent) -> bool {
+    matches!(
+        event,
+        StreamEvent::TextDelta { text, .. } | StreamEvent::RefusalDelta { text, .. }
+            if !text.is_empty()
+    )
+}
+
+fn is_stream_chunk(event: &StreamEvent) -> bool {
+    matches!(
+        event,
+        StreamEvent::TextDelta { text, .. }
+            | StreamEvent::ReasoningDelta { text, .. }
+            | StreamEvent::RefusalDelta { text, .. }
+            if !text.is_empty()
+    ) || matches!(
+        event,
+        StreamEvent::ToolCallDelta { arguments, .. } if !arguments.is_empty()
+    ) || matches!(
+        event,
+        StreamEvent::MediaChunk { bytes, .. } if !bytes.is_empty()
     )
 }
 

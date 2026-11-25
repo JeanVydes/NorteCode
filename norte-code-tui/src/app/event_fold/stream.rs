@@ -84,9 +84,15 @@ pub(in crate::app) fn fold_tool_event(
         );
         return;
     }
-    if let ServerEventKind::ToolOutput { call_id, text, .. } = kind {
+    if let ServerEventKind::ToolOutput {
+        call_id,
+        stream: output_stream,
+        text,
+        ..
+    } = kind
+    {
         if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-            stream.append_console_line(call_id, text.clone());
+            stream.append_console_output(call_id, text, *output_stream);
         }
         return;
     }
@@ -94,10 +100,23 @@ pub(in crate::app) fn fold_tool_event(
         call_id,
         tool,
         is_error,
+        output,
+        error,
         ..
     } = kind
     {
-        fold_tool_finished(call_id, tool, *is_error, tree, commands);
+        fold_tool_finished(
+            ToolCompletion {
+                call_id,
+                tool,
+                is_error: *is_error,
+                output: output.as_deref(),
+                error: error.as_deref(),
+            },
+            tree,
+            model,
+            commands,
+        );
         return;
     }
     if let ServerEventKind::Delta { delta, .. } = kind {
@@ -106,18 +125,33 @@ pub(in crate::app) fn fold_tool_event(
 }
 
 /// Finish a tool row and refetch the rail as soon as a plan changes.
-fn fold_tool_finished(
-    call_id: &str,
-    tool: &str,
+#[derive(Clone, Copy)]
+struct ToolCompletion<'a> {
+    call_id: &'a str,
+    tool: &'a str,
     is_error: bool,
+    output: Option<&'a str>,
+    error: Option<&'a str>,
+}
+
+fn fold_tool_finished(
+    completion: ToolCompletion<'_>,
     tree: &mut terminalui::Tree,
+    model: &mut UiModel,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
 ) {
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-        stream.finish_tool(call_id);
+        stream.finish_tool(
+            completion.call_id,
+            completion.is_error,
+            completion.output,
+            completion.error,
+        );
+        stream.start_thinking();
     }
-    if tool == "plan"
-        && !is_error
+    model.turn = TurnState::Thinking;
+    if completion.tool == "plan"
+        && !completion.is_error
         && let Some(commands) = commands.as_ref()
     {
         let _ = commands.try_send(UiCommand::RefreshRail);
@@ -135,18 +169,21 @@ fn fold_tool_started(
 ) {
     model.turn = TurnState::Streaming;
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-        let target = arguments.and_then(|value| {
-            value
-                .get("path")
-                .or_else(|| value.get("file"))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        });
         let edit =
             arguments.and_then(|value| serde_json::from_value::<EditArgs>(value.clone()).ok());
         let shell =
             arguments.and_then(|value| serde_json::from_value::<ShellArgs>(value.clone()).ok());
         let command = shell.as_ref().and_then(ShellArgs::command);
+        let target = arguments.and_then(|value| {
+            value
+                .get("path")
+                .or_else(|| value.get("file"))
+                .or_else(|| value.get("url"))
+                .or_else(|| value.get("pattern"))
+                .or_else(|| value.get("action"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
         let target = edit
             .as_ref()
             .and_then(|edit| edit.path.clone())
@@ -159,13 +196,23 @@ fn fold_tool_started(
         } else {
             None
         };
+        let diff = edit.as_ref().and_then(|edit| Diff::from_call(source, edit));
+        let meta = diff.as_ref().map(|diff| {
+            let (removed, added) = diff.counts();
+            format!("+{added} −{removed}")
+        });
         stream.push(ui::Item::Tool {
             call_id: call_id.to_owned(),
             name: tool.to_owned(),
             target,
             state: ui::ToolState::Running,
-            meta: origin.map(|origin| format!("plugin: {}", origin.plugin)),
-            diff: edit.as_ref().and_then(|edit| Diff::from_call(source, edit)),
+            expanded: false,
+            meta: origin
+                .map(|origin| format!("plugin: {}", origin.plugin))
+                .or(meta),
+            diff,
+            output: None,
+            error: None,
             console,
         });
     }
@@ -204,6 +251,7 @@ fn finish_turn(
     if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
         stream.stop_thinking();
         stream.complete_running_tools();
+        stream.finish_activity();
     }
     if let Some(commands) = commands {
         let _ = commands.try_send(UiCommand::RefreshRail);

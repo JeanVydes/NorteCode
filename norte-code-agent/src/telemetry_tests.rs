@@ -28,6 +28,12 @@ fn start_events_are_output_but_usage_is_not() {
         text: "hi".to_owned()
     }));
     assert!(!starts_output(&StreamEvent::Usage(Usage::default())));
+    let thinking = StreamEvent::ReasoningDelta {
+        index: 0,
+        text: "reasoning".to_owned(),
+    };
+    assert!(starts_output(&thinking));
+    assert!(!starts_visible_text(&thinking));
 }
 
 #[tokio::test]
@@ -86,6 +92,84 @@ impl Continuation for OneEventThenPending {
                 .chain(futures_util::stream::pending()),
         ))
     }
+}
+
+struct Events(Vec<StreamEvent>);
+
+#[async_trait::async_trait]
+impl Continuation for Events {
+    async fn call(
+        &self,
+        _context: &LayerContext,
+        _request: ModelRequest,
+    ) -> norte::Result<ModelStream> {
+        Ok(Box::pin(futures_util::stream::iter(
+            self.0.iter().cloned().map(Ok).collect::<Vec<_>>(),
+        )))
+    }
+}
+
+#[tokio::test]
+async fn records_first_output_and_first_visible_text_separately() {
+    let telemetry = Arc::new(Telemetry::default());
+    let spec = ModelSpec {
+        provider: "test".to_owned(),
+        model: "test".to_owned(),
+        endpoint: "https://example.invalid/v1".to_owned(),
+        schema: norte_code_wire::catalog::WireSchema::OpenAI,
+        auth: None,
+        api_key: norte_code_protocol::config::ApiKey::new("test"),
+        capabilities: norte::Capabilities::builder().build(),
+        headers: std::collections::BTreeMap::new(),
+        http: ProviderHttpConfig::default(),
+    };
+    let layer = TelemetryLayer::new(Arc::clone(&telemetry), spec, false, false);
+    let request = ModelRequest {
+        model: norte::ModelRef::new(
+            norte::ProviderId::new("test").expect("provider"),
+            norte::ModelId::new("test").expect("model"),
+        ),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        reasoning: ReasoningRequest::Automatic,
+        params: norte::GenerationParams::default(),
+        limits: norte::StreamLimits::default(),
+        cache_boundaries: Vec::new(),
+        extensions: std::collections::BTreeMap::new(),
+    };
+    let context = LayerContext {
+        session: norte::SessionId::new(),
+        turn: 1,
+    };
+    let events = vec![
+        StreamEvent::ReasoningDelta {
+            index: 0,
+            text: "thinking".to_owned(),
+        },
+        StreamEvent::TextDelta {
+            index: 1,
+            text: "visible".to_owned(),
+        },
+        StreamEvent::ResponseMetadata {
+            http_status: Some(200),
+            retry_count: Some(1),
+            resolved_model: Some("test-served".to_owned()),
+        },
+        StreamEvent::Finish(norte::FinishReason::Stop),
+    ];
+    let mut stream = layer
+        .wrap(&context, request, &Events(events))
+        .await
+        .expect("stream");
+    while stream.next().await.is_some() {}
+    let record = telemetry.take(context.session).pop().expect("record");
+    assert!(record.first_token_ms.is_some());
+    assert!(record.first_text_ms >= record.first_token_ms);
+    assert_eq!(record.stream_chunk_count, Some(2));
+    assert!(record.max_inter_chunk_gap_ms.is_some());
+    assert_eq!(record.http_status, Some(200));
+    assert_eq!(record.retry_count, Some(1));
+    assert_eq!(record.resolved_model.as_deref(), Some("test-served"));
 }
 
 async fn cancelled_row(

@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use ratatui::buffer::Buffer;
@@ -10,6 +11,7 @@ use serde::Serialize;
 use terminalui::components::candlechart::CandleChart;
 use terminalui::components::linechart::LineChart;
 use terminalui::components::pagination::Pagination;
+use terminalui::components::piechart::PieChart;
 use terminalui::components::presentation::{DotSize, RenderStyle, StyleTuning};
 use terminalui::components::table::{Table, TableCell, TableRow};
 use terminalui::{Node, node};
@@ -46,20 +48,26 @@ const REQUEST_PAGE: usize = 6;
 pub(crate) const MAX_RECORD_WINDOW: usize = 1_000;
 pub(crate) const CHART_SLOT: u16 = 18;
 pub(crate) const CHART_GAP: u16 = 2;
-pub(crate) const CHART_ROWS: u16 = CHART_SLOT * 3 + CHART_GAP * 2;
+pub(crate) const CHART_ROWS: u16 = CHART_SLOT * 9 + CHART_GAP * 8;
 /// Month labels plus the seven weekday rows of the usage heatmap.
 const HEATMAP_ROWS: u16 = 8;
 pub(crate) const LINE_AXIS_WIDTH: u16 = 9;
-const CHART_TITLES: [&str; 3] = [
+const CHART_TITLES: [&str; 9] = [
     "cost · cumulative usd",
-    "tokens · in + out",
+    "input · tokens",
+    "output · tokens",
     "cache · hit rate %",
+    "requests · per bucket",
+    "latency · average ms",
+    "first output · average ms",
+    "first visible text · average ms",
+    "cost mix · provider + model",
 ];
 
 /// Which view Tab currently shows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
-enum TelemetryView {
-    /// Three full-height time charts.
+pub(super) enum TelemetryView {
+    /// Time series and spend composition.
     #[default]
     Charts,
     /// The paginated session list and its detail.
@@ -130,10 +138,12 @@ pub(crate) struct TelemetryPage {
     /// Which panel the detail shows.
     pub(crate) detail_is_request: bool,
     /// Which view is on screen.
-    view: TelemetryView,
+    pub(super) view: TelemetryView,
     /// Scroll offset and rail of the tall stacked charts.
     #[serde(skip)]
     chart_scroll: ChartScroll,
+    #[serde(skip)]
+    transition: Option<terminalui::Animation>,
     #[serde(skip)]
     chart_grid: bool,
     /// Screen areas of the three chart bodies, for wheel hit-testing.
@@ -142,6 +152,12 @@ pub(crate) struct TelemetryPage {
     /// Full series behind the charts, sliced for the aligned time window.
     #[serde(skip)]
     chart_data: Series,
+    #[serde(skip)]
+    additional_charts: Vec<LineChart>,
+    #[serde(skip)]
+    provider_cost_chart: PieChart,
+    #[serde(skip)]
+    model_cost_chart: PieChart,
     /// Short time labels shared by all three x axes.
     #[serde(skip)]
     bucket_labels: Arc<Vec<String>>,
@@ -197,9 +213,19 @@ impl TelemetryPage {
             detail_is_request: false,
             view: TelemetryView::Charts,
             chart_scroll: ChartScroll::default(),
+            transition: None,
             chart_grid: false,
             chart_areas: Vec::new(),
             chart_data: Series::default(),
+            additional_charts: vec![
+                LineChart::new(),
+                LineChart::new(),
+                LineChart::new(),
+                LineChart::new(),
+                LineChart::new(),
+            ],
+            provider_cost_chart: PieChart::new(),
+            model_cost_chart: PieChart::new(),
             bucket_labels: Arc::new(Vec::new()),
             line_window: None,
             chart_page: Buffer::empty(Rect::new(0, 0, 0, CHART_ROWS)),
@@ -246,6 +272,16 @@ impl TelemetryPage {
             TelemetryView::Requests => TelemetryView::Leaderboards,
             TelemetryView::Leaderboards => TelemetryView::Charts,
         };
+        self.detail_is_request = self.view == TelemetryView::Requests;
+        self.sync_detail();
+        self.start_transition();
+    }
+
+    fn start_transition(&mut self) {
+        self.transition = Some(terminalui::Animation::new(
+            Duration::from_millis(180),
+            terminalui::Easing::EaseOutCubic,
+        ));
     }
 
     /// Replace the session summaries used by the shared detail panel.
@@ -279,7 +315,7 @@ impl TelemetryPage {
         });
         self.sessions = if let Some(report) = self.report.as_ref() {
             let mut seen = HashSet::new();
-            let mut sessions: Vec<usize> = report
+            let sessions: Vec<usize> = report
                 .records
                 .iter()
                 .enumerate()
@@ -288,11 +324,6 @@ impl TelemetryPage {
                 .filter(|(_, record)| seen.insert(record.session.as_str()))
                 .map(|(index, _)| index)
                 .collect();
-            sessions.sort_by(|left, right| {
-                report.records[*left]
-                    .session
-                    .cmp(&report.records[*right].session)
-            });
             sessions
         } else {
             Vec::new()

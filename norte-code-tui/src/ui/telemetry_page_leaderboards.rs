@@ -53,11 +53,43 @@ impl TelemetryPage {
         use crossterm::event::KeyCode;
         let consumed = match code {
             KeyCode::Char('1') => {
-                self.leaderboard.select_usage();
+                self.leaderboard
+                    .select_metric(crate::leaderboard::LeaderboardGroup::Usage);
                 true
             }
             KeyCode::Char('2') => {
-                self.leaderboard.select_cost();
+                self.leaderboard
+                    .select_metric(crate::leaderboard::LeaderboardGroup::Input);
+                true
+            }
+            KeyCode::Char('3') => {
+                self.leaderboard
+                    .select_metric(crate::leaderboard::LeaderboardGroup::Output);
+                true
+            }
+            KeyCode::Char('4') => {
+                self.leaderboard
+                    .select_metric(crate::leaderboard::LeaderboardGroup::Cost);
+                true
+            }
+            KeyCode::Char('5') => {
+                self.leaderboard
+                    .select_metric(crate::leaderboard::LeaderboardGroup::Latency);
+                true
+            }
+            KeyCode::Char('6') => {
+                self.leaderboard
+                    .select_metric(crate::leaderboard::LeaderboardGroup::FirstOutput);
+                true
+            }
+            KeyCode::Char('7') => {
+                self.leaderboard
+                    .select_metric(crate::leaderboard::LeaderboardGroup::FirstText);
+                true
+            }
+            KeyCode::Char('8') => {
+                self.leaderboard
+                    .select_metric(crate::leaderboard::LeaderboardGroup::CacheRate);
                 true
             }
             KeyCode::Up => {

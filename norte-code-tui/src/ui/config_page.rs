@@ -19,16 +19,22 @@ pub(crate) enum Setting {
     RailPosition,
     /// Whether the floating performance overlay is shown.
     Debug,
+    /// Whether tool results start expanded.
+    ShowToolOutput,
+    /// Whether reasoning and tool activity is grouped.
+    ToolVerbosity,
 }
 
 impl Setting {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Theme,
         Self::Thinking,
         Self::SendMode,
         Self::DiffMode,
         Self::RailPosition,
         Self::Debug,
+        Self::ShowToolOutput,
+        Self::ToolVerbosity,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
@@ -39,6 +45,8 @@ impl Setting {
             Self::DiffMode => "diff mode",
             Self::RailPosition => "rail",
             Self::Debug => "debug overlay",
+            Self::ShowToolOutput => "tool output expanded",
+            Self::ToolVerbosity => "tool verbosity",
         }
     }
 }
@@ -65,4 +73,8 @@ pub(crate) struct ConfigData {
     pub(crate) rail_position: String,
     /// The floating performance overlay.
     pub(crate) debug: DebugOverlayMode,
+    /// Whether tool results start expanded.
+    pub(crate) show_tool_output: bool,
+    /// Whether non-text activity is grouped.
+    pub(crate) tool_verbosity: bool,
 }

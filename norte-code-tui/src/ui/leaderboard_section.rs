@@ -42,7 +42,7 @@ impl LeaderboardSection {
                     node("h-req", TableCell::text("req").with_weight(2)),
                     node("h-turns", TableCell::text("turns").with_weight(2)),
                     node("h-tokens", TableCell::text("in/out").with_weight(3)),
-                    node("h-cost", TableCell::text("usd").with_weight(3)),
+                    node("h-value", TableCell::text("value").with_weight(3)),
                 ]),
             )),
         }
@@ -77,8 +77,8 @@ impl LeaderboardSection {
                             .with_weight(3),
                         ),
                         node(
-                            "cost",
-                            TableCell::text(format!("{:.4}", row.cost_usd)).with_weight(3),
+                            "value",
+                            TableCell::text(metric_value_label(self.group, row)).with_weight(3),
                         ),
                     ]),
                 )
@@ -106,14 +106,6 @@ impl LeaderboardSection {
     #[cfg(test)]
     pub(crate) fn area(&self) -> Rect {
         self.area
-    }
-
-    pub(crate) fn select_usage(&mut self) {
-        self.group = LeaderboardGroup::Usage;
-    }
-
-    pub(crate) fn select_cost(&mut self) {
-        self.group = LeaderboardGroup::Cost;
     }
 
     pub(crate) fn cycle_subject(&mut self, backwards: bool) {
@@ -146,8 +138,8 @@ impl LeaderboardSection {
         let row = mouse.row.saturating_sub(self.area.y);
         let column = mouse.column.saturating_sub(self.area.x);
         match row {
-            1 if (1..=5).contains(&column) => self.select_group(LeaderboardGroup::Usage),
-            1 if (10..=13).contains(&column) => self.select_group(LeaderboardGroup::Cost),
+            1 => metric_at_column(column)
+                .map_or(LeaderboardClick::None, |group| self.select_group(group)),
             2 if (1..=6).contains(&column) => self.select_subject(LeaderboardSubject::Model),
             2 if (10..=18).contains(&column) => self.select_subject(LeaderboardSubject::Provider),
             2 if (22..=29).contains(&column) => self.select_subject(LeaderboardSubject::Session),
@@ -165,7 +157,7 @@ impl LeaderboardSection {
         }
     }
 
-    fn select_group(&mut self, group: LeaderboardGroup) -> LeaderboardClick {
+    pub(crate) fn select_group(&mut self, group: LeaderboardGroup) -> LeaderboardClick {
         let changed = self.group != group;
         self.group = group;
         if changed {
@@ -173,6 +165,10 @@ impl LeaderboardSection {
         } else {
             LeaderboardClick::None
         }
+    }
+
+    pub(crate) fn select_metric(&mut self, group: LeaderboardGroup) {
+        self.group = group;
     }
 
     fn select_subject(&mut self, subject: LeaderboardSubject) -> LeaderboardClick {
@@ -189,35 +185,53 @@ impl LeaderboardSection {
         self.area = area;
         let active = Style::default()
             .fg(theme.foreground)
+            .bg(theme.secondary)
             .add_modifier(Modifier::BOLD);
         let idle = Style::default().fg(theme.muted);
         let title = format!(
-            "rankings: {} / {}",
+            "Rankings · {} by {} · {} entries",
             self.group.label(),
-            self.subject.label()
+            self.subject.label(),
+            self.board.rows.len()
         );
         buf.set_stringn(
             area.x + 1,
             area.y,
             &title,
             usize::from(area.width.saturating_sub(2)),
-            active,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         );
-        let (usage, cost) = match self.group {
-            LeaderboardGroup::Usage => (active, idle),
-            LeaderboardGroup::Cost => (idle, active),
-        };
-        buf.set_stringn(area.x + 1, area.y + 1, "usage", 5, usage);
-        buf.set_stringn(area.x + 10, area.y + 1, "cost", 4, cost);
+        let selected = self.board.rows.get(self.selected).map_or_else(
+            || "No activity to rank yet".to_owned(),
+            |row| {
+                format!(
+                    "Selected: {} · {} requests · ${:.4}",
+                    row.name, row.requests, row.cost_usd
+                )
+            },
+        );
+        buf.set_stringn(
+            area.x + 1,
+            area.y + 3,
+            terminalui::clip(&selected, usize::from(area.width.saturating_sub(2))),
+            usize::from(area.width.saturating_sub(2)),
+            idle,
+        );
+        for (column, label, group) in metric_tabs() {
+            let style = if group == self.group { active } else { idle };
+            buf.set_stringn(area.x + column, area.y + 1, label, label.len(), style);
+        }
 
         let (models, providers, sessions) = match self.subject {
             LeaderboardSubject::Model => (active, idle, idle),
             LeaderboardSubject::Provider => (idle, active, idle),
             LeaderboardSubject::Session => (idle, idle, active),
         };
-        buf.set_stringn(area.x + 1, area.y + 2, "models", 6, models);
-        buf.set_stringn(area.x + 10, area.y + 2, "providers", 9, providers);
-        buf.set_stringn(area.x + 22, area.y + 2, "sessions", 8, sessions);
+        buf.set_stringn(area.x + 1, area.y + 2, "Models", 6, models);
+        buf.set_stringn(area.x + 10, area.y + 2, "Providers", 9, providers);
+        buf.set_stringn(area.x + 22, area.y + 2, "Sessions", 8, sessions);
 
         let table_rect = Rect {
             x: area.x,
@@ -235,5 +249,39 @@ impl LeaderboardSection {
                 idle,
             );
         }
+    }
+}
+
+fn metric_tabs() -> [(u16, &'static str, LeaderboardGroup); 8] {
+    [
+        (1, "1 req", LeaderboardGroup::Usage),
+        (7, "2 in", LeaderboardGroup::Input),
+        (12, "3 out", LeaderboardGroup::Output),
+        (18, "4 cost", LeaderboardGroup::Cost),
+        (25, "5 latency", LeaderboardGroup::Latency),
+        (35, "6 first", LeaderboardGroup::FirstOutput),
+        (43, "7 text", LeaderboardGroup::FirstText),
+        (50, "8 cache", LeaderboardGroup::CacheRate),
+    ]
+}
+
+fn metric_at_column(column: u16) -> Option<LeaderboardGroup> {
+    metric_tabs().into_iter().find_map(|(start, label, group)| {
+        (column >= start && column < start + u16::try_from(label.len()).unwrap_or(u16::MAX))
+            .then_some(group)
+    })
+}
+
+fn metric_value_label(group: LeaderboardGroup, row: &crate::leaderboard::LeaderboardRow) -> String {
+    if row.metric_samples == 0 {
+        return "n/a".to_owned();
+    }
+    match group {
+        LeaderboardGroup::Cost => format!("${:.4}", row.metric_value),
+        LeaderboardGroup::Latency | LeaderboardGroup::FirstOutput | LeaderboardGroup::FirstText => {
+            format!("{:.0} ms", row.metric_value)
+        }
+        LeaderboardGroup::CacheRate => format!("{:.1}%", row.metric_value * 100.0),
+        _ => format!("{:.0}", row.metric_value),
     }
 }

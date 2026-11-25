@@ -273,13 +273,22 @@ impl NorteCodeRaepHost {
         let mut errors = 0_u64;
         let mut cancelled = 0_u64;
         let mut duration_ms = 0_u64;
+        let mut duration_samples = 0_u64;
         let mut cost_usd = 0.0_f64;
         for row in &records {
             input_tokens += row.input_tokens.unwrap_or(0);
             output_tokens += row.output_tokens.unwrap_or(0);
             cache_read_tokens += row.cache_read_tokens.unwrap_or(0);
             cache_write_tokens += row.cache_write_tokens.unwrap_or(0);
-            duration_ms += row.duration_ms;
+            if row
+                .metadata
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                != Some("history")
+            {
+                duration_ms = duration_ms.saturating_add(row.duration_ms);
+                duration_samples = duration_samples.saturating_add(1);
+            }
             cost_usd += row.cost_usd.unwrap_or(0.0);
             match row.status {
                 norte_code_protocol::sqlite::RequestStatus::Error => errors += 1,
@@ -296,6 +305,7 @@ impl NorteCodeRaepHost {
                 errors,
                 cancelled,
                 duration_ms,
+                duration_samples,
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,

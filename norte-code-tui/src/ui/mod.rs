@@ -358,11 +358,17 @@ fn update_config(tree: &mut Tree, model: &UiModel) {
                 diff_mode: model.preferences.diff_mode.label().to_string(),
                 rail_position: model.preferences.rail_position.label().to_string(),
                 debug: model.preferences.debug,
+                show_tool_output: model.preferences.show_tool_output,
+                tool_verbosity: model.preferences.tool_verbosity,
             },
         );
     }
     if let Some(stream) = tree.find_mut::<Transcript>("stream") {
         stream.set_diff_mode(model.preferences.diff_mode);
+        stream.set_tool_preferences(
+            model.preferences.show_tool_output,
+            model.preferences.tool_verbosity,
+        );
     }
     if let Some(chat) = tree.find_mut::<ChatLayout>("chat") {
         chat.set_position(model.preferences.rail_position);

@@ -6,6 +6,7 @@
 //! is appended after the newest content.
 
 use std::any::Any;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ struct ItemPaint<'a> {
     diff_mode: crate::diff::DiffMode,
     focused: bool,
     streaming: Option<Duration>,
+    thinking: Option<Duration>,
     doc: Option<&'a super::markdown::Markdown>,
     theme: &'a Theme,
 }
@@ -48,6 +50,21 @@ pub(crate) enum ToolState {
     Done,
     /// In flight right now.
     Running,
+    /// The tool ended with an error.
+    Failed,
+}
+
+/// The activity summarized by an expandable group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ActivityStatus {
+    Thinking,
+    Tool {
+        name: String,
+        context: Option<String>,
+        meta: Option<String>,
+    },
+    Complete,
 }
 
 /// How loud a notice is.
@@ -91,12 +108,29 @@ pub(crate) enum Item {
         target: Option<String>,
         /// Execution state.
         state: ToolState,
+        /// Whether the tool's detailed output is shown.
+        expanded: bool,
         /// Optional meta column, e.g. `+41 −12`.
         meta: Option<String>,
         /// The change an edit made, drawn under its header.
         diff: Option<crate::diff::Diff>,
+        /// Final text returned by the tool.
+        output: Option<String>,
+        /// Error returned by the tool.
+        error: Option<String>,
         /// A shell call's live output, under its header.
         console: Option<Box<Console>>,
+    },
+    /// A contiguous run of reasoning and tool activity.
+    Activity {
+        /// Ordered activity items.
+        entries: Vec<Item>,
+        /// Whether the group header is visible.
+        grouped: bool,
+        /// Whether the group's entries are visible.
+        expanded: bool,
+        /// The live status displayed while the group is active.
+        status: ActivityStatus,
     },
     /// A host notice, e.g. `model switched to claude-sonnet-4.5`.
     Notice {
@@ -263,6 +297,8 @@ pub(crate) struct Transcript {
     /// How edit diffs are drawn.
     #[serde(skip)]
     diff_mode: crate::diff::DiffMode,
+    #[serde(skip)]
+    tool_preferences: ToolPreferences,
     /// Rendered Markdown for message items, indexed like `items`.
     #[serde(skip)]
     docs: Vec<Option<super::markdown::Markdown>>,
@@ -272,6 +308,12 @@ pub(crate) struct Transcript {
     /// The one clipboard all copy paths write to.
     #[serde(skip)]
     clipboard: Arc<dyn crate::clipboard::Clipboard>,
+}
+
+#[derive(Default)]
+struct ToolPreferences {
+    output_expanded: bool,
+    grouped_activity: bool,
 }
 
 /// What the message menu was asked to do.
@@ -358,6 +400,7 @@ impl Transcript {
             message_actions: Vec::new(),
             toasts: Vec::new(),
             diff_mode: crate::diff::DiffMode::Unified,
+            tool_preferences: ToolPreferences::default(),
             docs: Vec::new(),
             doc_theme: None,
             follow_tail: true,
@@ -377,6 +420,44 @@ impl Transcript {
             self.diff_mode = mode;
             self.dirty = true;
         }
+    }
+
+    /// Set the default expansion and activity grouping preferences.
+    pub(crate) fn set_tool_preferences(&mut self, show_output: bool, verbosity: bool) {
+        if self.tool_preferences.output_expanded == show_output
+            && self.tool_preferences.grouped_activity == verbosity
+        {
+            return;
+        }
+        let verbosity_changed = self.tool_preferences.grouped_activity != verbosity;
+        self.tool_preferences = ToolPreferences {
+            output_expanded: show_output,
+            grouped_activity: verbosity,
+        };
+        if verbosity_changed {
+            let items = std::mem::take(&mut self.items);
+            self.items = if verbosity {
+                group_activity_items(items)
+            } else {
+                flatten_activity_items(items)
+            };
+            if verbosity && self.thinking.is_some() {
+                self.ensure_activity(ActivityStatus::Thinking);
+            }
+        }
+        for item in &mut self.items {
+            if let Item::Activity {
+                expanded, status, ..
+            } = item
+                && verbosity_changed
+            {
+                *expanded = matches!(
+                    status,
+                    ActivityStatus::Thinking | ActivityStatus::Tool { .. }
+                );
+            }
+        }
+        self.dirty = true;
     }
 
     fn reset_render_cache(&mut self) {
@@ -420,97 +501,9 @@ impl Transcript {
         self.items.clear();
         self.thinking = None;
         self.reset_render_cache();
-        let mut last_shell: Option<usize> = None;
+        let mut pending_calls = VecDeque::<String>::new();
         for item in items {
-            match item.kind {
-                norte_code_wire::HistoryItemKind::User => {
-                    let text = match provenance_label(item.provenance.as_ref()) {
-                        Some(label) if item.content.is_empty() => label,
-                        Some(label) => format!("{}\n{label}", item.content),
-                        None => item.content,
-                    };
-                    self.items.push(Item::User {
-                        text,
-                        turn: parse_turn(item.turn_id.as_deref()),
-                    });
-                }
-                norte_code_wire::HistoryItemKind::Assistant => self.items.push(Item::Assistant {
-                    text: item.content,
-                    turn: parse_turn(item.turn_id.as_deref()),
-                }),
-                norte_code_wire::HistoryItemKind::Reasoning => self.items.push(Item::Reasoning {
-                    text: item.content,
-                    expanded: false,
-                }),
-                norte_code_wire::HistoryItemKind::Refusal => self.items.push(Item::Notice {
-                    text: item.content,
-                    tone: Tone::Warn,
-                }),
-                norte_code_wire::HistoryItemKind::ToolResult => {
-                    if let Some(index) = last_shell
-                        && let Some(Item::Tool {
-                            console: Some(console),
-                            ..
-                        }) = self.items.get_mut(index)
-                    {
-                        for line in item.content.lines() {
-                            crate::console_log::push_line(console, line.to_owned(), self.retention);
-                        }
-                    }
-                }
-                norte_code_wire::HistoryItemKind::SystemEvent
-                | norte_code_wire::HistoryItemKind::Tool
-                | norte_code_wire::HistoryItemKind::ToolCall => {
-                    let call_id = item.id.clone();
-                    let mut lines = item.content.lines();
-                    let first = lines.next().unwrap_or("tool").trim();
-                    let has_brace = first.ends_with('{');
-                    let summary = first.strip_suffix('{').unwrap_or(first).trim().to_owned();
-                    let rest = lines.collect::<Vec<_>>().join("\n");
-                    let arguments = if has_brace { format!("{{{rest}") } else { rest };
-                    let edit = serde_json::from_str::<serde_json::Value>(&arguments)
-                        .ok()
-                        .and_then(|value| {
-                            serde_json::from_value::<crate::diff::EditArgs>(value).ok()
-                        });
-                    let shell = serde_json::from_str::<serde_json::Value>(&arguments)
-                        .ok()
-                        .and_then(|value| {
-                            serde_json::from_value::<crate::shell::ShellArgs>(value).ok()
-                        });
-                    let command = shell.as_ref().and_then(crate::shell::ShellArgs::command);
-                    let is_shell = matches!(summary.as_str(), "shell" | "bash");
-                    let target = edit
-                        .as_ref()
-                        .and_then(|edit| edit.path.clone())
-                        .or_else(|| command.map(str::to_owned));
-                    let diff = edit
-                        .as_ref()
-                        .and_then(|edit| crate::diff::Diff::from_call(None, edit));
-                    let console = if is_shell {
-                        command.map(|command| Box::new(Console::new(command).with_max_visible(6)))
-                    } else {
-                        None
-                    };
-                    if console.is_some() {
-                        last_shell = Some(self.items.len());
-                    }
-                    self.items.push(Item::Tool {
-                        call_id,
-                        name: if summary.len() > 40 {
-                            let clipped: String = summary.chars().take(39).collect();
-                            format!("{clipped}…")
-                        } else {
-                            summary
-                        },
-                        target,
-                        state: ToolState::Done,
-                        meta: None,
-                        diff,
-                        console,
-                    });
-                }
-            }
+            self.append_history_item(item, &mut pending_calls);
         }
         self.trim_items();
         self.dirty = true;
@@ -518,8 +511,187 @@ impl Transcript {
         self.follow_tail = true;
     }
 
+    fn append_history_item(
+        &mut self,
+        item: norte_code_wire::HistoryItem,
+        pending_calls: &mut VecDeque<String>,
+    ) {
+        match item.kind {
+            norte_code_wire::HistoryItemKind::User => {
+                let text = match provenance_label(item.provenance.as_ref()) {
+                    Some(label) if item.content.is_empty() => label,
+                    Some(label) => format!("{}\n{label}", item.content),
+                    None => item.content,
+                };
+                self.push(Item::User {
+                    text,
+                    turn: parse_turn(item.turn_id.as_deref()),
+                });
+            }
+            norte_code_wire::HistoryItemKind::Assistant => self.push(Item::Assistant {
+                text: item.content,
+                turn: parse_turn(item.turn_id.as_deref()),
+            }),
+            norte_code_wire::HistoryItemKind::Reasoning => self.push(Item::Reasoning {
+                text: item.content,
+                expanded: false,
+            }),
+            norte_code_wire::HistoryItemKind::Refusal => self.push(Item::Notice {
+                text: item.content,
+                tone: Tone::Warn,
+            }),
+            norte_code_wire::HistoryItemKind::ToolResult => {
+                if let Some(call_id) = pending_calls.pop_front() {
+                    self.set_history_tool_result(&call_id, &item.content);
+                }
+            }
+            norte_code_wire::HistoryItemKind::SystemEvent
+            | norte_code_wire::HistoryItemKind::Tool
+            | norte_code_wire::HistoryItemKind::ToolCall => {
+                let mut lines = item.content.lines();
+                let first = lines.next().unwrap_or("tool").trim();
+                let has_brace = first.ends_with('{');
+                let summary = first.strip_suffix('{').unwrap_or(first).trim().to_owned();
+                let rest = lines.collect::<Vec<_>>().join("\n");
+                let arguments = if has_brace { format!("{{{rest}") } else { rest };
+                let edit = serde_json::from_str::<serde_json::Value>(&arguments)
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<crate::diff::EditArgs>(value).ok());
+                let shell = serde_json::from_str::<serde_json::Value>(&arguments)
+                    .ok()
+                    .and_then(|value| {
+                        serde_json::from_value::<crate::shell::ShellArgs>(value).ok()
+                    });
+                let command = shell.as_ref().and_then(crate::shell::ShellArgs::command);
+                let is_shell = matches!(summary.as_str(), "shell" | "bash");
+                let target = edit
+                    .as_ref()
+                    .and_then(|edit| edit.path.clone())
+                    .or_else(|| command.map(str::to_owned));
+                let diff = edit
+                    .as_ref()
+                    .and_then(|edit| crate::diff::Diff::from_call(None, edit));
+                let console = if is_shell {
+                    command.map(|command| {
+                        Box::new(
+                            Console::new(command)
+                                .with_max_visible(6)
+                                .with_max_retained_lines(Some(self.retention.console_max_lines)),
+                        )
+                    })
+                } else {
+                    None
+                };
+                let call_id = item.id;
+                pending_calls.push_back(call_id.clone());
+                self.push(Item::Tool {
+                    call_id,
+                    name: if summary.len() > 40 {
+                        let clipped: String = summary.chars().take(39).collect();
+                        format!("{clipped}…")
+                    } else {
+                        summary
+                    },
+                    target,
+                    state: ToolState::Done,
+                    expanded: false,
+                    meta: None,
+                    diff,
+                    output: None,
+                    error: None,
+                    console,
+                });
+            }
+        }
+    }
+
+    fn set_history_tool_result(&mut self, call_id: &str, output: &str) {
+        for_each_tool_mut(&mut self.items, &mut |item| {
+            if let Item::Tool {
+                call_id: id,
+                name,
+                output: tool_output,
+                console,
+                ..
+            } = item
+                && id == call_id
+            {
+                *tool_output = (!matches!(name.as_str(), "edit" | "shell" | "bash")
+                    && !output.is_empty())
+                .then(|| output.to_owned());
+                if let Some(console) = console {
+                    for line in output.lines() {
+                        crate::console_log::push_line(
+                            console,
+                            line.to_owned(),
+                            norte_code_wire::OutputStream::Stdout,
+                            self.retention,
+                        );
+                    }
+                    console.set_exit(Some(0));
+                }
+            }
+        });
+    }
+
     /// Append an item; the view stays pinned to the bottom while following the tail.
-    pub(crate) fn push(&mut self, item: Item) {
+    pub(crate) fn push(&mut self, mut item: Item) {
+        match &mut item {
+            Item::Tool {
+                name,
+                target,
+                meta,
+                state,
+                expanded,
+                ..
+            } => {
+                *expanded = self.tool_preferences.output_expanded;
+                let running = *state == ToolState::Running;
+                if running {
+                    set_activity_status(
+                        &mut self.items,
+                        ActivityStatus::Tool {
+                            name: name.clone(),
+                            context: target.clone(),
+                            meta: meta.clone(),
+                        },
+                    );
+                    if self.tool_preferences.grouped_activity {
+                        self.thinking = Some(Duration::ZERO);
+                    }
+                }
+                if self.tool_preferences.grouped_activity {
+                    push_activity_entry(&mut self.items, item, true);
+                    self.thinking = if running { Some(Duration::ZERO) } else { None };
+                } else {
+                    self.close_activity();
+                    self.items.push(item);
+                }
+                self.dirty = true;
+                if self.follow_tail {
+                    self.first_visible = u16::MAX;
+                }
+                return;
+            }
+            Item::Reasoning { .. } => {
+                if self.tool_preferences.grouped_activity {
+                    set_activity_status(&mut self.items, ActivityStatus::Thinking);
+                    push_activity_entry(&mut self.items, item, true);
+                    self.thinking = Some(Duration::ZERO);
+                } else {
+                    self.close_activity();
+                    self.items.push(item);
+                    self.thinking = None;
+                }
+                self.dirty = true;
+                if self.follow_tail {
+                    self.first_visible = u16::MAX;
+                }
+                return;
+            }
+            Item::Activity { .. } => {}
+            _ => self.close_activity(),
+        }
         self.items.push(item);
         self.trim_items();
         self.dirty = true;
@@ -548,7 +720,10 @@ impl Transcript {
     /// Begin the thinking row.
     pub(crate) fn start_thinking(&mut self) {
         self.streaming = None;
-        if self.thinking.is_none() {
+        if self.tool_preferences.grouped_activity {
+            self.thinking = Some(Duration::from_millis(1));
+            self.ensure_activity(ActivityStatus::Thinking);
+        } else if self.thinking.is_none() {
             self.thinking = Some(Duration::from_millis(1));
         }
     }
@@ -561,62 +736,93 @@ impl Transcript {
 
     /// Flip every `Running` tool block to `Done`.
     pub(crate) fn complete_running_tools(&mut self) {
-        for item in &mut self.items {
-            if let Item::Tool {
-                state,
-                console: Some(console),
-                ..
-            } = item
-                && *state == ToolState::Running
-            {
-                *state = ToolState::Done;
-                console.set_exit(None);
-            } else if let Item::Tool { state, .. } = item
-                && *state == ToolState::Running
-            {
-                *state = ToolState::Done;
-            }
-        }
-        self.dirty = true;
-    }
-
-    /// Append a line of output to the console with the given call id.
-    pub(crate) fn append_console_line(&mut self, call_id: &str, line: String) -> bool {
-        for item in self.items.iter_mut().rev() {
-            if let Item::Tool {
-                call_id: id,
-                console: Some(console),
-                ..
-            } = item
-                && *id == call_id
-            {
-                crate::console_log::push_line(console, line, self.retention);
-                self.dirty = true;
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Flip the `Running` tool block with the given call id to `Done`.
-    pub(crate) fn finish_tool(&mut self, call_id: &str) {
-        for item in self.items.iter_mut().rev() {
-            if let Item::Tool {
-                call_id: id,
-                state,
-                console,
-                ..
-            } = item
-                && *id == call_id
+        for_each_tool_mut(&mut self.items, &mut |item| {
+            if let Item::Tool { state, console, .. } = item
                 && *state == ToolState::Running
             {
                 *state = ToolState::Done;
                 if let Some(console) = console {
                     console.set_exit(None);
                 }
-                self.dirty = true;
-                return;
             }
+        });
+        self.dirty = true;
+    }
+
+    /// Append streaming output to the console with the given call id.
+    pub(crate) fn append_console_output(
+        &mut self,
+        call_id: &str,
+        chunk: &str,
+        stream: norte_code_wire::OutputStream,
+    ) -> bool {
+        let mut appended = false;
+        for_each_tool_mut(&mut self.items, &mut |item| {
+            if let Item::Tool {
+                call_id: id,
+                console: Some(console),
+                ..
+            } = item
+                && *id == call_id
+            {
+                crate::console_log::push_chunk(console, chunk, stream, self.retention);
+                appended = true;
+            }
+        });
+        if appended {
+            self.dirty = true;
+        }
+        appended
+    }
+
+    /// Flip the `Running` tool block with the given call id to `Done`.
+    pub(crate) fn finish_tool(
+        &mut self,
+        call_id: &str,
+        is_error: bool,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) {
+        let mut finished = false;
+        for_each_tool_mut(&mut self.items, &mut |item| {
+            if let Item::Tool {
+                call_id: id,
+                state,
+                console,
+                output: tool_output,
+                error: tool_error,
+                name,
+                ..
+            } = item
+                && *id == call_id
+                && *state == ToolState::Running
+            {
+                *state = if is_error {
+                    ToolState::Failed
+                } else {
+                    ToolState::Done
+                };
+                if let Some(console) = console {
+                    console.set_exit(if is_error { Some(1) } else { Some(0) });
+                }
+                let output = output.filter(|text| !text.is_empty());
+                let duplicate_console_output = matches!(name.as_str(), "shell" | "bash")
+                    && console.as_ref().is_some_and(|console| {
+                        console.lines().join("\n").trim() == output.unwrap_or_default().trim()
+                    });
+                *tool_output = if matches!(name.as_str(), "edit") || duplicate_console_output {
+                    None
+                } else {
+                    output.map(str::to_owned)
+                };
+                *tool_error = error.filter(|text| !text.is_empty()).map(str::to_owned);
+                finished = true;
+            }
+        });
+        if finished {
+            set_activity_status(&mut self.items, ActivityStatus::Thinking);
+            self.thinking = Some(Duration::ZERO);
+            self.dirty = true;
         }
     }
 
@@ -626,6 +832,7 @@ impl Transcript {
         text: &str,
         turn: Option<&crate::ui_model::ActiveTurn>,
     ) {
+        self.close_activity();
         if self.streaming.is_none() {
             self.streaming = Some(Duration::ZERO);
         }
@@ -647,7 +854,12 @@ impl Transcript {
     /// a new one instead of being appended to a distant block from earlier
     /// in the turn.
     pub(crate) fn push_reasoning_text(&mut self, text: &str) {
-        if let Some(Item::Reasoning { text: existing, .. }) = self.items.last_mut() {
+        let current = if self.tool_preferences.grouped_activity {
+            last_activity_entries_mut(&mut self.items).and_then(|entries| entries.last_mut())
+        } else {
+            self.items.last_mut()
+        };
+        if let Some(Item::Reasoning { text: existing, .. }) = current {
             existing.push_str(text);
             self.dirty = true;
             return;
@@ -656,6 +868,53 @@ impl Transcript {
             text: text.to_string(),
             expanded: false,
         });
+    }
+
+    fn ensure_activity(&mut self, status: ActivityStatus) {
+        if let Some(Item::Activity {
+            status: current,
+            expanded,
+            ..
+        }) = self.items.last_mut()
+        {
+            *current = status;
+            *expanded = true;
+            self.dirty = true;
+            return;
+        }
+        self.items.push(Item::Activity {
+            entries: Vec::new(),
+            grouped: self.tool_preferences.grouped_activity,
+            expanded: true,
+            status,
+        });
+        self.dirty = true;
+    }
+
+    fn close_activity(&mut self) {
+        if let Some(Item::Activity {
+            entries,
+            grouped,
+            expanded,
+            status,
+        }) = self.items.last_mut()
+        {
+            if entries.is_empty() {
+                self.items.pop();
+            } else {
+                *status = ActivityStatus::Complete;
+                if *grouped {
+                    *expanded = false;
+                }
+            }
+            self.dirty = true;
+        }
+        self.thinking = None;
+    }
+
+    /// Finish the current activity block at the end of a turn.
+    pub(crate) fn finish_activity(&mut self) {
+        self.close_activity();
     }
 
     fn item_height(
@@ -683,13 +942,51 @@ impl Transcript {
                     1 + BLOCK_GAP
                 }
             }
-            Item::Tool { diff, console, .. } => {
+            Item::Tool {
+                diff,
+                output,
+                error,
+                expanded,
+                console,
+                ..
+            } => {
                 let console_width = u16::try_from(width.saturating_sub(2)).unwrap_or(u16::MAX);
-                let extra = diff.as_ref().map_or(0, |diff| diff.rows(diff_mode) + 2)
+                let body = if *expanded {
+                    diff.as_ref().map_or_else(
+                        || {
+                            output.as_deref().or(error.as_deref()).map_or(0, |text| {
+                                wrap(text, width.saturating_sub(4).max(1)).len() + 1
+                            })
+                        },
+                        |diff| diff.rows(diff_mode) + 2,
+                    )
+                } else {
+                    0
+                };
+                let extra = body
                     + console.as_ref().map_or(0, |console| {
                         usize::from(console.wrapped_height(console_width)) + 1
                     });
                 u16::try_from(extra + 2).unwrap_or(u16::MAX)
+            }
+            Item::Activity {
+                entries,
+                grouped,
+                expanded,
+                ..
+            } => {
+                let children = if *grouped && !*expanded {
+                    0
+                } else {
+                    entries.iter().fold(0_u16, |height, entry| {
+                        height.saturating_add(Self::item_height(entry, width, diff_mode, None))
+                    })
+                };
+                if *grouped {
+                    children.saturating_add(2)
+                } else {
+                    children
+                }
             }
         }
     }
@@ -756,8 +1053,12 @@ impl Transcript {
         for (index, height) in self.heights.iter().enumerate() {
             let end = top.saturating_add(*height);
             if row >= top && row < end {
-                if let Some(Item::Reasoning { expanded, .. }) = self.items.get_mut(index) {
-                    *expanded = !*expanded;
+                if toggle_reasoning_in_item(
+                    &mut self.items[index],
+                    row - top,
+                    usize::from(self.heights_width.max(1)),
+                    self.diff_mode,
+                ) {
                     self.dirty = true;
                     return true;
                 }
@@ -776,12 +1077,36 @@ impl Transcript {
         for (index, height) in self.heights.iter().enumerate() {
             let end = top.saturating_add(*height);
             if row >= top && row < end {
-                if let Some(Item::Tool {
-                    console: Some(console),
-                    ..
-                }) = self.items.get_mut(index)
-                {
-                    console.toggle_expanded();
+                if toggle_console_in_item(
+                    &mut self.items[index],
+                    row - top,
+                    usize::from(self.heights_width.max(1)),
+                    self.diff_mode,
+                ) {
+                    self.dirty = true;
+                    return true;
+                }
+                return false;
+            }
+            top = end;
+        }
+        false
+    }
+
+    /// Flip the details of a tool call at its header row.
+    pub(crate) fn toggle_tool_at(&mut self, row: u16) -> bool {
+        let theme = self.doc_theme.unwrap_or_default();
+        self.compute_heights(self.heights_width.max(1), theme);
+        let mut top = 0_u16;
+        for (index, height) in self.heights.iter().enumerate() {
+            let end = top.saturating_add(*height);
+            if row >= top && row < end {
+                if toggle_tool_in_item(
+                    &mut self.items[index],
+                    row - top,
+                    usize::from(self.heights_width.max(1)),
+                    self.diff_mode,
+                ) {
                     self.dirty = true;
                     return true;
                 }
@@ -798,16 +1123,17 @@ impl Transcript {
         rect: Rect,
         buf: &mut Buffer,
         cx: &mut Context,
-        clip: u16,
-        diff_mode: crate::diff::DiffMode,
-        theme: &Theme,
+        paint: &ItemPaint<'_>,
     ) {
         let Item::Tool {
             name,
             target,
             state,
+            expanded,
             meta,
             diff,
+            output,
+            error,
             console,
             ..
         } = item
@@ -819,48 +1145,118 @@ impl Transcript {
             rect,
             ToolRow {
                 name,
-                target: target.as_deref(),
+                target: if *expanded && matches!(name.as_str(), "shell" | "bash") {
+                    None
+                } else {
+                    target.as_deref()
+                },
                 state: *state,
-                meta: meta.as_deref(),
+                meta: if *expanded { None } else { meta.as_deref() },
+                expanded: *expanded,
+                frame: paint.thinking.map_or(0, |elapsed| {
+                    usize::try_from(elapsed.as_millis() / 80).unwrap_or(0)
+                }),
             },
-            clip,
-            theme,
+            paint.clip,
+            paint.theme,
         );
-        if let Some(diff) = diff {
+        let mut body_rows = 0_u16;
+        if *expanded && let Some(diff) = diff {
+            body_rows = u16::try_from(diff.rows(paint.diff_mode) + 2).unwrap_or(u16::MAX);
             let box_rect = Rect {
                 y: rect.y + 1,
-                height: rect.height.saturating_sub(1),
+                height: body_rows.min(rect.height.saturating_sub(1)),
                 ..rect
             };
             paint_diff(
                 buf,
                 box_rect,
                 diff,
-                diff_mode,
+                paint.diff_mode,
                 target.as_deref().unwrap_or("edit"),
-                clip,
-                theme,
+                paint.clip,
+                paint.theme,
+            );
+        } else if *expanded && let Some(text) = error.as_deref().or(output.as_deref()) {
+            body_rows = paint_tool_output(
+                buf,
+                Rect {
+                    x: rect.x.saturating_add(2),
+                    y: rect.y.saturating_add(1),
+                    width: rect.width.saturating_sub(4),
+                    height: rect.height.saturating_sub(1),
+                },
+                text,
+                error.is_some(),
+                paint.clip,
+                paint.theme,
             );
         }
         if let Some(console) = console {
             let console_width = rect.width.saturating_sub(4);
             let rows = console.wrapped_height(console_width);
-            let taken = u16::try_from(diff.as_ref().map_or(0, |diff| diff.rows(diff_mode) + 2))
-                .unwrap_or(0);
-            let y = rect.y.saturating_add(1).saturating_add(taken);
-            if y < clip {
+            let y = rect.y.saturating_add(1).saturating_add(body_rows);
+            if y < paint.clip {
                 console.render(
                     Rect {
                         x: rect.x.saturating_add(1),
                         y,
                         width: rect.width.saturating_sub(2),
-                        height: rows.min(clip.saturating_sub(y)),
+                        height: rows.min(paint.clip.saturating_sub(y)),
                     },
                     buf,
                     cx,
-                    theme,
+                    paint.theme,
                 );
             }
+        }
+    }
+
+    fn paint_activity_item(
+        item: &mut Item,
+        rect: Rect,
+        buf: &mut Buffer,
+        cx: &mut Context,
+        paint: &ItemPaint<'_>,
+    ) {
+        let Item::Activity {
+            entries,
+            grouped,
+            expanded,
+            status,
+        } = item
+        else {
+            return;
+        };
+        let mut y = rect.y;
+        if *grouped {
+            paint_activity_header(
+                buf,
+                Rect { height: 1, ..rect },
+                status,
+                entries,
+                *expanded,
+                paint,
+            );
+            if !*expanded {
+                return;
+            }
+            y = y.saturating_add(1);
+        }
+        for entry in entries {
+            let height = Self::item_height(entry, usize::from(rect.width), paint.diff_mode, None);
+            Self::paint_item(
+                entry,
+                Rect { y, height, ..rect },
+                buf,
+                cx,
+                &ItemPaint {
+                    focused: false,
+                    doc: None,
+                    ..*paint
+                },
+            );
+            y = y.saturating_add(height);
         }
     }
 
@@ -886,7 +1282,10 @@ impl Transcript {
                 paint_assistant(buf, rect, paint.doc, paint.clip, paint.streaming, theme);
             }
             Item::Tool { .. } => {
-                Self::paint_tool_item(item, rect, buf, cx, paint.clip, paint.diff_mode, theme);
+                Self::paint_tool_item(item, rect, buf, cx, paint);
+            }
+            Item::Activity { .. } => {
+                Self::paint_activity_item(item, rect, buf, cx, paint);
             }
             Item::Notice { text, tone } | Item::Retry { text, tone } => {
                 paint_notice(buf, rect, text, *tone, paint.clip, theme);
@@ -1182,8 +1581,12 @@ impl Transcript {
                     .row
                     .saturating_sub(self.origin_y)
                     .saturating_add(self.first_visible);
-                let _ = self.toggle_reasoning_at(row);
-                let _ = self.toggle_console_at(row);
+                if self.toggle_tool_at(row)
+                    || self.toggle_reasoning_at(row)
+                    || self.toggle_console_at(row)
+                {
+                    return Outcome::Consumed;
+                }
                 self.start_selection(true, pos)
             }
             MouseEventKind::Up(MouseButton::Left | MouseButton::Right) if self.dragging_thumb => {
@@ -1431,6 +1834,7 @@ impl Transcript {
                 diff_mode: self.diff_mode,
                 focused: self.focused_item == Some(index),
                 streaming: (index + 1 == item_count).then_some(streaming).flatten(),
+                thinking: self.thinking,
                 doc: docs.get(index).and_then(Option::as_ref),
                 theme,
             };
@@ -1485,6 +1889,257 @@ impl Transcript {
     }
 }
 
+fn push_activity_entry(items: &mut Vec<Item>, entry: Item, grouped: bool) {
+    if let Some(Item::Activity {
+        entries,
+        expanded,
+        status,
+        ..
+    }) = items.last_mut()
+    {
+        entries.push(entry);
+        *expanded = true;
+        if let Some(last) = entries.last() {
+            *status = entry_activity_status(last);
+        }
+    } else {
+        let status = match &entry {
+            Item::Tool {
+                name,
+                target,
+                meta,
+                state: ToolState::Running,
+                ..
+            } => ActivityStatus::Tool {
+                name: name.clone(),
+                context: target.clone(),
+                meta: meta.clone(),
+            },
+            _ => ActivityStatus::Thinking,
+        };
+        items.push(Item::Activity {
+            entries: vec![entry],
+            grouped,
+            expanded: true,
+            status,
+        });
+    }
+}
+
+fn entry_activity_status(entry: &Item) -> ActivityStatus {
+    match entry {
+        Item::Tool {
+            name,
+            target,
+            meta,
+            state: ToolState::Running,
+            ..
+        } => ActivityStatus::Tool {
+            name: name.clone(),
+            context: target.clone(),
+            meta: meta.clone(),
+        },
+        _ => ActivityStatus::Thinking,
+    }
+}
+
+fn group_activity_items(items: Vec<Item>) -> Vec<Item> {
+    let mut grouped = Vec::new();
+    for item in items {
+        if matches!(item, Item::Tool { .. } | Item::Reasoning { .. }) {
+            push_activity_entry(&mut grouped, item, true);
+        } else {
+            complete_activity(&mut grouped);
+            grouped.push(item);
+        }
+    }
+    complete_activity(&mut grouped);
+    grouped
+}
+
+fn flatten_activity_items(items: Vec<Item>) -> Vec<Item> {
+    let mut flattened = Vec::new();
+    for item in items {
+        if let Item::Activity { entries, .. } = item {
+            flattened.extend(entries);
+        } else {
+            flattened.push(item);
+        }
+    }
+    flattened
+}
+
+fn complete_activity(items: &mut [Item]) {
+    if let Some(Item::Activity {
+        status, expanded, ..
+    }) = items.last_mut()
+        && !matches!(status, ActivityStatus::Tool { .. })
+    {
+        *status = ActivityStatus::Complete;
+        *expanded = false;
+    }
+}
+
+fn last_activity_entries_mut(items: &mut [Item]) -> Option<&mut Vec<Item>> {
+    match items.last_mut()? {
+        Item::Activity { entries, .. } => Some(entries),
+        _ => None,
+    }
+}
+
+fn for_each_tool_mut(items: &mut [Item], action: &mut impl FnMut(&mut Item)) {
+    for item in items {
+        match item {
+            Item::Activity { entries, .. } => for_each_tool_mut(entries, action),
+            Item::Tool { .. } => action(item),
+            _ => {}
+        }
+    }
+}
+
+fn set_activity_status(items: &mut [Item], status: ActivityStatus) {
+    if let Some(Item::Activity {
+        status: current,
+        expanded,
+        ..
+    }) = items.last_mut()
+    {
+        *current = status;
+        *expanded = true;
+    }
+}
+
+fn toggle_tool_in_item(
+    item: &mut Item,
+    row: u16,
+    width: usize,
+    diff_mode: crate::diff::DiffMode,
+) -> bool {
+    match item {
+        Item::Activity {
+            entries,
+            grouped,
+            expanded,
+            ..
+        } => {
+            if *grouped {
+                if row == 0 {
+                    *expanded = !*expanded;
+                    return true;
+                }
+                if !*expanded {
+                    return false;
+                }
+            }
+            let mut offset = row.saturating_sub(u16::from(*grouped));
+            for entry in entries {
+                let height = Transcript::item_height(entry, width, diff_mode, None);
+                if offset < height {
+                    return toggle_tool_in_item(entry, offset, width, diff_mode);
+                }
+                offset = offset.saturating_sub(height);
+            }
+            false
+        }
+        Item::Tool { expanded, .. } if row == 0 => {
+            *expanded = !*expanded;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn toggle_reasoning_in_item(
+    item: &mut Item,
+    row: u16,
+    width: usize,
+    diff_mode: crate::diff::DiffMode,
+) -> bool {
+    match item {
+        Item::Activity {
+            entries,
+            grouped,
+            expanded,
+            ..
+        } => {
+            if *grouped && (row == 0 || !*expanded) {
+                return false;
+            }
+            let mut offset = row.saturating_sub(u16::from(*grouped));
+            for entry in entries {
+                let height = Transcript::item_height(entry, width, diff_mode, None);
+                if offset < height {
+                    return toggle_reasoning_in_item(entry, offset, width, diff_mode);
+                }
+                offset = offset.saturating_sub(height);
+            }
+            false
+        }
+        Item::Reasoning { expanded, .. } if row == 0 => {
+            *expanded = !*expanded;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn toggle_console_in_item(
+    item: &mut Item,
+    row: u16,
+    width: usize,
+    diff_mode: crate::diff::DiffMode,
+) -> bool {
+    match item {
+        Item::Activity {
+            entries,
+            grouped,
+            expanded,
+            ..
+        } => {
+            if *grouped && (row == 0 || !*expanded) {
+                return false;
+            }
+            let mut offset = row.saturating_sub(u16::from(*grouped));
+            for entry in entries {
+                let height = Transcript::item_height(entry, width, diff_mode, None);
+                if offset < height {
+                    return toggle_console_in_item(entry, offset, width, diff_mode);
+                }
+                offset = offset.saturating_sub(height);
+            }
+            false
+        }
+        Item::Tool {
+            diff,
+            output,
+            error,
+            expanded,
+            console: Some(console),
+            ..
+        } => {
+            let body = if *expanded {
+                diff.as_ref().map_or_else(
+                    || {
+                        output.as_deref().or(error.as_deref()).map_or(0, |text| {
+                            wrap(text, width.saturating_sub(4).max(1)).len() + 1
+                        })
+                    },
+                    |diff| diff.rows(diff_mode) + 2,
+                )
+            } else {
+                0
+            };
+            if usize::from(row) >= body.saturating_add(1) {
+                console.toggle_expanded();
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 fn rendered_text(document: &super::markdown::Markdown) -> String {
     let mut lines: Vec<String> = document
         .lines
@@ -1532,7 +2187,7 @@ impl View for Transcript {
         if let Some(streaming) = self.streaming {
             self.streaming = Some(streaming.saturating_add(delta));
         }
-        for item in &mut self.items {
+        for_each_tool_mut(&mut self.items, &mut |item| {
             if let Item::Tool {
                 console: Some(console),
                 ..
@@ -1540,7 +2195,7 @@ impl View for Transcript {
             {
                 console.tick(delta, cx);
             }
-        }
+        });
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
@@ -1560,7 +2215,9 @@ impl View for Transcript {
         self.paint_items(area, content, buf, cx, &docs, theme);
         self.docs = docs;
 
-        if self.first_visible >= self.max_offset()
+        if !self.tool_preferences.grouped_activity
+            && !has_running_tool(&self.items)
+            && self.first_visible >= self.max_offset()
             && let Some(thinking) = self.thinking
         {
             paint_thinking(buf, content, thinking, theme);
@@ -1752,6 +2409,8 @@ struct ToolRow<'a> {
     target: Option<&'a str>,
     state: ToolState,
     meta: Option<&'a str>,
+    expanded: bool,
+    frame: usize,
 }
 
 fn paint_tool(buf: &mut Buffer, area: Rect, row: ToolRow<'_>, clip: u16, theme: &Theme) {
@@ -1764,10 +2423,13 @@ fn paint_tool(buf: &mut Buffer, area: Rect, row: ToolRow<'_>, clip: u16, theme: 
         target,
         state,
         meta,
+        expanded,
+        frame,
     } = row;
     let (mark, mark_color) = match state {
         ToolState::Done => ("✓", theme.success),
-        ToolState::Running => ("◌", theme.accent),
+        ToolState::Running => (SPINNER_FRAMES[frame % SPINNER_FRAMES.len()], theme.accent),
+        ToolState::Failed => ("!", theme.destructive),
     };
     buf.set_stringn(area.x, y, mark, 1, Style::default().fg(mark_color));
     buf.set_stringn(
@@ -1779,26 +2441,188 @@ fn paint_tool(buf: &mut Buffer, area: Rect, row: ToolRow<'_>, clip: u16, theme: 
             .fg(theme.foreground)
             .add_modifier(Modifier::BOLD),
     );
-    let mut col = area.x + 2 + u16::try_from(name.chars().count()).unwrap_or(u16::MAX) + 2;
+    let col = area.x + 2 + u16::try_from(name.chars().count()).unwrap_or(u16::MAX) + 2;
+    let marker = if expanded { "[-]" } else { "[+]" };
+    let marker_width = 4_u16;
+    let right = area
+        .x
+        .saturating_add(area.width.saturating_sub(marker_width));
+    let meta_width = meta.map_or(0, |value| {
+        u16::try_from(value.chars().count())
+            .unwrap_or(u16::MAX)
+            .saturating_add(1)
+    });
+    let target_width = right.saturating_sub(col).saturating_sub(meta_width);
     if let Some(target) = target {
+        let clipped = clip_cells(target, usize::from(target_width));
         buf.set_stringn(
             col,
             y,
-            target,
-            target.chars().count(),
+            &clipped,
+            usize::from(target_width),
             Style::default().fg(theme.muted),
         );
-        col += u16::try_from(target.chars().count()).unwrap_or(u16::MAX) + 2;
     }
     if let Some(meta) = meta {
+        let meta_x = right.saturating_sub(u16::try_from(meta.chars().count()).unwrap_or(u16::MAX));
         buf.set_stringn(
-            col,
+            meta_x,
             y,
             meta,
-            meta.chars().count(),
+            usize::from(right.saturating_sub(meta_x)),
             Style::default().fg(theme.success),
         );
     }
+    buf.set_stringn(
+        right,
+        y,
+        marker,
+        usize::from(marker_width),
+        Style::default().fg(theme.accent),
+    );
+}
+
+fn paint_activity_header(
+    buf: &mut Buffer,
+    area: Rect,
+    status: &ActivityStatus,
+    entries: &[Item],
+    expanded: bool,
+    paint: &ItemPaint<'_>,
+) {
+    if area.y >= paint.clip || area.width == 0 {
+        return;
+    }
+    let (label, color, running) = match status {
+        ActivityStatus::Thinking => ("thinking".to_owned(), paint.theme.accent, true),
+        ActivityStatus::Tool {
+            name,
+            context,
+            meta,
+        } => {
+            let mut label = context
+                .as_ref()
+                .map_or_else(|| name.clone(), |context| format!("{name} · {context}"));
+            if let Some(meta) = meta {
+                label.push_str(" · ");
+                label.push_str(meta);
+            }
+            (label, paint.theme.accent, true)
+        }
+        ActivityStatus::Complete => {
+            let count = count_tools(entries);
+            let label = if count == 0 {
+                "reasoning".to_owned()
+            } else if count == 1 {
+                "1 tool call".to_owned()
+            } else {
+                format!("{count} tool calls")
+            };
+            (label, paint.theme.muted, false)
+        }
+    };
+    let marker = if expanded { "[-]" } else { "[+]" };
+    let mut column = area.x;
+    if running {
+        let elapsed = paint.thinking.unwrap_or_default();
+        let frame = SPINNER_FRAMES
+            [usize::try_from(elapsed.as_millis() / 80).unwrap_or(0) % SPINNER_FRAMES.len()];
+        buf.set_stringn(column, area.y, frame, 1, Style::default().fg(color));
+        column = column.saturating_add(2);
+    }
+    let marker_width = 4_u16;
+    let label_width = area
+        .width
+        .saturating_sub(column.saturating_sub(area.x))
+        .saturating_sub(marker_width)
+        .saturating_sub(1);
+    let clipped = clip_cells(&label, usize::from(label_width));
+    buf.set_stringn(
+        column,
+        area.y,
+        &clipped,
+        usize::from(label_width),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    );
+    buf.set_stringn(
+        area.x
+            .saturating_add(area.width.saturating_sub(marker_width)),
+        area.y,
+        marker,
+        usize::from(marker_width),
+        Style::default().fg(paint.theme.accent),
+    );
+}
+
+fn count_tools(items: &[Item]) -> usize {
+    items
+        .iter()
+        .map(|item| match item {
+            Item::Tool { .. } => 1,
+            Item::Activity { entries, .. } => count_tools(entries),
+            _ => 0,
+        })
+        .sum()
+}
+
+fn has_running_tool(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Tool { state, .. } => *state == ToolState::Running,
+        Item::Activity { entries, .. } => has_running_tool(entries),
+        _ => false,
+    })
+}
+
+fn paint_tool_output(
+    buf: &mut Buffer,
+    area: Rect,
+    text: &str,
+    is_error: bool,
+    clip: u16,
+    theme: &Theme,
+) -> u16 {
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+    let lines = wrap(text, usize::from(area.width));
+    let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let style = Style::default().fg(if is_error {
+        theme.destructive
+    } else {
+        theme.foreground
+    });
+    for (index, line) in lines.iter().enumerate() {
+        let y = area
+            .y
+            .saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+        if y >= clip || y >= area.y.saturating_add(area.height) {
+            break;
+        }
+        buf.set_stringn(area.x, y, line, usize::from(area.width), style);
+    }
+    rows
+}
+
+fn clip_cells(text: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut clipped = String::new();
+    let target = width.saturating_sub(1);
+    let mut cells = 0usize;
+    for character in text.chars() {
+        let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if cells.saturating_add(character_width) > target {
+            break;
+        }
+        clipped.push(character);
+        cells += character_width;
+    }
+    clipped.push('…');
+    clipped
 }
 
 fn paint_diff(

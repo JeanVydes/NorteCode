@@ -3,36 +3,37 @@
 use norte_code_client::config::RetentionConfig;
 use terminalui::components::console::Console;
 
-const VISIBLE_ROWS: usize = 6;
-
 /// Append a line, dropping the oldest output when a command floods the stream.
 pub(crate) fn push_line(
     console: &mut Console,
     line: impl Into<String>,
+    stream: norte_code_wire::OutputStream,
     retention: RetentionConfig,
 ) {
-    console.push_line(line);
-    if console.lines().len() < retention.console_max_lines {
-        return;
+    match stream {
+        norte_code_wire::OutputStream::Stderr => console.push_error_line(line),
+        norte_code_wire::OutputStream::Stdout | norte_code_wire::OutputStream::Other => {
+            console.push_line(line);
+        }
     }
+    trim_output(console, retention);
+}
 
-    let skip = console.lines().len() - retention.console_keep_lines;
-    let kept = console.lines()[skip..].to_vec();
-    let command = console.command.clone();
-    let status = console.status;
-    let state = console.state.clone();
-    let style = console.style.clone();
-    let expanded = console.is_expanded();
+/// Append a streaming chunk without splitting lines at event boundaries.
+pub(crate) fn push_chunk(
+    console: &mut Console,
+    chunk: &str,
+    stream: norte_code_wire::OutputStream,
+    retention: RetentionConfig,
+) {
+    console.push_chunk(chunk, stream == norte_code_wire::OutputStream::Stderr);
+    trim_output(console, retention);
+}
 
-    *console = Console::new(command)
-        .set_lines(kept)
-        .with_max_visible(VISIBLE_ROWS)
-        .with_expanded(expanded)
-        .with_style(style);
-    console.status = status;
-    console.state.frame = state.frame;
-    console.state.elapsed = state.elapsed;
-    console.state.offset = state.offset.saturating_sub(skip);
+fn trim_output(console: &mut Console, retention: RetentionConfig) {
+    if console.lines().len() >= retention.console_max_lines {
+        console.retain_last_lines(retention.console_keep_lines.max(1));
+    }
 }
 
 #[cfg(test)]

@@ -94,6 +94,8 @@ impl SettingsPage {
                 diff_mode: String::new(),
                 rail_position: String::new(),
                 debug: DebugOverlayMode::Off,
+                show_tool_output: false,
+                tool_verbosity: false,
             },
             plugin_selected: 0,
             pref_selected: 0,
@@ -604,6 +606,8 @@ impl SettingsPage {
             self.prefs.diff_mode.as_str(),
             self.prefs.rail_position.as_str(),
             self.prefs.debug.label(),
+            tool_output_label(self.prefs.show_tool_output),
+            tool_verbosity_label(self.prefs.tool_verbosity),
         ];
         let value_width = width.saturating_sub(layout.label_width().saturating_add(2));
         for (index, setting) in Setting::ALL.iter().enumerate() {
@@ -755,6 +759,18 @@ impl SettingsPage {
             _ => Outcome::Ignored,
         }
     }
+}
+
+fn tool_output_label(expanded: bool) -> &'static str {
+    if expanded {
+        "expanded by default"
+    } else {
+        "collapsed by default"
+    }
+}
+
+fn tool_verbosity_label(grouped: bool) -> &'static str {
+    if grouped { "grouped" } else { "standard" }
 }
 
 impl View for SettingsPage {

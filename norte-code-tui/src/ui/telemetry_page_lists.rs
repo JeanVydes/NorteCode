@@ -168,36 +168,7 @@ impl TelemetryPage {
             let index = self.request_page() * REQUEST_PAGE + selected;
             self.selected_record(index).map_or_else(
                 || vec![Field::new("no request", "select a row")],
-                |record| {
-                    vec![
-                        Field::new("id", terminalui::clip(&record.id, 34)),
-                        Field::new("model", terminalui::clip(&record.model, 34)),
-                        Field::new("provider", terminalui::clip(&record.provider, 34)),
-                        Field::new("status", status_label(record.status)),
-                        Field::new("started", record.started_at.clone()),
-                        Field::new("duration", format!("{} ms", record.duration_ms)),
-                        Field::new(
-                            "tokens",
-                            format!(
-                                "{} in / {} out",
-                                record.input_tokens.unwrap_or(0),
-                                record.output_tokens.unwrap_or(0)
-                            ),
-                        ),
-                        Field::new(
-                            "cache",
-                            format!("{} read", record.cache_read_tokens.unwrap_or(0)),
-                        ),
-                        Field::new(
-                            "cost",
-                            record.cost_usd.map_or_else(
-                                || "not reported".to_owned(),
-                                |cost| format!("${cost:.4}"),
-                            ),
-                        ),
-                        Field::new("tools", record.tool_calls.len().to_string()),
-                    ]
-                },
+                request_fields,
             )
         } else {
             let id = self.selected_id().unwrap_or("");
@@ -284,7 +255,18 @@ impl TelemetryPage {
 
     pub(super) fn caption(&self) -> String {
         let summary = self.report.as_ref().map(|report| &report.summary);
-        let mut caption = format!("telemetry · {} buckets", self.interval.label());
+        let page = match self.view {
+            TelemetryView::Charts => format!("Usage · {}", self.interval.label()),
+            TelemetryView::Sessions => "Sessions · choose a session".to_owned(),
+            TelemetryView::Requests => self.selected_id().map_or_else(
+                || "Requests · select a session".to_owned(),
+                |id| format!("Requests · session {}", short_session_id(id)),
+            ),
+            TelemetryView::Leaderboards => {
+                "Rankings · choose a metric and model, provider, or session".to_owned()
+            }
+        };
+        let mut caption = page;
         if self.view == TelemetryView::Charts {
             let size = match self.chart_tuning.dotsize {
                 terminalui::components::presentation::DotSize::Medium => "medium",
@@ -303,8 +285,8 @@ impl TelemetryPage {
         if let Some(summary) = summary {
             let _ = write!(
                 caption,
-                " · {} req · {} in / {} out · ${:.4}",
-                summary.requests, summary.input_tokens, summary.output_tokens, summary.cost_usd
+                " · {} requests · ${:.4} · {} timed",
+                summary.requests, summary.cost_usd, summary.duration_samples
             );
         }
         caption
@@ -332,10 +314,28 @@ impl TelemetryPage {
                         Style::default().bg(theme.secondary),
                     );
                 }
+                let title = self
+                    .session_data
+                    .iter()
+                    .find(|session| session.session_id == id)
+                    .and_then(|session| session.title.as_deref())
+                    .filter(|title| !title.trim().is_empty())
+                    .map_or_else(
+                        || format!("Session {}", short_session_id(id)),
+                        str::to_owned,
+                    );
+                let request_count = self.report.as_ref().map_or(0, |report| {
+                    report
+                        .records
+                        .iter()
+                        .filter(|record| record.session == id)
+                        .count()
+                });
+                let label = format!("{title}  ·  {request_count} requests");
                 buf.set_stringn(
                     area.x + 1,
                     y,
-                    terminalui::clip(id, usize::from(area.width.saturating_sub(2))),
+                    terminalui::clip(&label, usize::from(area.width.saturating_sub(2))),
                     usize::from(area.width.saturating_sub(2)),
                     Style::default().fg(theme.foreground),
                 );
@@ -351,6 +351,92 @@ impl TelemetryPage {
             );
         }
     }
+}
+
+fn request_fields(record: &norte_code_wire::TelemetryRecord) -> Vec<Field> {
+    let duration = if record
+        .metadata
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        == Some("history")
+    {
+        "not captured".to_owned()
+    } else {
+        format!("{} ms", record.duration_ms)
+    };
+    let stream = record.stream_chunk_count.map_or_else(
+        || "not measured".to_owned(),
+        |chunks| {
+            let gap = record.max_inter_chunk_gap_ms.map_or_else(
+                || "gap not measured".to_owned(),
+                |ms| format!("max gap {ms} ms"),
+            );
+            format!("{chunks} chunks · {gap}")
+        },
+    );
+    vec![
+        Field::new("id", terminalui::clip(&record.id, 34)),
+        Field::new("model", terminalui::clip(&record.model, 34)),
+        Field::new(
+            "served model",
+            record.resolved_model.as_deref().map_or_else(
+                || "same or not reported".to_owned(),
+                |model| terminalui::clip(model, 34),
+            ),
+        ),
+        Field::new("provider", terminalui::clip(&record.provider, 34)),
+        Field::new("status", status_label(record.status)),
+        Field::new("started", record.started_at.clone()),
+        Field::new("duration", duration),
+        Field::new(
+            "first output",
+            record
+                .first_token_ms
+                .map_or_else(|| "not measured".to_owned(), |ms| format!("{ms} ms")),
+        ),
+        Field::new(
+            "first text",
+            record
+                .first_text_ms
+                .map_or_else(|| "not measured".to_owned(), |ms| format!("{ms} ms")),
+        ),
+        Field::new(
+            "response",
+            record
+                .http_status
+                .map_or_else(|| "not reported".to_owned(), |status| status.to_string()),
+        ),
+        Field::new(
+            "retries",
+            record
+                .retry_count
+                .map_or_else(|| "not measured".to_owned(), |count| count.to_string()),
+        ),
+        Field::new("stream", stream),
+        Field::new(
+            "tokens",
+            format!(
+                "{} in / {} out",
+                record.input_tokens.unwrap_or(0),
+                record.output_tokens.unwrap_or(0)
+            ),
+        ),
+        Field::new(
+            "cache",
+            format!("{} read", record.cache_read_tokens.unwrap_or(0)),
+        ),
+        Field::new(
+            "cost",
+            record
+                .cost_usd
+                .map_or_else(|| "not reported".to_owned(), |cost| format!("${cost:.4}")),
+        ),
+        Field::new("tools", record.tool_calls.len().to_string()),
+    ]
+}
+
+fn short_session_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
 }
 
 fn status_label(status: norte_code_wire::RequestStatus) -> &'static str {

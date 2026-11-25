@@ -20,21 +20,48 @@ pub(crate) struct Bucket {
     pub(crate) requests: u64,
     /// Provider-reported spend, in USD.
     pub(crate) cost: f64,
-    /// Prompt plus answer tokens.
-    pub(crate) tokens: f64,
+    /// Prompt tokens reported by providers.
+    pub(crate) input: f64,
+    /// Answer tokens reported by providers.
+    pub(crate) output: f64,
     /// Prompt tokens served from a cache.
     pub(crate) cache_read: f64,
     /// Prompt tokens the providers reported, the cache-rate denominator.
     pub(crate) prompt: f64,
+    /// Sum of measured request durations.
+    pub(crate) duration_total: u64,
+    /// Count of request durations that were measured live.
+    pub(crate) duration_samples: u64,
+    /// Sum of first-output timings.
+    pub(crate) first_output_total: u64,
+    /// Count of first-output timings.
+    pub(crate) first_output_samples: u64,
+    /// Sum of first-visible-text timings.
+    pub(crate) first_text_total: u64,
+    /// Count of first-visible-text timings.
+    pub(crate) first_text_samples: u64,
 }
 
 impl Bucket {
     fn merge(&mut self, other: &Self) {
         self.requests += other.requests;
         self.cost += other.cost;
-        self.tokens += other.tokens;
+        self.input += other.input;
+        self.output += other.output;
         self.cache_read += other.cache_read;
         self.prompt += other.prompt;
+        self.duration_total = self.duration_total.saturating_add(other.duration_total);
+        self.duration_samples = self.duration_samples.saturating_add(other.duration_samples);
+        self.first_output_total = self
+            .first_output_total
+            .saturating_add(other.first_output_total);
+        self.first_output_samples = self
+            .first_output_samples
+            .saturating_add(other.first_output_samples);
+        self.first_text_total = self.first_text_total.saturating_add(other.first_text_total);
+        self.first_text_samples = self
+            .first_text_samples
+            .saturating_add(other.first_text_samples);
     }
 }
 
@@ -62,15 +89,26 @@ fn downsample(buckets: Vec<(String, Bucket)>, limit: usize) -> Vec<(String, Buck
     merged
 }
 
-/// Series ready for the three charts.
+/// Time series ready for the telemetry charts.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Series {
     /// Cost candles: open and close bracket the spend added in each bucket.
     pub(crate) cost: Vec<Candle>,
     /// Tokens per bucket.
-    pub(crate) tokens: Vec<f64>,
+    /// Prompt tokens per bucket.
+    pub(crate) input: Vec<f64>,
+    /// Answer tokens per bucket.
+    pub(crate) output: Vec<f64>,
+    /// Requests per bucket.
+    pub(crate) requests: Vec<f64>,
+    /// Average measured request latency. Missing buckets are chart gaps.
+    pub(crate) latency: Vec<Option<f64>>,
+    /// Average first-output time. Missing buckets are chart gaps.
+    pub(crate) first_output: Vec<Option<f64>>,
+    /// Average first-visible-text time. Missing buckets are chart gaps.
+    pub(crate) first_text: Vec<Option<f64>>,
     /// Cache hit percentage per bucket, in `0.0..=100.0`.
-    pub(crate) cache: Vec<f64>,
+    pub(crate) cache: Vec<Option<f64>>,
     /// The buckets, for captions and labels.
     pub(crate) buckets: Vec<(String, Bucket)>,
 }
@@ -94,25 +132,51 @@ pub(crate) fn series(
     let mut buckets: BTreeMap<String, Bucket> = BTreeMap::new();
     if let Some(report) = report {
         for record in &report.records {
+            if record
+                .metadata
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                == Some("history")
+            {
+                continue;
+            }
             let Some(key) = key(record, interval) else {
                 continue;
             };
             let bucket = buckets.entry(key).or_default();
-            let input = record.input_tokens.unwrap_or(0);
+            let input = record.input_tokens;
             let output = record.output_tokens.unwrap_or(0);
-            let read = record.cache_read_tokens.unwrap_or(0);
             bucket.requests += 1;
             bucket.cost += record.cost_usd.unwrap_or(0.0);
-            bucket.tokens = (bucket.tokens + input as f64 + output as f64).round();
-            bucket.cache_read = (bucket.cache_read + read as f64).round();
-            bucket.prompt = (bucket.prompt + input as f64).round();
+            if let Some(input) = input {
+                bucket.input = (bucket.input + input as f64).round();
+                bucket.prompt = (bucket.prompt + input as f64).round();
+                bucket.cache_read =
+                    (bucket.cache_read + record.cache_read_tokens.unwrap_or(0) as f64).round();
+            }
+            bucket.output = (bucket.output + output as f64).round();
+            bucket.duration_total = bucket.duration_total.saturating_add(record.duration_ms);
+            bucket.duration_samples = bucket.duration_samples.saturating_add(1);
+            if let Some(first_output) = record.first_token_ms {
+                bucket.first_output_total = bucket.first_output_total.saturating_add(first_output);
+                bucket.first_output_samples = bucket.first_output_samples.saturating_add(1);
+            }
+            if let Some(first_text) = record.first_text_ms {
+                bucket.first_text_total = bucket.first_text_total.saturating_add(first_text);
+                bucket.first_text_samples = bucket.first_text_samples.saturating_add(1);
+            }
         }
     }
 
     let buckets: Vec<(String, Bucket)> =
         downsample(buckets.into_iter().collect(), MAX_CHART_BUCKETS);
     let mut cost = Vec::with_capacity(buckets.len());
-    let mut tokens = Vec::with_capacity(buckets.len());
+    let mut input = Vec::with_capacity(buckets.len());
+    let mut output = Vec::with_capacity(buckets.len());
+    let mut requests = Vec::with_capacity(buckets.len());
+    let mut latency = Vec::with_capacity(buckets.len());
+    let mut first_output = Vec::with_capacity(buckets.len());
+    let mut first_text = Vec::with_capacity(buckets.len());
     let mut cache = Vec::with_capacity(buckets.len());
     let mut running = 0.0f64;
     for (_, bucket) in &buckets {
@@ -126,16 +190,34 @@ pub(crate) fn series(
             close,
             volume: bucket.requests as f64,
         });
-        tokens.push(bucket.tokens);
-        cache.push(if bucket.prompt > 0.0 {
-            (bucket.cache_read / bucket.prompt * 100.0).clamp(0.0, 100.0)
-        } else {
-            0.0
-        });
+        input.push(bucket.input);
+        output.push(bucket.output);
+        requests.push(bucket.requests as f64);
+        latency.push(
+            (bucket.duration_samples > 0)
+                .then(|| bucket.duration_total as f64 / bucket.duration_samples as f64),
+        );
+        first_output.push(
+            (bucket.first_output_samples > 0)
+                .then(|| bucket.first_output_total as f64 / bucket.first_output_samples as f64),
+        );
+        first_text.push(
+            (bucket.first_text_samples > 0)
+                .then(|| bucket.first_text_total as f64 / bucket.first_text_samples as f64),
+        );
+        cache.push(
+            (bucket.prompt > 0.0)
+                .then(|| (bucket.cache_read / bucket.prompt * 100.0).clamp(0.0, 100.0)),
+        );
     }
     Series {
         cost,
-        tokens,
+        input,
+        output,
+        requests,
+        latency,
+        first_output,
+        first_text,
         cache,
         buckets,
     }

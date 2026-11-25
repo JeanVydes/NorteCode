@@ -226,8 +226,11 @@ fn reasoning_after_text_or_a_tool_starts_a_new_block() {
         name: "read".to_string(),
         target: None,
         state: super::ToolState::Done,
+        expanded: false,
         meta: None,
         diff: None,
+        output: None,
+        error: None,
         console: None,
     });
     transcript.push_reasoning_text("explore the repo.");
@@ -374,8 +377,11 @@ fn clicking_shell_output_toggles_its_expansion() {
         name: "shell".to_string(),
         target: Some("echo hi".to_string()),
         state: super::ToolState::Running,
+        expanded: false,
         meta: None,
         diff: None,
+        output: None,
+        error: None,
         console: Some(Box::new(Console::new("echo hi").set_lines(lines))),
     });
     assert!(!matches!(
@@ -386,7 +392,7 @@ fn clicking_shell_output_toggles_its_expansion() {
         }) if console.is_expanded()
     ));
 
-    assert!(transcript.toggle_console_at(0));
+    assert!(transcript.toggle_console_at(1));
     assert!(matches!(
         transcript.items.first(),
         Some(Item::Tool {
@@ -394,7 +400,7 @@ fn clicking_shell_output_toggles_its_expansion() {
             ..
         }) if console.is_expanded()
     ));
-    assert!(transcript.toggle_console_at(0));
+    assert!(transcript.toggle_console_at(1));
     assert!(!matches!(
         transcript.items.first(),
         Some(Item::Tool {
@@ -415,8 +421,11 @@ fn expanded_shell_output_renders_every_retained_line() {
         name: "shell".to_string(),
         target: Some("echo hi".to_string()),
         state: super::ToolState::Done,
+        expanded: false,
         meta: None,
         diff: None,
+        output: None,
+        error: None,
         console: Some(Box::new(
             Console::new("echo hi").set_lines(lines).with_expanded(true),
         )),
@@ -443,8 +452,11 @@ fn long_shell_output_wraps_to_the_console_width() {
         name: "shell".to_string(),
         target: Some("echo long".to_string()),
         state: super::ToolState::Done,
+        expanded: false,
         meta: None,
         diff: None,
+        output: None,
+        error: None,
         console: Some(Box::new(
             Console::new("echo long")
                 .set_lines(vec!["abcdefghijklmnopqrstuvwxyz0123456789".into()]),
@@ -470,8 +482,11 @@ fn shell_header_counts_new_output_as_it_arrives() {
         name: "shell".to_string(),
         target: Some("echo hi".to_string()),
         state: super::ToolState::Running,
+        expanded: false,
         meta: None,
         diff: None,
+        output: None,
+        error: None,
         console: Some(Box::new(Console::new("echo hi"))),
     });
 
@@ -486,7 +501,7 @@ fn shell_header_counts_new_output_as_it_arrives() {
     assert!(
         tree.find_mut::<Transcript>("stream")
             .expect("stream")
-            .append_console_line("call-1", "one".to_string())
+            .append_console_output("call-1", "one", norte_code_wire::OutputStream::Stdout,)
     );
     let mut buffer = Buffer::empty(area);
     tree.render(area, &mut buffer, &theme);
@@ -519,6 +534,116 @@ fn replayed_edit_calls_keep_their_diff() {
             .collect::<Vec<_>>(),
         vec!["old", "new"]
     );
+}
+
+#[test]
+fn tool_output_starts_collapsed_and_can_be_toggled() {
+    let mut transcript = Transcript::new();
+    transcript.push(Item::Tool {
+        call_id: "read-1".to_owned(),
+        name: "read".to_owned(),
+        target: Some("src/main.rs".to_owned()),
+        state: super::ToolState::Done,
+        expanded: false,
+        meta: None,
+        diff: None,
+        output: Some("file contents".to_owned()),
+        error: None,
+        console: None,
+    });
+
+    assert!(matches!(
+        transcript.items.first(),
+        Some(Item::Tool {
+            expanded: false,
+            ..
+        })
+    ));
+    assert!(transcript.toggle_tool_at(0));
+    assert!(matches!(
+        transcript.items.first(),
+        Some(Item::Tool { expanded: true, .. })
+    ));
+}
+
+#[test]
+fn replayed_tool_results_attach_to_their_call() {
+    let mut transcript = Transcript::new();
+    transcript.replace_history(vec![
+        HistoryItem {
+            id: "call-1".to_owned(),
+            kind: HistoryItemKind::ToolCall,
+            content: "read {\n  \"path\": \"src/main.rs\"\n}".to_owned(),
+            created_at: 0,
+            turn_id: None,
+            role: HistorySpeaker::Tool,
+            provenance: None,
+        },
+        HistoryItem {
+            id: "result-1".to_owned(),
+            kind: HistoryItemKind::ToolResult,
+            content: "file contents".to_owned(),
+            created_at: 1,
+            turn_id: None,
+            role: HistorySpeaker::Tool,
+            provenance: None,
+        },
+    ]);
+
+    assert!(matches!(
+        transcript.items.first(),
+        Some(Item::Tool { output: Some(output), expanded: false, .. }) if output == "file contents"
+    ));
+}
+
+#[test]
+fn verbose_activity_groups_reasoning_and_live_tools() {
+    let mut transcript = Transcript::new();
+    transcript.set_tool_preferences(false, true);
+    transcript.start_thinking();
+    transcript.push_reasoning_text("checking the project");
+    transcript.push(Item::Tool {
+        call_id: "shell-1".to_owned(),
+        name: "shell".to_owned(),
+        target: Some("cargo check".to_owned()),
+        state: super::ToolState::Running,
+        expanded: false,
+        meta: None,
+        diff: None,
+        output: None,
+        error: None,
+        console: Some(Box::new(Console::new("cargo check"))),
+    });
+
+    let Some(Item::Activity {
+        entries,
+        expanded,
+        status: super::ActivityStatus::Tool { name, context, .. },
+        ..
+    }) = transcript.items.first()
+    else {
+        panic!("verbose activity group");
+    };
+    assert_eq!(entries.len(), 2);
+    assert!(expanded);
+    assert_eq!(name, "shell");
+    assert_eq!(context.as_deref(), Some("cargo check"));
+
+    transcript.finish_tool("shell-1", false, None, None);
+    transcript.finish_activity();
+    assert!(matches!(
+        transcript.items.first(),
+        Some(Item::Activity {
+            expanded: false,
+            status: super::ActivityStatus::Complete,
+            ..
+        })
+    ));
+    assert!(transcript.toggle_tool_at(0));
+    assert!(matches!(
+        transcript.items.first(),
+        Some(Item::Activity { expanded: true, .. })
+    ));
 }
 
 #[test]

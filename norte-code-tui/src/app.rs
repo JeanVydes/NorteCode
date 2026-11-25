@@ -183,6 +183,8 @@ fn attach_client(
             model.preferences.theme = model.preferences.catalog.choose(loaded.ui.theme.as_deref());
             model.preferences.rail_position = loaded.ui.rail_position.unwrap_or_default();
             model.preferences.debug = loaded.ui.debug.into();
+            model.preferences.show_tool_output = loaded.ui.show_tool_output;
+            model.preferences.tool_verbosity = loaded.ui.tool_verbosity;
             model.service_url.clone_from(&loaded.service.url);
             let (commands, events) = start(loaded.clone());
             model.attachment = SessionAttachmentState::Connecting;

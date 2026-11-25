@@ -18,6 +18,19 @@ fn debug_defaults_off_and_can_be_enabled_in_json() {
 }
 
 #[test]
+fn tool_preferences_default_compact_and_load_from_ui_json() {
+    let defaults: UiConfig = serde_json::from_str("{}").expect("empty UI config");
+    assert!(!defaults.show_tool_output);
+    assert!(!defaults.tool_verbosity);
+
+    let configured: UiConfig =
+        serde_json::from_str(r#"{"show_tool_output":true,"tool_verbosity":true}"#)
+            .expect("tool preferences");
+    assert!(configured.show_tool_output);
+    assert!(configured.tool_verbosity);
+}
+
+#[test]
 fn absent_runtime_blocks_keep_the_documented_defaults() {
     let config: ClientConfig = serde_json::from_str(MINIMAL_CONFIG).expect("minimal config");
 

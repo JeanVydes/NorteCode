@@ -94,6 +94,44 @@ fn provider_cost_sums_every_model() {
 }
 
 #[test]
+fn latency_ranking_uses_measured_samples_and_puts_unknowns_last() {
+    let mut slow = record("a", 1, "provider", "slow", Some(10), Some(2), None);
+    slow.duration_ms = 400;
+    let mut fast = record("b", 1, "provider", "fast", Some(10), Some(2), None);
+    fast.duration_ms = 120;
+    let unknown = record("c", 1, "provider", "unknown", Some(10), Some(2), None);
+    let records = vec![slow, fast, unknown];
+
+    let board = Leaderboard::build(
+        &records,
+        LeaderboardGroup::Latency,
+        LeaderboardSubject::Model,
+    );
+
+    assert_eq!(board.rows[0].name, "fast");
+    assert_eq!(board.rows[0].metric_value, 120.0);
+    assert_eq!(board.rows[2].name, "unknown");
+    assert_eq!(board.rows[2].metric_samples, 0);
+}
+
+#[test]
+fn input_and_output_rankings_use_their_own_counters() {
+    let records = vec![
+        record("a", 1, "p", "mostly input", Some(100), Some(2), None),
+        record("b", 1, "p", "mostly output", Some(3), Some(80), None),
+    ];
+    let input = Leaderboard::build(&records, LeaderboardGroup::Input, LeaderboardSubject::Model);
+    let output = Leaderboard::build(
+        &records,
+        LeaderboardGroup::Output,
+        LeaderboardSubject::Model,
+    );
+
+    assert_eq!(input.rows[0].name, "mostly input");
+    assert_eq!(output.rows[0].name, "mostly output");
+}
+
+#[test]
 fn selection_tabs_cycle_within_their_group() {
     assert_eq!(LeaderboardGroup::Usage.label(), "usage");
     assert_eq!(LeaderboardGroup::Cost.label(), "cost");
