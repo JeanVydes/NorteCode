@@ -7,7 +7,6 @@ use std::path::Path;
 use norte_code_protocol::config::{CliConfig, ensure_user_cli_config, user_cli_path};
 
 const SKILL: &str = include_str!("../assets/norte-code/SKILL.md");
-const PREVIOUS_SKILL: &str = include_str!("../assets/norte-code/previous-skill.md");
 const CONFIG_REFERENCE: &str = include_str!("../../CONFIG.md");
 const TUI_REFERENCE: &str = include_str!("../assets/norte-code/tui.md");
 const SERVICE_REFERENCE: &str = include_str!("../assets/norte-code/service-catalog.md");
@@ -44,10 +43,6 @@ fn sync_at(root: &Path, enabled: bool) -> io::Result<()> {
                     fs::write(directory.join("SKILL.md"), SKILL)?;
                 }
                 if marker.is_file() {
-                    let skill_path = directory.join("SKILL.md");
-                    if fs::read_to_string(&skill_path)? == PREVIOUS_SKILL {
-                        fs::write(skill_path, SKILL)?;
-                    }
                     install_references(&directory)?;
                 }
             }

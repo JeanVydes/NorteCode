@@ -22,12 +22,6 @@ fn managed_skill_is_created_preserved_and_removed() {
         "{:?}",
         registry.warnings()
     );
-    fs::write(dir.join("SKILL.md"), super::PREVIOUS_SKILL).expect("previous version");
-    sync_at(&root, true).expect("upgrade unmodified skill");
-    assert_eq!(
-        fs::read_to_string(dir.join("SKILL.md")).expect("upgraded"),
-        super::SKILL
-    );
     fs::write(dir.join("SKILL.md"), "customized").expect("edit");
     sync_at(&root, true).expect("keep existing");
     assert_eq!(
