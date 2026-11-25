@@ -46,6 +46,8 @@ pub(crate) enum ClientError {
     AnswerQuestion(String),
     /// Compacting a session.
     Compact(String),
+    /// Changing a session's reasoning setting.
+    SetReasoning(String),
     /// Forking a session.
     Fork(String),
     /// Rewinding a session.
@@ -150,6 +152,11 @@ impl ClientError {
         Self::Compact(format!("compact refused: {error}"))
     }
 
+    /// The host refused a reasoning setting.
+    pub(crate) fn set_reasoning(error: impl fmt::Display) -> Self {
+        Self::SetReasoning(format!("reasoning setting refused: {error}"))
+    }
+
     /// The host refused a fork.
     pub(crate) fn fork(error: impl fmt::Display) -> Self {
         Self::Fork(format!("fork failed: {error}"))
@@ -207,6 +214,7 @@ impl fmt::Display for ClientError {
             | Self::Upload(message)
             | Self::AnswerQuestion(message)
             | Self::Compact(message)
+            | Self::SetReasoning(message)
             | Self::Fork(message)
             | Self::Rewind(message)
             | Self::LostStream(message)

@@ -311,6 +311,19 @@ struct CreateSessionBody {
     agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_override: Option<CreateAgentOverride>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CreateAgentOverride {
+    model: CreateAgentModel,
+    provider: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CreateAgentModel {
+    id: String,
 }
 
 /// A rename-session request body.
@@ -335,6 +348,21 @@ impl RemoteClient {
         title: Option<&str>,
         key: &str,
     ) -> Result<SessionSummary, ClientError> {
+        self.create_session_with_model_with_key(title, None, key)
+            .await
+    }
+
+    /// Creates a session with an optional model override and a retry-safe key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport error or a refusal from the server.
+    pub async fn create_session_with_model_with_key(
+        &self,
+        title: Option<&str>,
+        model: Option<(&str, &str)>,
+        key: &str,
+    ) -> Result<SessionSummary, ClientError> {
         let mut headers = HeaderMap::new();
         if let Some(token) = &self.bearer_token {
             headers.insert(AUTHORIZATION, token.clone());
@@ -351,6 +379,12 @@ impl RemoteClient {
             .json(&CreateSessionBody {
                 agent_id: self.agent_id.clone(),
                 title: title.map(str::to_owned),
+                agent_override: model.map(|(provider, model)| CreateAgentOverride {
+                    model: CreateAgentModel {
+                        id: model.to_owned(),
+                    },
+                    provider: provider.to_owned(),
+                }),
             })
             .send()
             .await
@@ -366,3 +400,7 @@ impl RemoteClient {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;

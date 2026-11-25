@@ -97,6 +97,7 @@ pub(in crate::app) fn fold(
         | ServerEventKind::ModelList { .. }
         | ServerEventKind::ToolList { .. }
         | ServerEventKind::PluginList { .. }
+        | ServerEventKind::PluginCommandCompleted { .. }
         | ServerEventKind::McpList { .. }
         | ServerEventKind::SkillList { .. }
         | ServerEventKind::SkillsUpdated { .. }

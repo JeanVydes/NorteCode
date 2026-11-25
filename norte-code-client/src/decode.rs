@@ -951,6 +951,13 @@ pub(crate) fn server_event_from_frame(
                     plugins: decoded.plugins,
                 }
             }
+            CanonicalKind::PluginCommandCompleted => {
+                let decoded: CanonicalPluginCommandCompleted = canonical.decode()?;
+                norte_code_wire::ServerEventKind::PluginCommandCompleted {
+                    command: decoded.command,
+                    message: decoded.message,
+                }
+            }
             CanonicalKind::PluginChanged => {
                 let decoded: CanonicalPluginChanged = canonical.decode()?;
                 norte_code_wire::ServerEventKind::PluginChanged {
@@ -1112,7 +1119,8 @@ pub(crate) fn session_from_request(request: &ClientRequest) -> Option<String> {
         | ClientRequestKind::ContextPin { session, .. }
         | ClientRequestKind::SessionRewind { session, .. }
         | ClientRequestKind::HistoryGet { session, .. }
-        | ClientRequestKind::SessionExport { session, .. } => Some(session),
+        | ClientRequestKind::SessionExport { session, .. }
+        | ClientRequestKind::RunCommand { session, .. } => Some(session),
         ClientRequestKind::SendMessage { session, .. }
         | ClientRequestKind::CostReport { session }
         | ClientRequestKind::ListTelemetry { session } => session.as_ref(),

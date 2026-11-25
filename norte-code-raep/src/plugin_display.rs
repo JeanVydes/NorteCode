@@ -16,6 +16,7 @@ struct PluginOfferings {
     status: BTreeMap<String, String>,
     banner: BTreeMap<String, String>,
     tools_by_plugin: BTreeMap<String, Vec<String>>,
+    commands_by_plugin: BTreeMap<String, Vec<norte_code_wire::PluginCommandInfo>>,
 }
 
 static OFFERINGS: OnceLock<PluginOfferings> = OnceLock::new();
@@ -33,16 +34,39 @@ pub(crate) fn capture(plugins: &Plugins) -> PluginTools {
     let mut functions = Vec::with_capacity(named.len());
     let mut origins = BTreeMap::new();
     let mut tools_by_plugin: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut commands_by_plugin: BTreeMap<String, Vec<norte_code_wire::PluginCommandInfo>> =
+        BTreeMap::new();
     for (plugin, tool) in named {
         let name = tool.name().to_owned();
         origins.insert(name.clone(), plugin.clone());
         tools_by_plugin.entry(plugin).or_default().push(name);
         functions.push(tool);
     }
+    for command in plugins.command_registry().commands() {
+        commands_by_plugin
+            .entry(command.plugin.clone())
+            .or_default()
+            .push(norte_code_wire::PluginCommandInfo {
+                name: command.spec.name.as_str().to_owned(),
+                description: command.spec.description.clone(),
+                arguments: command
+                    .spec
+                    .arguments
+                    .iter()
+                    .map(|argument| norte_code_wire::PluginCommandArgumentInfo {
+                        name: argument.name.clone(),
+                        description: argument.description.clone(),
+                        required: argument.required,
+                        choices: argument.choices.clone(),
+                    })
+                    .collect(),
+            });
+    }
     let _ = OFFERINGS.set(PluginOfferings {
         status: plugins.status_named().into_iter().collect(),
         banner: plugins.banner_named().into_iter().collect(),
         tools_by_plugin,
+        commands_by_plugin,
     });
     PluginTools { functions, origins }
 }
@@ -62,6 +86,15 @@ pub(crate) fn tools_for(name: &str) -> Vec<String> {
     OFFERINGS
         .get()
         .and_then(|offerings| offerings.tools_by_plugin.get(name))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The slash commands a named plugin registered.
+pub(crate) fn commands_for(name: &str) -> Vec<norte_code_wire::PluginCommandInfo> {
+    OFFERINGS
+        .get()
+        .and_then(|offerings| offerings.commands_by_plugin.get(name))
         .cloned()
         .unwrap_or_default()
 }

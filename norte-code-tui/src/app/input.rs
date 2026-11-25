@@ -10,6 +10,12 @@ mod navigation;
 mod palette;
 #[path = "input/selectors.rs"]
 mod selectors;
+#[path = "input/slash_actions.rs"]
+mod slash_actions;
+#[path = "input/slash_command.rs"]
+mod slash_command;
+#[path = "input/slash_suggestions.rs"]
+mod slash_suggestions;
 
 use std::io;
 use std::time::Duration;

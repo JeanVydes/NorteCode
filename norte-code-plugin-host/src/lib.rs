@@ -9,8 +9,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+mod commands;
 pub mod plugins;
 
+pub use commands::{
+    CommandArgument, CommandExecutionError, CommandName, CommandOutput, CommandRegistrationError,
+    CommandRegistry, CommandSpec, RegisteredCommand,
+};
 pub use norte_code_plugin_api::{HOST_EFFECTS_KEY, HostEffects, UserMessageDraft};
 pub use plugins::{PLUGIN_ABI_SYMBOL, PLUGIN_ABI_VERSION, Plugin, PluginContext, Plugins};
 

@@ -141,6 +141,9 @@ pub struct PluginSummary {
     /// The names of the tools this plugin declared.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Slash commands this plugin registered.
+    #[serde(default)]
+    pub commands: Vec<norte_code_wire::PluginCommandInfo>,
 }
 
 /// The result of a plugin operation.
@@ -243,6 +246,12 @@ pub(crate) struct PluginChangedResponse {
     pub(crate) operation: String,
     #[serde(default)]
     pub(crate) name: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PluginCommandResponse {
+    #[serde(default)]
+    pub(crate) message: String,
 }
 
 #[derive(Deserialize)]

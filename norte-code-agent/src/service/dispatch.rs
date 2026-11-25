@@ -501,6 +501,7 @@ impl Service {
                 ))
             }
             Kind::ListPlugins
+            | Kind::RunCommand { .. }
             | Kind::InstallPlugin { .. }
             | Kind::UpdatePlugins { .. }
             | Kind::RemovePlugin { .. }

@@ -60,6 +60,8 @@ pub enum CanonicalEvent {
     },
     /// The plugins installed on the host.
     PluginList,
+    /// A plugin command finished running.
+    PluginCommandCompleted,
     /// A plugin lifecycle operation completed.
     PluginChanged,
     /// A plugin operation reported a step.

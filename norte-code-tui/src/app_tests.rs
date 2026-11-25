@@ -18,7 +18,7 @@ use crate::client::{ClientEvent, UiCommand};
 use crate::clipboard::{Clipboard, FakeClipboard};
 use crate::ui;
 use crate::ui::Composer;
-use crate::ui_model::{ActiveTurn, Tab, TurnState, UiModel};
+use crate::ui_model::{ActiveTurn, SessionAttachmentState, Tab, TurnState, UiModel};
 
 fn composer_tree(clipboard: Arc<dyn Clipboard>) -> Tree {
     let mut tree = Tree::new(node(
@@ -35,6 +35,19 @@ fn ctrl_c() -> KeyEvent {
 
 fn ctrl_q() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)
+}
+
+fn type_text(tree: &mut Tree, text: &str, model: &mut UiModel) {
+    for character in text.chars() {
+        handle_key(
+            tree,
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut None,
+            &mut None,
+            model,
+            None,
+        );
+    }
 }
 
 fn escape() -> KeyEvent {
@@ -194,6 +207,221 @@ fn escape_cancels_the_active_turn_and_keeps_the_tui_open() {
     assert!(
         matches!(commands_rx.try_recv(), Ok(UiCommand::CancelTurn { turn_id, .. }) if turn_id == "turn_1")
     );
+}
+
+#[test]
+fn an_invalid_slash_command_stays_in_the_composer_and_is_not_sent() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    let mut tree = ui::build_tree(&model);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    let mut events = None;
+    type_text(&mut tree, "/not-a-command", &mut model);
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        tree.find::<Composer>("composer").expect("composer").text(),
+        "/not-a-command"
+    );
+}
+
+#[test]
+fn double_slash_is_sent_as_an_ordinary_message() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    model.attachment = SessionAttachmentState::Ready;
+    let mut tree = ui::build_tree(&model);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    let mut events = None;
+    type_text(&mut tree, "//comment", &mut model);
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+
+    let UiCommand::Send { text, .. } = receiver.try_recv().expect("message sent") else {
+        panic!("expected a user message");
+    };
+    assert_eq!(text, "//comment");
+}
+
+#[test]
+fn tab_completes_the_slash_command_in_place() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    let mut tree = ui::build_tree(&model);
+    type_text(&mut tree, "/com", &mut model);
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        &mut None,
+        &mut None,
+        &mut model,
+        None,
+    );
+
+    assert_eq!(
+        tree.find::<Composer>("composer").expect("composer").text(),
+        "/compact"
+    );
+}
+
+#[test]
+fn new_command_defers_the_selected_model_until_first_message() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    model.models = vec![norte_code_wire::ModelInfo {
+        provider: "anthropic".to_owned(),
+        model: "sonnet".to_owned(),
+        name: "Claude Sonnet".to_owned(),
+        description: None,
+        max_context: None,
+        max_output: None,
+        tools: false,
+        input: vec![norte_code_wire::Modality::Text],
+        output: vec![norte_code_wire::Modality::Text],
+        reasoning: norte_code_wire::ReasoningInfo::default(),
+        deprecated: false,
+    }];
+    let mut tree = ui::build_tree(&model);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    let mut events = None;
+    type_text(&mut tree, "/new anthropic sonnet", &mut model);
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(UiCommand::NewDraft {
+            model: Some(crate::client::NewSessionModel { provider, model })
+        }) if provider == "anthropic" && model == "sonnet"
+    ));
+}
+
+#[test]
+fn open_command_completes_recent_sessions_and_arrow_selection_is_scrollable() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    model.sessions = (0..7)
+        .map(|index| norte_code_wire::SessionSummary {
+            session_id: format!("session-{index:02}"),
+            title: Some(format!("Session {index}")),
+            updated_at: Some(i64::from(index)),
+            ..norte_code_wire::SessionSummary::default()
+        })
+        .collect();
+    let mut tree = ui::build_tree(&model);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    let mut events = None;
+    type_text(&mut tree, "/open ", &mut model);
+
+    for _ in 0..6 {
+        handle_key(
+            &mut tree,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut commands,
+            &mut events,
+            &mut model,
+            None,
+        );
+    }
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+    assert_eq!(
+        tree.find::<Composer>("composer").expect("composer").text(),
+        "/open session-00"
+    );
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(UiCommand::OpenSession { session }) if session.session_id == "session-00"
+    ));
+}
+
+#[test]
+fn moving_the_composer_cursor_keeps_up_and_down_for_text_navigation() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    model.sessions = (0..2)
+        .map(|index| norte_code_wire::SessionSummary {
+            session_id: format!("session-{index}"),
+            updated_at: Some(i64::from(index)),
+            ..norte_code_wire::SessionSummary::default()
+        })
+        .collect();
+    let mut tree = ui::build_tree(&model);
+    type_text(&mut tree, "/open ", &mut model);
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        &mut None,
+        &mut None,
+        &mut model,
+        None,
+    );
+    let first = tree
+        .find::<ui::CommandSuggestions>("command_suggestions")
+        .and_then(ui::CommandSuggestions::selected)
+        .expect("first session suggestion")
+        .to_owned();
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &mut None,
+        &mut None,
+        &mut model,
+        None,
+    );
+
+    let after_down = tree
+        .find::<ui::CommandSuggestions>("command_suggestions")
+        .and_then(ui::CommandSuggestions::selected)
+        .expect("session suggestion remains open");
+    assert_eq!(after_down, first);
 }
 
 #[test]
@@ -405,7 +633,10 @@ fn the_new_session_button_sends_the_command() {
     let (commands_tx, mut commands_rx) = mpsc::channel(4);
     let mut commands = Some(commands_tx);
     drain_sessions_actions(&mut tree, &mut commands, &mut model);
-    assert!(matches!(commands_rx.try_recv(), Ok(UiCommand::NewDraft)));
+    assert!(matches!(
+        commands_rx.try_recv(),
+        Ok(UiCommand::NewDraft { model: None })
+    ));
 }
 
 #[test]
@@ -424,7 +655,10 @@ fn creating_a_session_switches_to_chat_and_sends_the_command() {
 
     drain_sessions_actions(&mut tree, &mut commands, &mut model);
 
-    assert!(matches!(commands_rx.try_recv(), Ok(UiCommand::NewDraft)));
+    assert!(matches!(
+        commands_rx.try_recv(),
+        Ok(UiCommand::NewDraft { model: None })
+    ));
     assert_eq!(model.tab, crate::ui_model::Tab::Chat);
 }
 

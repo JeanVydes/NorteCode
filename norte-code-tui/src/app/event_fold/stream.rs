@@ -260,5 +260,6 @@ fn finish_turn(
     }
     if let Some(commands) = commands {
         let _ = commands.try_send(UiCommand::RefreshRail);
+        let _ = commands.try_send(UiCommand::Refresh);
     }
 }

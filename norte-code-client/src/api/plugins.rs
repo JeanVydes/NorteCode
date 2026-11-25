@@ -1,7 +1,9 @@
 use norte_code_wire::{CanonicalEvent, ClientRequestKind};
 
 use super::shared::{decode_payload, find_event};
-use super::types::{PluginChange, PluginChangedResponse, PluginListResponse, PluginSummary};
+use super::types::{
+    PluginChange, PluginChangedResponse, PluginCommandResponse, PluginListResponse, PluginSummary,
+};
 use super::{ApiError, RestClient};
 
 impl RestClient {
@@ -14,6 +16,33 @@ impl RestClient {
         let response = self.command(None, ClientRequestKind::ListPlugins).await?;
         let payload = find_event(&response, CanonicalEvent::PluginList)?;
         Ok(decode_payload::<PluginListResponse>(&payload)?.plugins)
+    }
+
+    /// Executes a command registered by a loaded plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error, the plugin's rejection, or a response the
+    /// client cannot decode.
+    pub async fn run_command(
+        &self,
+        session: &str,
+        command: &str,
+        arguments: Vec<String>,
+    ) -> Result<String, ApiError> {
+        let response = self
+            .command(
+                Some(session),
+                ClientRequestKind::RunCommand {
+                    session: norte_code_wire::SessionKey::new(session),
+                    command: command.to_owned(),
+                    arguments,
+                },
+            )
+            .await?;
+        let payload = find_event(&response, CanonicalEvent::PluginCommandCompleted)?;
+        let result: PluginCommandResponse = decode_payload(&payload)?;
+        Ok(result.message)
     }
 
     /// Installs a plugin from a repository.

@@ -277,6 +277,26 @@ fn a_history_get_round_trips() {
 }
 
 #[test]
+fn a_plugin_command_request_round_trips() {
+    let request = round_trips_request(ClientRequestKind::RunCommand {
+        session: SessionKey::new("s"),
+        command: "deploy".to_owned(),
+        arguments: vec!["staging".to_owned()],
+    });
+    let json = serde_json::to_string(&request).expect("serialize a plugin command request");
+    assert!(json.contains(r#""type":"run_command""#));
+    match request.kind {
+        ClientRequestKind::RunCommand {
+            command, arguments, ..
+        } => {
+            assert_eq!(command, "deploy");
+            assert_eq!(arguments, ["staging"]);
+        }
+        other => panic!("expected a plugin command request, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_history_page_event_round_trips() {
     let event = ServerEvent::new(
         1,
@@ -438,6 +458,29 @@ fn a_plugin_message_event_round_trips() {
             assert_eq!(parts, 2);
         }
         other => panic!("expected a plugin message event, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_plugin_command_completion_round_trips() {
+    let event = ServerEvent::new(
+        9,
+        Some(SessionKey::new("s")),
+        ServerEventKind::PluginCommandCompleted {
+            command: "deploy".to_owned(),
+            message: "deployed to staging".to_owned(),
+        },
+    );
+    let json = serde_json::to_string(&event).expect("serialize a plugin command completion");
+    assert!(json.contains(r#""event":"plugin_command_completed""#));
+    let back: ServerEvent =
+        serde_json::from_str(&json).expect("a plugin command completion reads back");
+    match back.kind {
+        ServerEventKind::PluginCommandCompleted { command, message } => {
+            assert_eq!(command, "deploy");
+            assert_eq!(message, "deployed to staging");
+        }
+        other => panic!("expected a plugin command completion, got {other:?}"),
     }
 }
 

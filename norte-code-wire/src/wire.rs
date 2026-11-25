@@ -474,6 +474,15 @@ pub enum ClientRequestKind {
     RefreshSkills,
     /// List plugins installed on the remote host.
     ListPlugins,
+    /// Run a plugin slash command on an attached session.
+    RunCommand {
+        /// The attached session whose plugin context applies.
+        session: SessionKey,
+        /// The globally unique command name without `/`.
+        command: String,
+        /// Parsed arguments after the command name.
+        arguments: Vec<String>,
+    },
     /// Install one plugin from a remote git repository.
     InstallPlugin {
         /// Repository URL.
@@ -1095,6 +1104,13 @@ pub enum ServerEventKind {
     PluginList {
         /// Plugin metadata.
         plugins: Vec<PluginInfo>,
+    },
+    /// A plugin command finished running.
+    PluginCommandCompleted {
+        /// The command that ran.
+        command: String,
+        /// User-facing result text.
+        message: String,
     },
     /// A plugin operation reported a step.
     ///

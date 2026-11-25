@@ -111,7 +111,8 @@ pub(crate) fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKe
         | ClientRequestKind::ContextPin { session, .. }
         | ClientRequestKind::SessionRewind { session, .. }
         | ClientRequestKind::HistoryGet { session, .. }
-        | ClientRequestKind::SessionExport { session, .. } => Some(session),
+        | ClientRequestKind::SessionExport { session, .. }
+        | ClientRequestKind::RunCommand { session, .. } => Some(session),
         ClientRequestKind::SendMessage { session, .. }
         | ClientRequestKind::CostReport { session }
         | ClientRequestKind::ListTelemetry { session } => session.as_ref(),
@@ -164,6 +165,7 @@ pub(crate) fn is_plugin_request(kind: &ClientRequestKind) -> bool {
     matches!(
         kind,
         ClientRequestKind::ListPlugins
+            | ClientRequestKind::RunCommand { .. }
             | ClientRequestKind::InstallPlugin { .. }
             | ClientRequestKind::UpdatePlugins { .. }
             | ClientRequestKind::RemovePlugin { .. }

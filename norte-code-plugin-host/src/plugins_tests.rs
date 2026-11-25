@@ -6,6 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::{
+    CommandArgument, CommandName, CommandOutput, CommandRegistrationError, CommandRegistry,
+    CommandSpec,
+};
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct EmptyArgs {}
@@ -66,6 +70,188 @@ impl Plugin for Only {
     fn tools(&self) -> Vec<Arc<dyn AnyFunction>> {
         vec![hello_tool()]
     }
+}
+
+struct CommandPlugin;
+
+impl Plugin for CommandPlugin {
+    fn name(&self) -> &'static str {
+        "deploy"
+    }
+
+    fn register_commands(&self, registry: &mut CommandRegistry) {
+        registry
+            .register(
+                self.name(),
+                CommandSpec {
+                    name: CommandName::new("deploy").expect("valid command"),
+                    description: "Deploy the current workspace".to_owned(),
+                    arguments: vec![CommandArgument {
+                        name: "environment".to_owned(),
+                        description: "Target environment".to_owned(),
+                        required: true,
+                        choices: vec!["staging".to_owned(), "production".to_owned()],
+                    }],
+                },
+            )
+            .expect("unique command");
+    }
+
+    fn execute_command(
+        &self,
+        command: &CommandName,
+        arguments: &[String],
+    ) -> Result<CommandOutput, CommandExecutionError> {
+        if command.as_str() != "deploy" {
+            return Err(CommandExecutionError::UnknownCommand);
+        }
+        Ok(CommandOutput {
+            message: format!("deployed to {}", arguments[0]),
+        })
+    }
+}
+
+#[test]
+fn plugins_register_commands_and_execute_their_own_actions() {
+    let mut plugins = Plugins::new();
+    plugins.add(Box::new(CommandPlugin));
+    let registry = plugins.command_registry();
+    let command = CommandName::new("deploy").expect("valid command");
+    let result = plugins
+        .execute_command(&registry, &command, &["staging".to_owned()])
+        .expect("plugin command");
+    assert_eq!(result.message, "deployed to staging");
+}
+
+struct SameNamedCommand {
+    command: &'static str,
+    output: &'static str,
+}
+
+impl Plugin for SameNamedCommand {
+    fn name(&self) -> &'static str {
+        "same-name"
+    }
+
+    fn register_commands(&self, registry: &mut CommandRegistry) {
+        registry
+            .register(
+                self.name(),
+                CommandSpec {
+                    name: CommandName::new(self.command).expect("valid command"),
+                    description: "Test command".to_owned(),
+                    arguments: Vec::new(),
+                },
+            )
+            .expect("unique command");
+    }
+
+    fn execute_command(
+        &self,
+        command: &CommandName,
+        _arguments: &[String],
+    ) -> Result<CommandOutput, CommandExecutionError> {
+        if command.as_str() != self.command {
+            return Err(CommandExecutionError::UnknownCommand);
+        }
+        Ok(CommandOutput {
+            message: self.output.to_owned(),
+        })
+    }
+}
+
+#[test]
+fn commands_route_to_the_declaring_plugin_even_when_names_repeat() {
+    let mut plugins = Plugins::new();
+    plugins.add(Box::new(SameNamedCommand {
+        command: "first-action",
+        output: "first",
+    }));
+    plugins.add(Box::new(SameNamedCommand {
+        command: "second-action",
+        output: "second",
+    }));
+    let registry = plugins.command_registry();
+    let command = CommandName::new("second-action").expect("valid command");
+    let output = plugins
+        .execute_command(&registry, &command, &[])
+        .expect("second plugin command");
+    assert_eq!(output.message, "second");
+}
+
+#[test]
+fn registry_rejects_builtin_collisions_and_invalid_argument_order() {
+    let mut registry = CommandRegistry::default();
+    for name in ["compact", "new", "open", "reasoning"] {
+        let reserved = registry.register(
+            "plugin",
+            CommandSpec {
+                name: CommandName::new(name).expect("valid command name"),
+                description: "collision".to_owned(),
+                arguments: Vec::new(),
+            },
+        );
+        assert!(matches!(
+            reserved,
+            Err(CommandRegistrationError::Reserved(_))
+        ));
+    }
+
+    let invalid = registry.register(
+        "plugin",
+        CommandSpec {
+            name: CommandName::new("deploy").expect("valid command name"),
+            description: "Deploy".to_owned(),
+            arguments: vec![
+                CommandArgument {
+                    name: "environment".to_owned(),
+                    description: "Optional environment".to_owned(),
+                    required: false,
+                    choices: Vec::new(),
+                },
+                CommandArgument {
+                    name: "version".to_owned(),
+                    description: "Required version".to_owned(),
+                    required: true,
+                    choices: Vec::new(),
+                },
+            ],
+        },
+    );
+    assert!(matches!(
+        invalid,
+        Err(CommandRegistrationError::InvalidDefinition { .. })
+    ));
+}
+
+#[test]
+fn registry_rejects_ambiguous_argument_metadata() {
+    let mut registry = CommandRegistry::default();
+    let error = registry.register(
+        "plugin",
+        CommandSpec {
+            name: CommandName::new("deploy").expect("valid command name"),
+            description: "Deploy".to_owned(),
+            arguments: vec![
+                CommandArgument {
+                    name: "environment".to_owned(),
+                    description: "Target environment".to_owned(),
+                    required: true,
+                    choices: vec!["staging".to_owned(), "staging".to_owned()],
+                },
+                CommandArgument {
+                    name: "environment".to_owned(),
+                    description: "Repeated argument".to_owned(),
+                    required: false,
+                    choices: Vec::new(),
+                },
+            ],
+        },
+    );
+    assert!(matches!(
+        error,
+        Err(CommandRegistrationError::InvalidDefinition { .. })
+    ));
 }
 
 #[test]

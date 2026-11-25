@@ -34,8 +34,13 @@ pub(in crate::app) fn sync_selectors(
         if next != model.preferences.reasoning {
             model.preferences.reasoning = next;
             if let (Some(cmd), Some(session)) = (commands.as_ref(), model.active.clone()) {
-                let effort = selector.value().unwrap_or_default().to_string();
-                let _ = cmd.try_send(UiCommand::SetReasoning { session, effort });
+                let reasoning = match next {
+                    crate::ui_model::ReasoningLevel::Auto => norte_code_wire::Reasoning::Automatic,
+                    level => norte_code_wire::Reasoning::Effort {
+                        effort: level.label().to_owned(),
+                    },
+                };
+                let _ = cmd.try_send(UiCommand::SetReasoning { session, reasoning });
             }
         }
     }

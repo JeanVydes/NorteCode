@@ -81,7 +81,7 @@ pub(in crate::app) fn drain_palette(
         }
         ui::PaletteAction::NewSession => {
             if let Some(commands) = commands.as_ref() {
-                let _ = commands.try_send(UiCommand::NewDraft);
+                let _ = commands.try_send(UiCommand::NewDraft { model: None });
             }
         }
         ui::PaletteAction::Compact => {

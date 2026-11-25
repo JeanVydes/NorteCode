@@ -41,6 +41,7 @@ fn apply_attached(
     model.active_model.clone_from(&session.model);
     model.active_provider.clone_from(&session.provider);
     model.active = Some(norte_code_wire::SessionKey::new(session.session_id.clone()));
+    model.pending_new_session_model = None;
     model.attached_title = Some(title.clone());
     if changed_session {
         // Never show another session's content under this label.
@@ -233,8 +234,9 @@ pub(in crate::app) fn drain_server_events(
                 model.sessions = sessions;
                 changed = true;
             }
-            Ok(ClientEvent::DraftStarted) => {
+            Ok(ClientEvent::DraftStarted { model: selection }) => {
                 model.active = None;
+                model.pending_new_session_model = selection;
                 model.pending_attachments.clear();
                 model.active_model = None;
                 model.active_provider = None;
@@ -258,6 +260,7 @@ pub(in crate::app) fn drain_server_events(
             Ok(ClientEvent::DataCleared) => {
                 model.sessions.clear();
                 model.active = None;
+                model.pending_new_session_model = None;
                 model.pending_attachments.clear();
                 model.active_model = None;
                 model.active_provider = None;

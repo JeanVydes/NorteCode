@@ -308,6 +308,9 @@ impl NorteCodeRaepHost {
             ClientRequestKind::ListPlugins => ServerEventKind::PluginList {
                 plugins: crate::plugin_manager::plugin_info(),
             },
+            ClientRequestKind::RunCommand {
+                command, arguments, ..
+            } => self.run_plugin_command(command, arguments).await?,
             ClientRequestKind::InstallPlugin { url, package, all } => {
                 // The build runs on a blocking thread, and the page following
                 // it watches the session's stream: the steps go there while
@@ -396,5 +399,28 @@ impl NorteCodeRaepHost {
         )
         .await
         .map(|frame| vec![frame])
+    }
+
+    async fn run_plugin_command(
+        &self,
+        command: String,
+        arguments: Vec<String>,
+    ) -> Result<ServerEventKind, HostError> {
+        let plugin_host = self
+            .plugin_host
+            .as_ref()
+            .ok_or_else(|| HostError::Service("plugin commands are unavailable".to_owned()))?
+            .clone();
+        let command_for_run = command.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            plugin_host.execute_command(&command_for_run, &arguments)
+        })
+        .await
+        .map_err(|error| HostError::Service(error.to_string()))?
+        .map_err(|error| HostError::Service(error.to_string()))?;
+        Ok(ServerEventKind::PluginCommandCompleted {
+            command,
+            message: output.message,
+        })
     }
 }

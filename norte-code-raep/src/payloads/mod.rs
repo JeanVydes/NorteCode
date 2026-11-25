@@ -211,6 +211,8 @@ enum CanonicalEvent<'a> {
     ServiceData { kind: ServiceDataKind, data: Value },
     /// The plugins installed on the remote host.
     PluginList { plugins: Value },
+    /// A plugin command completed.
+    PluginCommandCompleted { command: &'a str, message: &'a str },
     /// A plugin lifecycle operation completed.
     PluginChanged { operation: &'a str, name: &'a str },
     /// A plugin operation reported a step.

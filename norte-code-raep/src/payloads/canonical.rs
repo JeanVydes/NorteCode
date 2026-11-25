@@ -324,6 +324,9 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::PluginList { plugins } => CanonicalEvent::PluginList {
             plugins: serialized(plugins),
         },
+        ServerEventKind::PluginCommandCompleted { command, message } => {
+            CanonicalEvent::PluginCommandCompleted { command, message }
+        }
         ServerEventKind::PluginChanged { operation, name } => {
             CanonicalEvent::PluginChanged { operation, name }
         }

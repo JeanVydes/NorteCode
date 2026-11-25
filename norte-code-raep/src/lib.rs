@@ -325,6 +325,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         raep_limits.max_queued_inputs,
     )
     .await?;
+    plugin_host.install_plugins(Arc::new(plugins));
     migrate_pins_to_session_stats(&services, &database.with_file_name("pins")).await;
     plugin_host.install_services(services.clone(), agent_id.clone());
     let auth_principals = std::env::var("NORTE_CODE_AUTH_USERS")

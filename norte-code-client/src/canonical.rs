@@ -34,6 +34,7 @@ pub(crate) enum CanonicalKind {
     CostUpdated,
     CostNotReported,
     PluginList,
+    PluginCommandCompleted,
     PluginChanged,
     PluginProgress,
     ServiceData,
@@ -80,6 +81,7 @@ impl CanonicalKind {
             "cost_updated" => Self::CostUpdated,
             "cost_not_reported" => Self::CostNotReported,
             "plugin_list" => Self::PluginList,
+            "plugin_command_completed" => Self::PluginCommandCompleted,
             "plugin_changed" => Self::PluginChanged,
             "plugin_progress" => Self::PluginProgress,
             "service_data" => Self::ServiceData,
@@ -474,6 +476,12 @@ pub(crate) struct CanonicalCostNotReported {
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct CanonicalPluginList {
     pub(crate) plugins: Vec<norte_code_wire::PluginInfo>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CanonicalPluginCommandCompleted {
+    pub(crate) command: String,
+    pub(crate) message: String,
 }
 
 /// A canonical `plugin_changed` payload.

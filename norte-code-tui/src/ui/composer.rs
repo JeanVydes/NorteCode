@@ -162,6 +162,25 @@ impl Composer {
         self.draft.expanded_text()
     }
 
+    /// Whether the caret is at the end, where a completion popup may own arrows.
+    pub(crate) fn cursor_at_end(&self) -> bool {
+        self.input.state.cursor >= self.draft.len()
+    }
+
+    /// Replace a plain-text slash draft with its selected completion.
+    pub(crate) fn complete_command(&mut self, completion: &str) -> bool {
+        if !self.draft.wire_parts().is_empty() {
+            return false;
+        }
+        let completion = match completion {
+            "/reasoning" | "/reasoning budget" => format!("{completion} "),
+            _ => completion.to_owned(),
+        };
+        let cursor = self.draft.replace_range(0, self.draft.len(), &completion);
+        self.apply_draft(cursor, None);
+        true
+    }
+
     /// The upload parts the message must carry.
     pub(crate) fn wire_parts(&self) -> Vec<UserInputPart> {
         self.draft.wire_parts()

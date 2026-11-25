@@ -262,6 +262,8 @@ pub(crate) struct UiModel {
     pub(crate) active: Option<norte_code_wire::SessionKey>,
     /// Attachments staged locally until the first message creates a session.
     pub(crate) pending_attachments: Vec<PreparedAttachment>,
+    /// Model selection to apply when this draft creates its first session.
+    pub(crate) pending_new_session_model: Option<crate::client::NewSessionModel>,
     /// The model catalogue of the attached server.
     pub(crate) models: Vec<norte_code_wire::ModelInfo>,
     /// The attachment's plans.
@@ -501,6 +503,7 @@ impl UiModel {
             sessions: Vec::new(),
             active: None,
             pending_attachments: Vec::new(),
+            pending_new_session_model: None,
             models: Vec::new(),
             plans: Vec::new(),
             todos: Vec::new(),

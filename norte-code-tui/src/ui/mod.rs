@@ -11,6 +11,7 @@ mod command_palette;
 #[cfg(test)]
 #[path = "command_palette_tests.rs"]
 mod command_palette_tests;
+mod command_suggestions;
 mod composer;
 mod config_page;
 mod copy;
@@ -72,6 +73,7 @@ use terminalui::{Pane, Spacer};
 
 pub(crate) use chat_layout::ChatLayout;
 pub(crate) use command_palette::{CommandPalette, PaletteAction};
+pub(crate) use command_suggestions::{CommandSuggestion, CommandSuggestions};
 pub(crate) use composer::Composer;
 pub(crate) use config_page::{ConfigAction, ConfigData, Setting};
 pub(crate) use debug_overlay::{DebugOverlay, OverlayClock};
@@ -217,13 +219,19 @@ pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionCon
                 overlay_frame::OverlayFrame::new(
                     node("toast", ToastHost::new()),
                     node(
-                        "command_layer",
+                        "suggestions_layer",
                         overlay_frame::OverlayFrame::new(
-                            node("command_palette", CommandPalette::new()),
                             node(
-                                "debug_overlay",
-                                DebugOverlay::new(model.preferences.debug.enabled()),
+                                "command_layer",
+                                overlay_frame::OverlayFrame::new(
+                                    node("command_palette", CommandPalette::new()),
+                                    node(
+                                        "debug_overlay",
+                                        DebugOverlay::new(model.preferences.debug.enabled()),
+                                    ),
+                                ),
                             ),
+                            node("command_suggestions", CommandSuggestions::default()),
                         ),
                     ),
                 ),

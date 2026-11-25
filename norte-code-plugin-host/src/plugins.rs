@@ -19,6 +19,7 @@
 //! | Where | What |
 //! | --- | --- |
 //! | The tool registry | tools the model can call, with their schemas and executors |
+//! | The command registry | slash commands with argument completion and plugin-owned actions |
 //! | The sidebar | a status line and a line of the wordmark |
 //! | The catalogue | providers and models for this run |
 //!
@@ -27,22 +28,24 @@
 //! Write to the terminal or block a frame — those remain the host's job.
 //! Everything else is possible: a plugin can ask the host about the session
 //! through the context the host hands it ([`PluginContext::host`]), keep
-//! whatever state it wants in its own fields, and offer providers and models
-//! of its own to the catalogue ([`Plugin::catalogue`]). The trait itself
-//! carries no state; a plugin that needs to remember something stores it in a
-//! field of its own type.
+//! whatever state it wants in its own fields, register a command with
+//! [`Plugin::register_commands`] and handle it in [`Plugin::execute_command`],
+//! and offer providers and models of its own to the catalogue
+//! ([`Plugin::catalogue`]). The trait itself carries no state; a plugin that
+//! needs to remember something stores it in a field of its own type.
 //!
 //! # Extending it
 //!
-//! Adding a place a plugin may draw into is adding a method here and a drawing
-//! function in the host — one place each, and the tests for the host's side can
-//! use the same `Plugin` trait a real plugin does. Nothing here knows what a
-//! plugin is for; that is the point.
+//! Adding a capability is adding a method here and a handler in the host — one
+//! place each, and the tests for the host's side can use the same `Plugin` trait
+//! a real plugin does. Nothing here knows what a plugin is for; that is the
+//! point.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::{CommandExecutionError, CommandName, CommandOutput, CommandRegistry};
 use norte::AnyFunction;
 use norte_code_wire::catalog::{Model, Provider};
 use norte_code_wire::{ContextUsage, SessionKey};
@@ -126,6 +129,24 @@ pub trait Plugin: Send + Sync {
     /// files carry, so a plugin that has the JSON hands it over as it is.
     fn catalogue(&self) -> Catalogue {
         Catalogue::default()
+    }
+
+    /// Registers slash commands this plugin can execute.
+    fn register_commands(&self, _registry: &mut CommandRegistry) {}
+
+    /// Runs one command previously registered by this plugin.
+    ///
+    /// # Errors
+    ///
+    /// Return [`CommandExecutionError::Rejected`] when the supplied values do
+    /// not meet the plugin command's constraints, or
+    /// [`CommandExecutionError::Failed`] when the action cannot complete.
+    fn execute_command(
+        &self,
+        _command: &CommandName,
+        _arguments: &[String],
+    ) -> Result<CommandOutput, CommandExecutionError> {
+        Err(CommandExecutionError::UnknownCommand)
     }
 }
 
@@ -289,6 +310,65 @@ impl Plugins {
                     .map(move |tool| (name.clone(), tool))
             })
             .collect()
+    }
+
+    /// Builds the command registry from every loaded plugin.
+    #[must_use]
+    pub fn command_registry(&self) -> CommandRegistry {
+        let mut registry = CommandRegistry::default();
+        for (index, plugin) in self.loaded.iter().enumerate() {
+            registry.set_registration_owner(index, plugin.name().to_owned());
+            plugin.register_commands(&mut registry);
+            registry.clear_registration_owner();
+        }
+        registry
+    }
+
+    /// Executes a registered command through the plugin that owns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is not registered, its arguments do
+    /// not match its declaration, or the owning plugin rejects or fails it.
+    pub fn execute_command(
+        &self,
+        registry: &CommandRegistry,
+        command: &CommandName,
+        arguments: &[String],
+    ) -> Result<CommandOutput, CommandExecutionError> {
+        let registered = registry
+            .get(command)
+            .ok_or(CommandExecutionError::UnknownCommand)?;
+        let plugin = registered
+            .owner_index
+            .and_then(|index| self.loaded.get(index))
+            .or_else(|| {
+                self.loaded
+                    .iter()
+                    .find(|plugin| plugin.name() == registered.plugin)
+            })
+            .ok_or(CommandExecutionError::UnknownCommand)?;
+        let argument_count = arguments.len();
+        if argument_count > registered.spec.arguments.len()
+            || registered
+                .spec
+                .arguments
+                .iter()
+                .take(argument_count)
+                .zip(arguments)
+                .any(|(spec, value)| !spec.choices.is_empty() && !spec.choices.contains(value))
+            || registered
+                .spec
+                .arguments
+                .iter()
+                .skip(argument_count)
+                .any(|spec| spec.required)
+        {
+            return Err(CommandExecutionError::Rejected(
+                "arguments do not match the registered command".to_owned(),
+            ));
+        }
+        plugin.execute_command(command, arguments)
     }
 
     /// The status fields paired with the name of the plugin that offered them.

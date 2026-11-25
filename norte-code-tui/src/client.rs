@@ -35,7 +35,10 @@ pub(crate) enum ClientEvent {
     /// The service is reachable, but no session has been created yet.
     Ready,
     /// The user started a new empty draft without creating a session.
-    DraftStarted,
+    DraftStarted {
+        /// Optional model to use when this draft creates its first session.
+        model: Option<NewSessionModel>,
+    },
     /// The connection is down; contains the reason.
     Detached {
         /// What went wrong, in words a person can act on.
@@ -131,6 +134,15 @@ pub(crate) enum ClientEvent {
     },
 }
 
+/// Provider and model selected for a session that has not been created yet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NewSessionModel {
+    /// Provider id.
+    pub(crate) provider: String,
+    /// Model id from that provider.
+    pub(crate) model: String,
+}
+
 /// Commands the interface sends to the connection task.
 #[derive(Clone, Debug)]
 pub(crate) enum UiCommand {
@@ -146,6 +158,8 @@ pub(crate) enum UiCommand {
         attachments: Vec<PreparedAttachment>,
         /// `steer` or `queue`; forwarded to the host.
         queue_mode: String,
+        /// Model to apply if this send creates the first session.
+        new_session_model: Option<NewSessionModel>,
     },
     /// Store an attachment's bytes before it can be sent.
     Upload {
@@ -157,7 +171,10 @@ pub(crate) enum UiCommand {
     /// Refetch the session list.
     Refresh,
     /// Start a blank draft without creating a session.
-    NewDraft,
+    NewDraft {
+        /// Optional model selection to defer until the first message.
+        model: Option<NewSessionModel>,
+    },
     /// Set the session's model.
     SetModel {
         /// The session to change.
@@ -171,8 +188,8 @@ pub(crate) enum UiCommand {
     SetReasoning {
         /// The session to change.
         session: SessionKey,
-        /// The effort, `auto` / `low` / `medium` / `high`.
-        effort: String,
+        /// The reasoning mode or model-specific setting.
+        reasoning: norte_code_wire::Reasoning,
     },
     /// Refetch the catalogue views for the current session.
     RefreshViews,
@@ -219,6 +236,15 @@ pub(crate) enum UiCommand {
     Compact {
         /// The session to compact.
         session: norte_code_wire::SessionKey,
+    },
+    /// Run a registered plugin slash command.
+    RunCommand {
+        /// The session that supplies the plugin context.
+        session: norte_code_wire::SessionKey,
+        /// Globally unique slash command name.
+        command: String,
+        /// Parsed argument values.
+        arguments: Vec<String>,
     },
     /// Fork the session, optionally at a turn.
     Fork {
@@ -299,6 +325,12 @@ async fn cancel_turn(
 enum BackgroundOp {
     /// A plugin operation.
     Plugin(PluginOp),
+    /// Run a plugin command away from the stream loop.
+    Command {
+        session: SessionKey,
+        command: String,
+        arguments: Vec<String>,
+    },
     /// A session rename.
     Rename {
         /// The session to rename.
@@ -318,12 +350,38 @@ fn spawn_host_op(kind: BackgroundOp, api: Arc<RestClient>, events: Sender<Client
     tokio::spawn(async move {
         match kind {
             BackgroundOp::Plugin(op) => run_plugin_op(&api, op, &events).await,
+            BackgroundOp::Command {
+                session,
+                command,
+                arguments,
+            } => run_command(&api, &events, &session, &command, arguments).await,
             BackgroundOp::Rename { session, title } => {
                 rename_session(&api, &session, &title, &events).await;
             }
             BackgroundOp::Delete { session } => delete_session(&api, &session, &events).await,
         }
     });
+}
+
+async fn run_command(
+    api: &RestClient,
+    events: &Sender<ClientEvent>,
+    session: &SessionKey,
+    command: &str,
+    arguments: Vec<String>,
+) {
+    match api.run_command(session.as_str(), command, arguments).await {
+        Ok(message) => {
+            let _ = events.send(ClientEvent::Notice { text: message }).await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::SendFailed {
+                    reason: ClientError::plugin(error),
+                })
+                .await;
+        }
+    }
 }
 
 /// Rename a session; on any outcome re-list the sessions.
@@ -628,7 +686,7 @@ async fn connection(
                     | StreamOutcome::SwitchWithMessage(summary, _) => {
                         Some(SessionKey::new(summary.session_id.clone()))
                     }
-                    StreamOutcome::Retry | StreamOutcome::Cleared | StreamOutcome::Draft => None,
+                    StreamOutcome::Retry | StreamOutcome::Cleared | StreamOutcome::Draft(_) => None,
                 };
                 let _ = command_session_tx.send(active);
                 if outcome_tx.send(outcome).await.is_err() {
@@ -674,11 +732,11 @@ async fn connection(
                 let _ = events.send(ClientEvent::DataCleared).await;
                 let _ = events.send(ClientEvent::Sessions(Vec::new())).await;
             }
-            StreamOutcome::Draft => {
+            StreamOutcome::Draft(model) => {
                 active_session = None;
                 pending = None;
                 let _ = session_tx.send(None);
-                let _ = events.send(ClientEvent::DraftStarted).await;
+                let _ = events.send(ClientEvent::DraftStarted { model }).await;
             }
         }
     }
@@ -954,7 +1012,7 @@ enum StreamOutcome {
     /// The service cleared its operational data; return to the no-session state.
     Cleared,
     /// Start a new empty draft without creating a server session.
-    Draft,
+    Draft(Option<NewSessionModel>),
 }
 
 struct PendingMessage {
@@ -1034,7 +1092,7 @@ async fn stream_loop(
                         return StreamOutcome::SwitchWithMessage(summary, message);
                     }
                     StreamOutcome::Cleared => return StreamOutcome::Cleared,
-                    StreamOutcome::Draft => return StreamOutcome::Draft,
+                    StreamOutcome::Draft(model) => return StreamOutcome::Draft(model),
                     StreamOutcome::Retry => {}
                 }
                 if opened_at.elapsed() >= healthy_stream {
@@ -1139,6 +1197,21 @@ async fn apply_command(
         UiCommand::Plugin(op) => {
             spawn_host_op(BackgroundOp::Plugin(op), Arc::clone(api), events.clone());
         }
+        UiCommand::RunCommand {
+            session,
+            command,
+            arguments,
+        } => {
+            spawn_host_op(
+                BackgroundOp::Command {
+                    session,
+                    command,
+                    arguments,
+                },
+                Arc::clone(api),
+                events.clone(),
+            );
+        }
         UiCommand::RenameSession { session, title } => {
             spawn_host_op(
                 BackgroundOp::Rename { session, title },
@@ -1184,6 +1257,7 @@ async fn apply_command(
             mut parts,
             attachments,
             queue_mode,
+            new_session_model,
         } => {
             if let Some(session) = session {
                 for attachment in attachments {
@@ -1197,7 +1271,17 @@ async fn apply_command(
                 }
                 send_prompt(api, events, &session, text, parts, queue_mode).await;
             } else {
-                match client.create_session(None).await {
+                let idempotency_key = RemoteClient::create_session_key();
+                match client
+                    .create_session_with_model_with_key(
+                        None,
+                        new_session_model.as_ref().map(|selection| {
+                            (selection.provider.as_str(), selection.model.as_str())
+                        }),
+                        &idempotency_key,
+                    )
+                    .await
+                {
                     Ok(summary) => {
                         return Some(StreamOutcome::SwitchWithMessage(
                             Box::new(summary),
@@ -1230,7 +1314,7 @@ async fn apply_command(
                 let _ = events.send(ClientEvent::Sessions(sessions)).await;
             }
         }
-        UiCommand::NewDraft => return Some(StreamOutcome::Draft),
+        UiCommand::NewDraft { model } => return Some(StreamOutcome::Draft(model)),
         UiCommand::AnswerQuestion {
             session,
             question,
@@ -1263,20 +1347,21 @@ async fn apply_command(
         UiCommand::DeleteSecret { provider } => {
             delete_secret(api, events, &provider).await;
         }
-        UiCommand::SetReasoning { session, effort } => {
-            let reasoning = match crate::ui_model::ReasoningLevel::from_label(&effort) {
-                Some(level) if level != crate::ui_model::ReasoningLevel::Auto => {
-                    norte_code_wire::Reasoning::Effort { effort }
-                }
-                _ => norte_code_wire::Reasoning::Automatic,
-            };
-            let _ = api
+        UiCommand::SetReasoning { session, reasoning } => {
+            if let Err(error) = api
                 .set_reasoning(
                     session.as_str(),
                     norte_code_wire::ReasoningScope::Session,
                     reasoning,
                 )
-                .await;
+                .await
+            {
+                let _ = events
+                    .send(ClientEvent::SendFailed {
+                        reason: ClientError::set_reasoning(error),
+                    })
+                    .await;
+            }
         }
     }
     None

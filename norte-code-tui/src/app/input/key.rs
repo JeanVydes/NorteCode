@@ -9,6 +9,9 @@ use crate::ui_model::{SessionAttachmentState, Tab, TurnState, UiModel};
 
 use super::super::event_fold::{notice, toast};
 use super::palette::handle_palette_key;
+use super::slash_actions::{
+    execute_slash_command, handle_slash_suggestion_key, sync_slash_suggestions,
+};
 use super::{cycle_theme, digit_switches_tab, scroll_page, settle_input, toggle_list_focus};
 
 fn models_page(tree: &terminalui::Tree) -> Option<&ui::ModelsPage> {
@@ -72,6 +75,10 @@ pub(in crate::app) fn handle_key(
         return true;
     }
     if handle_palette_key(tree, key, commands, model) {
+        return false;
+    }
+    if handle_slash_suggestion_key(tree, key, model) {
+        settle_input(tree, commands, model);
         return false;
     }
     if key.modifiers == KeyModifiers::CONTROL
@@ -158,6 +165,7 @@ pub(in crate::app) fn handle_key(
     if pass_to_tree {
         let input = terminalui::InputEvent::from(Event::Key(key));
         let outcome = tree.handle_event(&input);
+        sync_slash_suggestions(tree, model);
         if cancel_on_escape && outcome.is_ignored() && model.turn != TurnState::Idle {
             let _ = cancel_active_turn(tree, commands, model);
         }
@@ -251,15 +259,16 @@ fn send_current_prompt(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) {
-    let (prompt, parts) = tree
+    let (raw_prompt, parts) = tree
         .find::<ui::Composer>("composer")
-        .map(|composer| {
-            (
-                composer.expanded_text().trim().to_string(),
-                composer.wire_parts(),
-            )
-        })
+        .map(|composer| (composer.expanded_text(), composer.wire_parts()))
         .unwrap_or_default();
+    if raw_prompt.starts_with('/') && !raw_prompt.starts_with("//") {
+        execute_slash_command(tree, commands.as_ref(), model, &raw_prompt, &parts);
+        sync_slash_suggestions(tree, model);
+        return;
+    }
+    let prompt = raw_prompt.trim().to_owned();
     if prompt.is_empty() && parts.is_empty() && model.pending_attachments.is_empty() {
         return;
     }
@@ -311,6 +320,7 @@ fn send_current_prompt(
             parts,
             attachments,
             queue_mode: queue_mode.to_string(),
+            new_session_model: model.pending_new_session_model.clone(),
         });
     }
     if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {

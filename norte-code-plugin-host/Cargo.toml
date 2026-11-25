@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 norte-code-wire = { path = "../norte-code-wire" }
 norte-code-plugin-api = { path = "../norte-code-plugin-api" }
 

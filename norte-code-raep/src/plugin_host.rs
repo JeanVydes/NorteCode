@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use norte_code_agent::Service;
 use norte_code_plugin_host::plugins::PluginHost;
+use norte_code_plugin_host::{CommandName, CommandRegistry, Plugins};
 use norte_code_wire::{ContextUsage, SessionKey};
 
 #[derive(Default)]
@@ -13,6 +14,8 @@ struct AdapterState {
     session_agents: HashMap<String, String>,
     current_session: Option<SessionKey>,
     default_agent: Option<String>,
+    plugins: Option<Arc<Plugins>>,
+    commands: CommandRegistry,
 }
 
 /// A plugin host backed by the services the RAEP server owns.
@@ -40,6 +43,29 @@ impl PluginHostAdapter {
         let mut state = self.write();
         state.services = services;
         state.default_agent = Some(default_agent);
+    }
+
+    pub(crate) fn install_plugins(&self, plugins: Arc<Plugins>) {
+        let commands = plugins.command_registry();
+        let mut state = self.write();
+        state.plugins = Some(plugins);
+        state.commands = commands;
+    }
+
+    pub(crate) fn execute_command(
+        &self,
+        name: &str,
+        arguments: &[String],
+    ) -> Result<norte_code_plugin_host::CommandOutput, norte_code_plugin_host::CommandExecutionError>
+    {
+        let name = CommandName::new(name.to_owned())
+            .map_err(|_| norte_code_plugin_host::CommandExecutionError::UnknownCommand)?;
+        let state = self.read();
+        let plugins = state
+            .plugins
+            .as_ref()
+            .ok_or(norte_code_plugin_host::CommandExecutionError::UnknownCommand)?;
+        plugins.execute_command(&state.commands, &name, arguments)
     }
 
     pub(crate) fn set_session(&self, session: &str, agent: &str) {

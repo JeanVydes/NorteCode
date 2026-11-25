@@ -66,7 +66,7 @@ fn create_session(
     model: &mut UiModel,
 ) {
     if let Some(commands) = commands {
-        let _ = commands.try_send(UiCommand::NewDraft);
+        let _ = commands.try_send(UiCommand::NewDraft { model: None });
     }
     switch_to_chat(tree, model);
 }

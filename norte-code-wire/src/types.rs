@@ -200,6 +200,37 @@ pub struct PluginInfo {
     /// The names of the tools this plugin declared.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Slash commands this loaded plugin registered.
+    #[serde(default)]
+    pub commands: Vec<PluginCommandInfo>,
+}
+
+/// Client-visible metadata for one plugin slash command.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandInfo {
+    /// Command name without its leading slash.
+    pub name: String,
+    /// Short description shown in autocomplete.
+    pub description: String,
+    /// Arguments in command order.
+    #[serde(default)]
+    pub arguments: Vec<PluginCommandArgumentInfo>,
+}
+
+/// Client-visible metadata and completions for one plugin command argument.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandArgumentInfo {
+    /// Argument name shown in help.
+    pub name: String,
+    /// Short explanation shown in help.
+    pub description: String,
+    /// Whether a value must be provided.
+    pub required: bool,
+    /// Closed choices, or an empty list for free text.
+    #[serde(default)]
+    pub choices: Vec<String>,
 }
 
 /// One MCP server visible to the service.
