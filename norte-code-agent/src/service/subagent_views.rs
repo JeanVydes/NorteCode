@@ -4,6 +4,7 @@
 //! built JSON so a field cannot be renamed in one arm and missed in another,
 //! and so the values the model reads have a shape the compiler checks.
 
+use norte_code_wire::ChildState;
 use serde::Serialize;
 
 /// The payload of `inspect_agent`.
@@ -15,7 +16,7 @@ pub(super) enum InspectView<'a> {
         /// The child's id.
         child_session_id: &'a str,
         /// Its state.
-        status: ChildStatus<'a>,
+        status: ChildStatus,
     },
     /// The child's recent messages.
     Transcript {
@@ -48,9 +49,9 @@ pub(super) enum InspectView<'a> {
 
 /// Where one child session stands.
 #[derive(Serialize)]
-pub(super) struct ChildStatus<'a> {
+pub(super) struct ChildStatus {
     /// Its phase, as the wire spells it.
-    pub(super) state: &'a str,
+    pub(super) state: ChildState,
     /// Its title.
     pub(super) title: String,
     /// Whether its delegator is suspended.
@@ -70,11 +71,11 @@ pub(super) struct JobView<'a> {
 
 /// The answer to `message_agent` when the message was held.
 #[derive(Serialize)]
-pub(super) struct HeldMessage<'a> {
+pub(super) struct HeldMessage {
     /// Whether the message was taken.
     pub(super) accepted: bool,
     /// How it will be delivered.
-    pub(super) delivery: &'a str,
+    pub(super) delivery: crate::service::subagents::MessageDelivery,
     /// Whether the delegator is holding it.
     pub(super) held: bool,
     /// How many messages the delegator holds.
@@ -83,13 +84,13 @@ pub(super) struct HeldMessage<'a> {
 
 /// The answer to `message_agent` when the message was taken.
 #[derive(Serialize)]
-pub(super) struct AcceptedMessage<'a> {
+pub(super) struct AcceptedMessage {
     /// Whether the message was taken.
     pub(super) accepted: bool,
     /// How it will be delivered.
-    pub(super) delivery: &'a str,
+    pub(super) delivery: crate::service::subagents::MessageDelivery,
     /// What the child is doing now.
-    pub(super) child_state: &'a str,
+    pub(super) child_state: ChildState,
     /// Whether the delegator is holding it.
     pub(super) held: bool,
 }
@@ -100,7 +101,7 @@ pub(super) struct ChildStateView<'a> {
     /// The child's id.
     pub(super) child_session_id: &'a str,
     /// Where it stands.
-    pub(super) state: &'a str,
+    pub(super) state: ChildState,
 }
 
 /// The answer to `wait_agent`.
@@ -109,7 +110,7 @@ pub(super) struct WaitView<'a> {
     /// The child's id.
     pub(super) child_session_id: &'a str,
     /// Where it stands now.
-    pub(super) state: &'a str,
+    pub(super) state: ChildState,
     /// Whether the wait gave up before the child changed.
     pub(super) timed_out: bool,
 }
@@ -137,7 +138,7 @@ pub(super) struct ListedChild {
     /// The child's id.
     pub(super) child_session_id: String,
     /// Where it stands.
-    pub(super) state: String,
+    pub(super) state: ChildState,
     /// The call that spawned it.
     pub(super) tool_call_id: String,
 }

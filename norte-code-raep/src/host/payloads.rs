@@ -1,11 +1,26 @@
 //! The payloads this host serializes, one struct per frame.
 
+use norte_code_wire::SessionKey;
 use raep_types::TurnId;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DelegatorControlRequest {
+    pub(crate) action: DelegatorControlAction,
+    pub(crate) child_session_id: SessionKey,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DelegatorControlAction {
+    Suspend,
+    Release,
+}
 
 /// The session-state payload.
 #[derive(Debug, serde::Serialize)]
@@ -26,8 +41,8 @@ pub(crate) enum SessionStateStatus {
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct HistorySummaryItem {
-    pub(crate) role: HistoryRole,
-    pub(crate) kind: HistoryItemKind,
+    pub(crate) role: norte_code_wire::HistorySpeaker,
+    pub(crate) kind: norte_code_wire::HistoryItemKind,
     pub(crate) content: String,
     pub(crate) turn_id: Option<String>,
     pub(crate) timestamp: i64,
@@ -36,28 +51,6 @@ pub(crate) struct HistorySummaryItem {
     pub(crate) truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) origin: Option<Value>,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum HistoryRole {
-    Tool,
-    SystemEvent,
-    User,
-    Assistant,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum HistoryItemKind {
-    Tool,
-    SystemEvent,
-    User,
-    Assistant,
-    Reasoning,
-    ToolCall,
-    ToolResult,
-    Refusal,
 }
 
 pub(crate) struct HistoryItemView {
@@ -73,24 +66,28 @@ pub(crate) struct HistoryItemView {
 
 pub(crate) fn history_item_value(item: HistoryItemView) -> HistorySummaryItem {
     let role = match item.role {
-        norte_code_wire::MessageRole::Tool => HistoryRole::Tool,
+        norte_code_wire::MessageRole::Tool => norte_code_wire::HistorySpeaker::Tool,
         norte_code_wire::MessageRole::System
         | norte_code_wire::MessageRole::Developer
-        | norte_code_wire::MessageRole::Unknown => HistoryRole::SystemEvent,
-        norte_code_wire::MessageRole::User => HistoryRole::User,
-        norte_code_wire::MessageRole::Assistant => HistoryRole::Assistant,
+        | norte_code_wire::MessageRole::Unknown => norte_code_wire::HistorySpeaker::SystemEvent,
+        norte_code_wire::MessageRole::User => norte_code_wire::HistorySpeaker::User,
+        norte_code_wire::MessageRole::Assistant => norte_code_wire::HistorySpeaker::Assistant,
     };
     let kind = match item.kind {
         norte_code_wire::ReplayedKind::Text => match role {
-            HistoryRole::Tool => HistoryItemKind::Tool,
-            HistoryRole::SystemEvent => HistoryItemKind::SystemEvent,
-            HistoryRole::User => HistoryItemKind::User,
-            HistoryRole::Assistant => HistoryItemKind::Assistant,
+            norte_code_wire::HistorySpeaker::Tool => norte_code_wire::HistoryItemKind::Tool,
+            norte_code_wire::HistorySpeaker::SystemEvent => {
+                norte_code_wire::HistoryItemKind::SystemEvent
+            }
+            norte_code_wire::HistorySpeaker::User => norte_code_wire::HistoryItemKind::User,
+            norte_code_wire::HistorySpeaker::Assistant => {
+                norte_code_wire::HistoryItemKind::Assistant
+            }
         },
-        norte_code_wire::ReplayedKind::Reasoning => HistoryItemKind::Reasoning,
-        norte_code_wire::ReplayedKind::ToolCall => HistoryItemKind::ToolCall,
-        norte_code_wire::ReplayedKind::ToolResult => HistoryItemKind::ToolResult,
-        norte_code_wire::ReplayedKind::Refusal => HistoryItemKind::Refusal,
+        norte_code_wire::ReplayedKind::Reasoning => norte_code_wire::HistoryItemKind::Reasoning,
+        norte_code_wire::ReplayedKind::ToolCall => norte_code_wire::HistoryItemKind::ToolCall,
+        norte_code_wire::ReplayedKind::ToolResult => norte_code_wire::HistoryItemKind::ToolResult,
+        norte_code_wire::ReplayedKind::Refusal => norte_code_wire::HistoryItemKind::Refusal,
     };
     let (content, truncated) = if let Some(max) = item.max_content_bytes {
         let mut end = item.text.len().min(max);

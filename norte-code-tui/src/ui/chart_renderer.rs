@@ -19,11 +19,18 @@ pub(super) fn paint_slot_title(
     title: &str,
     theme: &Theme,
 ) -> Rect {
-    let bold = Style::default()
-        .fg(theme.foreground)
-        .bg(theme.background)
-        .add_modifier(Modifier::BOLD);
-    page.set_stringn(0, layout_y, title, title.len(), bold);
+    let title_area = Rect::new(0, layout_y, width, 1);
+    page.set_style(title_area, Style::default().bg(theme.secondary));
+    page.set_stringn(
+        1,
+        layout_y,
+        title,
+        usize::from(width.saturating_sub(2)),
+        Style::default()
+            .fg(theme.accent)
+            .bg(theme.secondary)
+            .add_modifier(Modifier::BOLD),
+    );
     let body_y = layout_y + 1;
     Rect {
         x: 0,
@@ -42,14 +49,26 @@ pub(super) fn paint_time_labels(
     window: (usize, usize),
     theme: &Theme,
 ) {
+    paint_time_labels_at(labels, page, Rect::new(0, y, width, 1), window, theme);
+}
+
+pub(super) fn paint_time_labels_at(
+    labels: &[String],
+    page: &mut Buffer,
+    area: Rect,
+    window: (usize, usize),
+    theme: &Theme,
+) {
     let (start, end) = window;
-    if start == end {
+    if start == end || area.width == 0 || area.height == 0 {
         return;
     }
-    let plot_width = width.saturating_sub(LINE_AXIS_WIDTH).max(1);
+    let plot_width = area.width.saturating_sub(LINE_AXIS_WIDTH).max(1);
     let last = end.saturating_sub(start).saturating_sub(1);
+    let label_capacity = usize::from(plot_width / 8).max(1);
+    let step = end.saturating_sub(start).div_ceil(label_capacity).max(1);
     let style = Style::default().fg(theme.muted);
-    for index in (start..end).step_by(10) {
+    for index in (start..end).step_by(step) {
         let Some(label) = labels.get(index) else {
             continue;
         };
@@ -58,7 +77,7 @@ pub(super) fn paint_time_labels(
             .checked_mul(usize::from(plot_width.saturating_sub(1)))
             .and_then(|value| value.checked_div(last))
             .map_or(0, |value| u16::try_from(value).unwrap_or(0));
-        page.set_stringn(column, y, label, 5, style);
+        page.set_stringn(area.x.saturating_add(column), area.y, label, 5, style);
     }
 }
 

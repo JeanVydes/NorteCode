@@ -41,7 +41,6 @@ where
             && let Some(oldest) = self.order.pop_front()
         {
             self.ids.remove(&oldest);
-            self.order.retain(|id| id != &oldest);
         }
         true
     }

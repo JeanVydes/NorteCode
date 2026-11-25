@@ -16,7 +16,7 @@ fn slot_title_paints_the_title_and_returns_the_body() {
     assert_eq!(body.width, 20);
     assert_eq!(body.height, CHART_SLOT - 1);
     let mut text = String::new();
-    for x in 0..4 {
+    for x in 0..10 {
         text.push_str(page[(x, 2)].symbol());
     }
     assert!(text.contains("cost"), "{text}");
@@ -54,7 +54,7 @@ fn blit_rows_copies_inside_the_area_and_skips_outside() {
     let mut frame = Buffer::empty(area);
     crate::ui::chart_renderer::blit_rows(&page, &mut frame, area, 0);
     let mut text = String::new();
-    for x in 0..5 {
+    for x in 0..6 {
         text.push_str(frame[(x, 0)].symbol());
     }
     assert!(text.contains("title"), "{text}");

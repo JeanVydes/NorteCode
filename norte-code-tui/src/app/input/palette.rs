@@ -35,14 +35,8 @@ pub(in crate::app) fn handle_palette_key(
         .find::<ui::CommandPalette>("command_palette")
         .is_some_and(ui::CommandPalette::is_open)
     {
-        if (key.modifiers, key.code) == (KeyModifiers::CONTROL, KeyCode::Char('c')) {
-            if let Some(palette) = tree.find_mut::<ui::CommandPalette>("command_palette") {
-                palette.close();
-            }
-        } else {
-            let input = terminalui::InputEvent::from(Event::Key(key));
-            tree.handle_event(&input);
-        }
+        let input = terminalui::InputEvent::from(Event::Key(key));
+        tree.handle_event(&input);
         restore_palette_focus(tree);
         settle_input(tree, commands, model);
         return true;

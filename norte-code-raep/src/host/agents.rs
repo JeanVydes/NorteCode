@@ -104,7 +104,13 @@ impl NorteCodeRaepHost {
                 .filter(|owner| *owner == principal)
                 .count() as u64
         };
-        let (replay_frames, _) = self.replay.total();
+        let (replay_frames, _) = match self.replay_total().await {
+            Ok(total) => total,
+            Err(error) => {
+                tracing::warn!(%error, "could not read replay totals for quota report");
+                (0, 0)
+            }
+        };
         let session_limit = 100_u64;
         let frame_limit = self.config.replay_capacity as u64;
         payload(norte_code_wire::QuotaReport {

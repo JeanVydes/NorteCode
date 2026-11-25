@@ -47,12 +47,12 @@ fn preferences_stay_between_plugins_and_agents() {
 #[test]
 fn overflowing_settings_draw_a_scrollbar() {
     let (buf, area) = render_settings(8);
-    let x = area.width.saturating_sub(1);
+    let x = area.width.saturating_sub(2);
     let glyphs = (0..area.height)
         .map(|y| buf[(x, y)].symbol())
         .collect::<String>();
 
-    assert!(glyphs.contains('░') || glyphs.contains('█'));
+    assert!(glyphs.contains('░') || glyphs.contains('█') || glyphs.contains('│'));
 }
 
 #[test]

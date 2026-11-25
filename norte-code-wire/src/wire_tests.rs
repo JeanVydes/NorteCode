@@ -284,7 +284,7 @@ fn a_history_page_event_round_trips() {
         ServerEventKind::HistoryPage {
             items: vec![HistoryItem {
                 id: "1".to_owned(),
-                kind: "user".to_owned(),
+                kind: HistoryItemKind::User,
                 content: "hello".to_owned(),
                 created_at: 1_700_000_000_000,
                 turn_id: Some("turn_1".to_owned()),
@@ -304,7 +304,7 @@ fn a_history_page_event_round_trips() {
             assert_eq!(items.len(), 1);
             let item = &items[0];
             assert_eq!(item.id, "1");
-            assert_eq!(item.kind, "user");
+            assert_eq!(item.kind, HistoryItemKind::User);
             assert_eq!(item.content, "hello");
             assert_eq!(item.created_at, 1_700_000_000_000);
             assert_eq!(item.turn_id.as_deref(), Some("turn_1"));

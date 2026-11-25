@@ -173,7 +173,7 @@ fn chart_tree() -> (Tree, UiModel, Theme) {
 }
 
 fn render_charts(tree: &mut Tree, theme: &Theme, height: u16) -> Rect {
-    let area = Rect::new(0, 0, 100, height);
+    let area = Rect::new(0, 0, 80, height);
     let mut buf = Buffer::empty(area);
     tree.render(area, &mut buf, theme);
     area
@@ -223,7 +223,7 @@ fn up_and_down_switch_the_group_tabs() {
 #[test]
 fn clicks_select_group_and_subject_tabs() {
     let (mut tree, _, theme) = leaderboard_tree();
-    let area = Rect::new(0, 0, 100, 30);
+    let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);
     tree.render(area, &mut buf, &theme);
     let board = tree
@@ -367,7 +367,7 @@ fn dragging_the_chart_scrollbar_thumb_moves_the_stack() {
 #[test]
 fn the_stacked_charts_draw_a_scrollbar_when_they_overflow() {
     let (mut tree, _, theme) = chart_tree();
-    let area = Rect::new(0, 0, 100, 30);
+    let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);
 
     tree.render(area, &mut buf, &theme);

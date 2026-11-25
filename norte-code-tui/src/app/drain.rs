@@ -30,9 +30,6 @@ pub(in crate::app) fn drain_message_actions(
     };
     for action in actions {
         match action {
-            MessageAction::Copy { text } => {
-                let _ = crate::clipboard::system().write(&text);
-            }
             MessageAction::Fork { turn } => {
                 if let Some(commands) = commands.as_ref() {
                     let _ = commands.try_send(UiCommand::Fork {

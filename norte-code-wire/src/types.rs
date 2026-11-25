@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,8 +15,11 @@ use serde_json::Value;
 ///
 /// It is Norte Code's own id, not the engine's: a compaction replaces the
 /// underlying Norte session while the logical id stays the same.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(transparent)]
+#[schemars(transparent)]
 pub struct SessionKey(String);
 
 impl SessionKey {
@@ -605,7 +609,9 @@ impl fmt::Display for Phase {
 /// It travels on the wire and is read by clients that show a subagent list, so
 /// it is a closed set here rather than a string each producer spells: a typo in
 /// `"RUNNING"` used to be a child that silently read as `Stopped`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ChildState {
     /// Started, with no turn in flight.

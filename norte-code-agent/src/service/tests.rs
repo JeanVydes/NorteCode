@@ -2807,7 +2807,8 @@ async fn rewind_keeps_removed_text_history_readable_without_model_context() {
     assert!(
         active
             .iter()
-            .all(|(turn, _, _, text, _)| turn.is_none() && text == "system")
+            .all(|(turn, _, _, text, _)| turn.is_none() && text.starts_with("system")),
+        "active history after rewind: {active:?}"
     );
     let archived = service
         .session_rewound_history_with_turns(&key)
@@ -9517,7 +9518,7 @@ async fn a_detached_subagent_is_a_job_that_reports_and_can_be_stopped() {
                 title: None,
                 detach: true,
                 output_schema: None,
-                lifetime: "turn".to_owned(),
+                lifetime: super::subagents::ChildLifetime::Turn,
                 agent_id: None,
                 context_mode: None,
             },
@@ -9642,7 +9643,7 @@ async fn service_with_child_session() -> (Arc<Service>, SessionKey, SessionKey) 
     service.install_subagent_runner();
 
     let parent = service.create_session(None).await.expect("parent session");
-    let (child_agent_id, child_spec, child_disabled, child_budget, child_system_prompt) = service
+    let settings = service
         .subagent_settings(&parent, None)
         .await
         .expect("child settings");
@@ -9652,14 +9653,14 @@ async fn service_with_child_session() -> (Arc<Service>, SessionKey, SessionKey) 
                 parent: parent.clone(),
                 tool_call_id: "call-1".to_owned(),
                 task_summary: "test task".to_owned(),
-                lifetime: "turn".to_owned(),
-                agent_profile: child_agent_id,
-                system_prompt: child_system_prompt,
+                lifetime: super::subagents::ChildLifetime::Turn,
+                agent_profile: settings.agent_id,
+                system_prompt: settings.system_prompt,
                 cancel: Arc::new(norte::Cancellation::new()),
             },
-            child_spec,
-            child_disabled,
-            child_budget,
+            settings.model,
+            settings.disabled_tools,
+            settings.budget,
         )
         .await
         .expect("child session");

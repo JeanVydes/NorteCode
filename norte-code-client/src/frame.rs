@@ -60,9 +60,9 @@ pub(crate) struct HistoryItemPayload {
     #[serde(default)]
     pub(crate) turn_id: Option<String>,
     #[serde(default)]
-    pub(crate) role: Option<String>,
+    pub(crate) role: Option<norte_code_wire::HistorySpeaker>,
     #[serde(default)]
-    pub(crate) kind: String,
+    pub(crate) kind: Option<norte_code_wire::HistoryItemKind>,
     #[serde(default)]
     pub(crate) content: HistoryContentPayload,
     #[serde(default, alias = "created_at")]
@@ -86,33 +86,27 @@ impl Default for HistoryContentPayload {
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct HistoryContentDetails {
-    pub(crate) role: String,
+    pub(crate) role: norte_code_wire::HistorySpeaker,
     pub(crate) content: String,
 }
 
 impl HistoryItemPayload {
     pub(crate) fn into_wire(self, index: usize) -> norte_code_wire::HistoryItem {
         let (speaker, content) = match self.content {
-            HistoryContentPayload::Text(content) => (self.role.unwrap_or_default(), content),
-            HistoryContentPayload::Structured(content) => (content.role, content.content),
+            HistoryContentPayload::Text(content) => (self.role, content),
+            HistoryContentPayload::Structured(content) => (Some(content.role), content.content),
         };
-        let role = match speaker.to_ascii_lowercase().as_str() {
-            "user" => norte_code_wire::HistorySpeaker::User,
-            "assistant" => norte_code_wire::HistorySpeaker::Assistant,
-            "tool" => norte_code_wire::HistorySpeaker::Tool,
-            _ => norte_code_wire::HistorySpeaker::SystemEvent,
-        };
-        let kind = if self.kind.is_empty() {
-            match role {
-                norte_code_wire::HistorySpeaker::User => "user",
-                norte_code_wire::HistorySpeaker::Assistant => "assistant",
-                norte_code_wire::HistorySpeaker::Tool => "tool",
-                norte_code_wire::HistorySpeaker::SystemEvent => "system_event",
+        let role = speaker.unwrap_or(norte_code_wire::HistorySpeaker::SystemEvent);
+        let kind = self.kind.unwrap_or(match role {
+            norte_code_wire::HistorySpeaker::User => norte_code_wire::HistoryItemKind::User,
+            norte_code_wire::HistorySpeaker::Assistant => {
+                norte_code_wire::HistoryItemKind::Assistant
             }
-            .to_owned()
-        } else {
-            self.kind
-        };
+            norte_code_wire::HistorySpeaker::Tool => norte_code_wire::HistoryItemKind::Tool,
+            norte_code_wire::HistorySpeaker::SystemEvent => {
+                norte_code_wire::HistoryItemKind::SystemEvent
+            }
+        });
         norte_code_wire::HistoryItem {
             id: self.id.unwrap_or_else(|| {
                 self.turn_id.as_ref().map_or_else(
@@ -234,7 +228,16 @@ pub(crate) struct TokenDeltaPayload {
     pub(crate) delta: String,
     pub(crate) index: u32,
     #[serde(default)]
-    pub(crate) channel: String,
+    pub(crate) channel: TokenDeltaChannel,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TokenDeltaChannel {
+    #[default]
+    Text,
+    Reasoning,
+    ToolArguments,
 }
 
 /// A tool call start payload.

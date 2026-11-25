@@ -1,17 +1,60 @@
 //! The arguments of the delegation tools.
 
+use norte_code_wire::{ChildState, SessionKey};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InspectViewKind {
+    #[default]
+    Status,
+    Transcript,
+    Events,
+    Jobs,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MessageDelivery {
+    #[default]
+    Steer,
+    Queue,
+    Interrupt,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StopMode {
+    #[default]
+    Graceful,
+    Kill,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WaitTarget {
+    #[default]
+    Idle,
+    Finished,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ApprovalDecision {
+    Approve,
+    Deny,
+}
 
 /// The arguments of `inspect_agent` (RFC 8.2.7).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InspectArgs {
     /// The child to inspect, by the id `spawn_agent` returned.
-    pub child_session_id: String,
+    pub child_session_id: SessionKey,
     /// What to look at: `status` (default), `transcript`, `events` or `jobs`.
     #[serde(default)]
-    pub view: Option<String>,
+    pub view: Option<InspectViewKind>,
     /// Only the events after this sequence.
     #[serde(default)]
     pub from_seq: Option<u64>,
@@ -25,13 +68,13 @@ pub(crate) struct InspectArgs {
 #[serde(deny_unknown_fields)]
 pub(crate) struct MessageArgs {
     /// The child to message.
-    pub child_session_id: String,
+    pub child_session_id: SessionKey,
     /// The message. A string, or an array of content parts (only text is
     /// carried here; a part that is not text is refused).
     pub content: serde_json::Value,
     /// How it is delivered: `steer` (default), `queue` or `interrupt`.
     #[serde(default)]
-    pub delivery: Option<String>,
+    pub delivery: Option<MessageDelivery>,
 }
 
 /// The arguments of `stop_agent` (RFC 8.2.7).
@@ -39,10 +82,10 @@ pub(crate) struct MessageArgs {
 #[serde(deny_unknown_fields)]
 pub(crate) struct StopArgs {
     /// The child to stop.
-    pub child_session_id: String,
+    pub child_session_id: SessionKey,
     /// `graceful` (default) waits for its turn to end; `kill` cancels it.
     #[serde(default)]
-    pub mode: Option<String>,
+    pub mode: Option<StopMode>,
     /// Why it is being stopped.
     #[serde(default)]
     pub reason: Option<String>,
@@ -56,11 +99,11 @@ pub(crate) struct StopArgs {
 #[serde(deny_unknown_fields)]
 pub(crate) struct WaitArgs {
     /// The child to wait for.
-    pub child_session_id: String,
+    pub child_session_id: SessionKey,
     /// `idle` (default) waits for its current turn to finish; `finished`
     /// waits for it to reach a terminal state.
     #[serde(default)]
-    pub until: Option<String>,
+    pub until: Option<WaitTarget>,
     /// How long to wait, in seconds (default 300).
     #[serde(default)]
     pub timeout_s: Option<u64>,
@@ -72,7 +115,7 @@ pub(crate) struct WaitArgs {
 pub(crate) struct ListArgs {
     /// Only the children in these states.
     #[serde(default)]
-    pub state: Option<Vec<String>>,
+    pub state: Option<Vec<ChildState>>,
     /// How many at most.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -83,11 +126,11 @@ pub(crate) struct ListArgs {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ApproveArgs {
     /// The child whose call is being approved.
-    pub child_session_id: String,
+    pub child_session_id: SessionKey,
     /// The tool call to approve or deny.
     pub tool_call_id: String,
     /// `approve` or `deny`.
-    pub decision: String,
+    pub decision: ApprovalDecision,
     /// Why.
     #[serde(default)]
     pub reason: Option<String>,
@@ -119,7 +162,39 @@ pub(crate) struct HandoffArgs {
     /// How much of the context the new agent carries: `full`, `summary` or
     /// `none` (default `summary`).
     #[serde(default)]
-    pub carry_context: Option<String>,
+    pub carry_context: Option<CarryContext>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CarryContext {
+    Full,
+    #[default]
+    Summary,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ChildLifetime {
+    #[default]
+    Turn,
+    Session,
+}
+
+impl ChildLifetime {
+    pub(crate) const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::Session => "session",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ContextMode {
+    Summary,
 }
 
 // ---------------------------------------------------------------------------

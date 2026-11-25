@@ -1675,24 +1675,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "norte-code-tui-legacy"
-version = "0.1.0"
-dependencies = [
- "crossterm 0.28.1",
- "futures-util",
- "norte-code-client",
- "norte-code-protocol",
- "norte-code-wire",
- "pulldown-cmark",
- "ratatui",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "unicode-width 0.2.0",
-]
-
-[[package]]
 name = "norte-code-wire"
 version = "0.1.0"
 dependencies = [
@@ -2802,7 +2784,7 @@ dependencies = [
 [[package]]
 name = "terminalui"
 version = "0.1.0"
-source = "git+https://github.com/JeanVydes/terminalui.git?rev=d9a730bd96c7a5407371af3f4ef7e9b20d729a93#d9a730bd96c7a5407371af3f4ef7e9b20d729a93"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=a1655f591a60c97ba149e5e9e4716790ec4424ac#a1655f591a60c97ba149e5e9e4716790ec4424ac"
 dependencies = [
  "terminalui-animations",
  "terminalui-components",
@@ -2812,7 +2794,7 @@ dependencies = [
 [[package]]
 name = "terminalui-animations"
 version = "0.1.0"
-source = "git+https://github.com/JeanVydes/terminalui.git?rev=d9a730bd96c7a5407371af3f4ef7e9b20d729a93#d9a730bd96c7a5407371af3f4ef7e9b20d729a93"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=a1655f591a60c97ba149e5e9e4716790ec4424ac#a1655f591a60c97ba149e5e9e4716790ec4424ac"
 dependencies = [
  "crossterm 0.29.0",
  "ratatui",
@@ -2823,7 +2805,7 @@ dependencies = [
 [[package]]
 name = "terminalui-components"
 version = "0.1.0"
-source = "git+https://github.com/JeanVydes/terminalui.git?rev=d9a730bd96c7a5407371af3f4ef7e9b20d729a93#d9a730bd96c7a5407371af3f4ef7e9b20d729a93"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=a1655f591a60c97ba149e5e9e4716790ec4424ac#a1655f591a60c97ba149e5e9e4716790ec4424ac"
 dependencies = [
  "crossterm 0.29.0",
  "ratatui",
@@ -2836,7 +2818,7 @@ dependencies = [
 [[package]]
 name = "terminalui-core"
 version = "0.1.0"
-source = "git+https://github.com/JeanVydes/terminalui.git?rev=d9a730bd96c7a5407371af3f4ef7e9b20d729a93#d9a730bd96c7a5407371af3f4ef7e9b20d729a93"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=a1655f591a60c97ba149e5e9e4716790ec4424ac#a1655f591a60c97ba149e5e9e4716790ec4424ac"
 dependencies = [
  "crossterm 0.29.0",
  "erased-serde",

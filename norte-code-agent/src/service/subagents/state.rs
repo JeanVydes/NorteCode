@@ -21,11 +21,11 @@ pub(crate) fn parent_key(service: &Service, parent: SessionId) -> Option<Session
 }
 
 /// The child `id` as a `SessionKey`, or an error naming the bad id.
-pub(crate) fn child_key(id: &str) -> Result<SessionKey, String> {
-    if id.trim().is_empty() {
-        Err("child_session_id is required".to_owned())
+pub(crate) fn child_key(id: &SessionKey) -> Result<SessionKey, &'static str> {
+    if id.as_str().trim().is_empty() {
+        Err("child_session_id is required")
     } else {
-        Ok(SessionKey::new(id.to_owned()))
+        Ok(id.clone())
     }
 }
 
@@ -40,18 +40,20 @@ pub(crate) fn phase_of(service: &Service, child: &SessionKey) -> Option<norte_co
 pub(crate) fn registered_child_state(
     child: &crate::service::delegator::Child,
     phase: Option<norte_code_wire::Phase>,
-) -> &'static str {
+) -> norte_code_wire::ChildState {
     if child.is_terminal() {
         return if child.is_failed() {
-            "FAILED"
+            norte_code_wire::ChildState::Failed
         } else {
-            "STOPPED"
+            norte_code_wire::ChildState::Stopped
         };
     }
     if child.is_finished() {
-        return "IDLE";
+        return norte_code_wire::ChildState::Idle;
     }
-    phase.map_or("RUNNING", |phase| child_state_label(phase, true))
+    phase.map_or(norte_code_wire::ChildState::Running, |phase| {
+        child_state_label(phase, true)
+    })
 }
 
 /// The service behind a delegating tool, when one is installed.

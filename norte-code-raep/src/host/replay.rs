@@ -50,16 +50,15 @@ impl ReplayLog {
     /// outside the safe set becomes `_`, so an id cannot escape the replay
     /// directory.
     fn path(&self, session: &str) -> PathBuf {
-        let safe: String = session
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let mut safe = String::with_capacity(session.len());
+        for byte in session.bytes() {
+            if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+                safe.push(char::from(byte));
+            } else {
+                use std::fmt::Write as _;
+                let _ = write!(safe, "%{byte:02X}");
+            }
+        }
         self.root.join(format!("{safe}.jsonl"))
     }
 
@@ -95,8 +94,8 @@ impl ReplayLog {
             .map_err(|error| HostError::Replay(format!("replay append: {error}")))?;
         let size = file
             .metadata()
-            .map_or(0, |meta| meta.len())
-            .saturating_add(line.len() as u64);
+            .map_err(|error| HostError::Replay(format!("replay metadata: {error}")))?
+            .len();
         drop(file);
         if size > self.max_bytes {
             self.trim(&path)?;

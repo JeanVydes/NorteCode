@@ -104,9 +104,18 @@ impl Header {
         }
     }
 
-    fn state_width(&self) -> u16 {
-        let text = format!("{}  {} · {THEME_KEY}", self.turn_label(), self.theme_name);
-        3 + u16::try_from(text.chars().count()).unwrap_or(u16::MAX)
+    fn state_text(&self, available: u16) -> String {
+        let full = format!("{} · {} · {THEME_KEY}", self.turn_label(), self.theme_name);
+        if u16::try_from(full.chars().count()).unwrap_or(u16::MAX) <= available {
+            full
+        } else {
+            self.turn_label().to_owned()
+        }
+    }
+
+    fn state_width(&self, area_width: u16) -> u16 {
+        let text = self.state_text(area_width.saturating_sub(3));
+        (3 + u16::try_from(text.chars().count()).unwrap_or(u16::MAX)).min(area_width)
     }
 
     fn paint_tabs(
@@ -177,8 +186,10 @@ impl Header {
             TurnState::Connecting | TurnState::AwaitingAnswer => ("●", theme.warning),
             TurnState::Thinking | TurnState::Streaming => ("●", theme.accent),
         };
-        let state = format!("{}  {} · {THEME_KEY}", self.turn_label(), self.theme_name);
-        let width = self.state_width();
+        let available_text = area.width.saturating_sub(3);
+        let state = self.state_text(available_text);
+        let state_width = u16::try_from(state.chars().count()).unwrap_or(u16::MAX);
+        let width = (3 + state_width).min(area.width);
         let x = area.x + area.width.saturating_sub(width);
         buf.set_stringn(
             x,
@@ -191,10 +202,10 @@ impl Header {
                 .add_modifier(Modifier::BOLD),
         );
         buf.set_stringn(
-            x + 2,
+            x.saturating_add(3),
             area.y,
             &state,
-            state.chars().count(),
+            usize::from(available_text.min(state_width)),
             Style::default().fg(theme.muted).bg(theme.secondary),
         );
     }
@@ -231,7 +242,7 @@ impl View for Header {
                 .add_modifier(Modifier::BOLD),
         );
 
-        let status_x = area.x + area.width.saturating_sub(self.state_width());
+        let status_x = area.x + area.width.saturating_sub(self.state_width(area.width));
         self.paint_tabs(area, buf, cx, theme, status_x);
         self.paint_activity(area, buf, cx, theme, status_x);
         self.paint_state(area, buf, theme);

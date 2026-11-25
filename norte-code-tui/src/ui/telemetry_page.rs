@@ -10,6 +10,7 @@ use serde::Serialize;
 use terminalui::components::candlechart::CandleChart;
 use terminalui::components::linechart::LineChart;
 use terminalui::components::pagination::Pagination;
+use terminalui::components::presentation::{DotSize, RenderStyle, StyleTuning};
 use terminalui::components::table::{Table, TableCell, TableRow};
 use terminalui::{Node, node};
 
@@ -69,9 +70,47 @@ enum TelemetryView {
     Leaderboards,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ChartGlyphs {
+    #[default]
+    Halftone,
+    Blocks,
+    Lines,
+}
+
+impl ChartGlyphs {
+    fn render_style(self) -> RenderStyle {
+        match self {
+            Self::Halftone => RenderStyle::Halftone,
+            Self::Blocks => RenderStyle::Blocks,
+            Self::Lines => RenderStyle::Lines,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Halftone => "dots",
+            Self::Blocks => "blocks",
+            Self::Lines => "lines",
+        }
+    }
+
+    const fn next(self) -> Self {
+        match self {
+            Self::Halftone => Self::Blocks,
+            Self::Blocks => Self::Lines,
+            Self::Lines => Self::Halftone,
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct TelemetryPage {
     interval: ChartInterval,
+    chart_glyphs: ChartGlyphs,
+    #[serde(skip)]
+    chart_tuning: StyleTuning,
     #[serde(skip)]
     report: Option<SharedTelemetry>,
     /// Indices into `report.records`, newest first.
@@ -95,6 +134,8 @@ pub(crate) struct TelemetryPage {
     /// Scroll offset and rail of the tall stacked charts.
     #[serde(skip)]
     chart_scroll: ChartScroll,
+    #[serde(skip)]
+    chart_grid: bool,
     /// Screen areas of the three chart bodies, for wheel hit-testing.
     #[serde(skip)]
     chart_areas: Vec<Rect>,
@@ -140,6 +181,12 @@ impl TelemetryPage {
     pub(crate) fn new() -> Self {
         Self {
             interval: ChartInterval::Hour,
+            chart_glyphs: ChartGlyphs::default(),
+            chart_tuning: StyleTuning {
+                density: 3,
+                contrast: 1.25,
+                dotsize: DotSize::Small,
+            },
             report: None,
             record_indices: Vec::new(),
             usage: SharedUsage::default(),
@@ -150,6 +197,7 @@ impl TelemetryPage {
             detail_is_request: false,
             view: TelemetryView::Charts,
             chart_scroll: ChartScroll::default(),
+            chart_grid: false,
             chart_areas: Vec::new(),
             chart_data: Series::default(),
             bucket_labels: Arc::new(Vec::new()),

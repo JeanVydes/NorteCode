@@ -304,15 +304,6 @@ impl Service {
                 "import history exceeds the item or text limit".to_owned(),
             ));
         }
-        if items
-            .iter()
-            .any(|item| item.role != "user" && item.role != "assistant")
-        {
-            return Err(ServiceError::History(
-                "import history supports only user and assistant roles".to_owned(),
-            ));
-        }
-
         let key = self.create_session(title).await?;
         let session_id = self
             .lock_sessions()

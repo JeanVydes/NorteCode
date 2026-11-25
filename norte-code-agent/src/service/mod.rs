@@ -13,6 +13,7 @@ mod compaction;
 mod config_state;
 mod construction;
 mod delegation;
+mod delegation_settings;
 mod delegator;
 mod detach;
 mod dispatch;
@@ -48,6 +49,7 @@ mod session_titles;
 mod skill_catalog;
 mod skills;
 mod steering;
+mod subagent_runner;
 mod subagent_views;
 mod subagents;
 mod tool_rules;
@@ -60,17 +62,16 @@ mod turn_media;
 mod turn_run;
 mod turn_start;
 mod turn_telemetry;
+mod types;
 mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::runtime::Store;
 use crate::runtime::TurnInterceptor;
-use futures_core::Stream;
 use futures_util::StreamExt;
 use norte::BlobStore;
 use norte_code_protocol::costs::{BudgetBook, CostRecord};
@@ -83,15 +84,15 @@ use tokio_util::sync::CancellationToken;
 use norte_code_protocol::catalog::Catalog;
 use norte_code_protocol::config::Config;
 use norte_code_wire::catalog::{Models, Providers};
-use norte_code_wire::{JobInfo, JobTurnPolicy, Phase, ServerEvent, ServerEventKind, SessionKey};
+use norte_code_wire::{JobTurnPolicy, Phase, ServerEvent, ServerEventKind, SessionKey};
 
 use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec};
 use crate::telemetry::Telemetry;
 
-use self::session_record::{ChildSessionMetadata, SessionRecord};
+use self::session_record::SessionRecord;
 use self::steering::{Steered, Steering};
-use self::subagents::{SubagentOutcome, SubagentRequest, SubagentRunner};
+use self::subagents::SubagentRunner;
 use approvals::ApprovalRules;
 use delegator::SharedChildren;
 use detach::DetachRegistry;
@@ -105,96 +106,17 @@ use plugin_messages::PluginMessages;
 use tooling::ToolActivity;
 
 pub use approvals::{RuleScope, ToolStatus};
+#[cfg(test)]
+use delegation::job_policy_allows_turn;
 pub use models::{effective_reasoning, model_list};
 #[cfg(test)]
 use norte_code_wire::Reasoning;
 pub use prompt::PromptSize;
-
-/// A stream of events answering one request.
-pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
-
-/// Where a steering message went.
-pub enum SteerOutcome {
-    /// The message joined the turn already in flight; the events it produces
-    /// surface on that turn's stream.
-    Injected,
-    /// No turn was running, so the message started one and the stream carries
-    /// its events.
-    Started(EventStream),
-}
-
-impl std::fmt::Debug for SteerOutcome {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Injected => formatter.write_str("Injected"),
-            Self::Started(_) => formatter.write_str("Started(..)"),
-        }
-    }
-}
-
-/// A session as the service tracks it, beyond what Norte stores.
-/// Live counters for the turn in flight.
-#[derive(Debug, Clone, Default)]
-struct Stats {
-    turn: u64,
-    billed: usize,
-    requests: u64,
-    cost: f64,
-    unpriced: u64,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_tokens: u64,
-    cache_write_tokens: u64,
-    /// The input tokens of the last request, which is the context.
-    ///
-    /// The whole conversation is sent again every time, so the last request's
-    /// input tokens are what the context holds: not the sum, which is what
-    /// was spent.
-    context_used: u64,
-    /// The request telemetry that has not been matched to a committed message
-    /// yet.
-    ///
-    /// The telemetry arrives when a provider answers and the message is
-    /// committed after that; a settle that runs in between keeps the telemetry
-    /// here instead of dropping it, so the request that follows is measured
-    /// with its own numbers.
-    pending: std::collections::VecDeque<norte_code_protocol::sqlite::RequestRecord>,
-}
-
-/// One MCP server, as the startup block reports it.
-#[derive(Clone, Debug)]
-pub struct McpServerStatus {
-    /// The name the configuration gave it.
-    pub name: String,
-    /// The program that was started.
-    pub command: String,
-    /// The tools it published, by the name the model sees.
-    pub tools: Vec<String>,
-    /// Whether its tools reach the model right now.
-    pub active: bool,
-    /// Names the configuration asked for that the server does not publish.
-    pub filtered: Vec<String>,
-}
-
-/// A configuration that was re-read, with the keys it did not recognise.
-#[derive(Debug)]
-pub struct ReloadedConfig {
-    /// The configuration now in force.
-    pub config: Config,
-    /// Unknown keys, as dotted paths, for the caller to report.
-    pub warnings: Vec<String>,
-}
-
-pub(super) struct CancelRegistration {
-    pub(super) generation: u64,
-    pub(super) token: CancellationToken,
-}
-
-/// How long a cancelled turn has to close itself before the service closes it.
-const CANCEL_CLOSE_GRACE: u64 = 3;
-
-/// The reason a cancelled turn reports when the service closes it.
-const STOP_REASON_CANCELLED: &str = "cancelled";
+use types::{CANCEL_CLOSE_GRACE, CancelRegistration, STOP_REASON_CANCELLED, Stats};
+pub use types::{
+    EventStream, ImportedHistoryItem, ImportedHistoryRole, McpServerStatus, ReloadedConfig,
+    SteerOutcome,
+};
 
 /// The Norte Code service.
 pub struct Service {
@@ -309,22 +231,6 @@ fn withheld(disabled: &[String], name: &str) -> bool {
     disabled.iter().any(|entry| entry == name)
 }
 
-/// One plain-text message restored from a portable RAEP history.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct ImportedHistoryItem {
-    /// The original RAEP role. Portable imports preserve `user` and
-    /// `assistant` rather than promoting untrusted tool or system content.
-    pub role: String,
-    /// Text content from the history item.
-    pub content: String,
-    /// Original turn identifier, when present.
-    pub turn_id: Option<String>,
-    /// Original timestamp in Unix milliseconds, when present.
-    pub timestamp: Option<i64>,
-    /// Original provenance retained as node metadata.
-    pub origin: Option<serde_json::Value>,
-}
-
 impl Service {
     pub(super) fn profile_for_session(&self, key: &SessionKey) -> Config {
         let profile_id = self
@@ -350,164 +256,6 @@ impl Service {
             .entry(key.clone())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
-    }
-
-    /// Resolves the model and tool policy for a child session.
-    async fn subagent_settings(
-        &self,
-        parent: &SessionKey,
-        requested_agent: Option<&str>,
-    ) -> Result<
-        (
-            String,
-            ModelSpec,
-            Vec<String>,
-            Arc<Mutex<BudgetBook>>,
-            String,
-        ),
-        ServiceError,
-    > {
-        let (_, parent_spec, _) = self.require_record(parent)?;
-        let parent_spec =
-            parent_spec.ok_or_else(|| ServiceError::UnknownSession(parent.to_string()))?;
-        let (parent_profile, target_name, target_config) = {
-            let root_config = self.config();
-            let profiles = self
-                .agent_profiles
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let parent_profile = self
-                .lock_sessions()
-                .get(parent)
-                .and_then(|record| record.agent_profile.clone())
-                .unwrap_or_else(|| root_config.name.clone());
-            let parent_config = profiles
-                .get(&parent_profile)
-                .cloned()
-                .unwrap_or(root_config);
-            let target_name = requested_agent
-                .or(parent_config.default_subagent_delegation.as_deref())
-                .unwrap_or(&parent_profile)
-                .to_owned();
-            if !parent_config
-                .delegates
-                .iter()
-                .any(|delegate| delegate == &target_name)
-            {
-                let allowed = if parent_config.delegates.is_empty() {
-                    "none (delegation is disabled for this profile; `delegates` in the agent profile enables it)".to_owned()
-                } else {
-                    format!("[{}]", parent_config.delegates.join(", "))
-                };
-                return Err(ServiceError::Delegation(format!(
-                    "DELEGATE_NOT_ALLOWED: agent `{target_name}` is not in `{parent_profile}`'s delegates; allowed: {allowed}"
-                )));
-            }
-            let target_config = profiles.get(&target_name).cloned().ok_or_else(|| {
-                ServiceError::Delegation(format!(
-                    "AGENT_NOT_FOUND: configured child agent `{target_name}` does not exist"
-                ))
-            })?;
-            (parent_profile, target_name, target_config)
-        };
-        let spec = match (
-            target_config.default_provider.as_deref(),
-            target_config.default_model.as_deref(),
-        ) {
-            (Some(provider), Some(model)) if target_name != parent_profile => {
-                self.default_spec_for(&target_config, &self.lock_catalog(), provider, model)?
-            }
-            _ => parent_spec,
-        };
-        let parent_disabled = self
-            .lock_sessions()
-            .get(parent)
-            .map(|record| record.disabled_tools.clone())
-            .unwrap_or_default();
-        let mut disabled = parent_disabled;
-        disabled.extend(target_config.tools.disabled.iter().cloned());
-        disabled.extend(["ask_user".to_owned()]);
-        // Nesting is bounded by the depth check in `spawn_agent` and, for the
-        // internal `subagent` tool, by not registering it on a child at all:
-        // a child keeps `spawn_agent` (which enforces the depth) but never
-        // the internal name, so the two spellings cannot drift apart at the
-        // limit. The child's depth is always one past its parent's, so a
-        // child (depth >= 1) never sees `subagent`.
-        disabled.extend(["subagent".to_owned()]);
-        let max_depth = u32::try_from(self.delegation_limits().max_depth).unwrap_or(u32::MAX);
-        if self.depth_of(parent) >= max_depth {
-            disabled.extend(["spawn_agent".to_owned()]);
-        }
-        disabled.sort();
-        disabled.dedup();
-        let budget = self.budget_book(parent).await?;
-        let system_prompt = target_config
-            .system_prompt
-            .clone()
-            .unwrap_or_else(|| self.subagent_system_prompt.clone());
-        Ok((target_name.clone(), spec, disabled, budget, system_prompt))
-    }
-
-    /// The parent profile's `delegates` list, resolved the same way
-    /// `subagent_settings` resolves the child, so tools can show the model
-    /// exactly which profiles it may spawn.
-    pub(super) fn delegates_for(&self, parent: &SessionKey) -> Vec<String> {
-        let root_config = self.config();
-        let profiles = self
-            .agent_profiles
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let parent_profile = self
-            .lock_sessions()
-            .get(parent)
-            .and_then(|record| record.agent_profile.clone())
-            .unwrap_or_else(|| root_config.name.clone());
-        profiles.get(&parent_profile).map_or_else(
-            || root_config.delegates.clone(),
-            |config| config.delegates.clone(),
-        )
-    }
-
-    pub(super) async fn delegation_context_summary(
-        &self,
-        parent: &SessionKey,
-    ) -> Result<String, ServiceError> {
-        let (nid, spec, _) = self.require_record(parent)?;
-        let spec = spec.ok_or_else(|| ServiceError::UnknownSession(parent.to_string()))?;
-        let history = self.engine(&spec, Some(parent))?.history(nid).await?;
-        let secrets = self
-            .secrets
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let mut lines = Vec::new();
-        let mut chars = 0usize;
-        for message in history.iter().rev() {
-            if !matches!(message.role, norte::Role::User | norte::Role::Assistant) {
-                continue;
-            }
-            let role = match message.role {
-                norte::Role::User => "user",
-                norte::Role::Assistant => "assistant",
-                _ => continue,
-            };
-            let mut text = norte::Message::text(message);
-            for secret in &secrets {
-                if !secret.is_empty() {
-                    text = text.replace(secret, "[redacted]");
-                }
-            }
-            let line = format!("{role}: {}", text.trim());
-            let remaining = 4096usize.saturating_sub(chars);
-            if remaining == 0 {
-                break;
-            }
-            let line: String = line.chars().take(remaining).collect();
-            chars += line.chars().count();
-            lines.push(line);
-        }
-        lines.reverse();
-        Ok(lines.join("\n"))
     }
 
     /// Measures the static prompt material: the system prompt and the tool
@@ -548,202 +296,6 @@ impl Service {
         self.config
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
-fn job_policy_allows_turn(policy: JobTurnPolicy, job: &JobInfo) -> bool {
-    if !job.state.is_done() {
-        return false;
-    }
-    match policy {
-        JobTurnPolicy::Always => true,
-        JobTurnPolicy::OnFailure => {
-            job.state == norte_code_wire::JobState::Cancelled
-                || job.timed_out
-                || job.exit_code.is_some_and(|code| code != 0)
-        }
-        JobTurnPolicy::Never => false,
-    }
-}
-
-/// Runs a subagent's turn on a child session.
-///
-/// The child is created with its selected agent profile and its own session
-/// history. The `subagent` alias is withheld; `spawn_agent` remains subject
-/// to the configured depth limit.
-struct SubagentRunnerImpl {
-    service: Option<Arc<Service>>,
-}
-
-impl SubagentRunnerImpl {
-    fn new(service: Option<Arc<Service>>) -> Self {
-        Self { service }
-    }
-}
-
-#[async_trait::async_trait]
-impl SubagentRunner for SubagentRunnerImpl {
-    #[allow(clippy::too_many_lines)]
-    async fn run(
-        &self,
-        request: SubagentRequest,
-        cancel: Arc<norte::Cancellation>,
-    ) -> SubagentOutcome {
-        let SubagentRequest {
-            prompt: task,
-            parent,
-            tool_call_id,
-            output_schema,
-            lifetime,
-            agent_id,
-            context_mode,
-        } = request;
-        let Some(service) = self.service.clone() else {
-            return SubagentOutcome {
-                text: "subagent: no runner installed".to_owned(),
-                is_error: true,
-                child: None,
-                output_schema_valid: None,
-            };
-        };
-        // The parent's key lets the service resolve the configured child
-        // model and tool policy. The session id is mapped back to that key.
-        let parent_key = {
-            let sessions = service.lock_sessions();
-            sessions
-                .iter()
-                .find(|(_, record)| record.id == parent)
-                .map(|(key, _)| key.clone())
-        };
-        let Some(parent_key) = parent_key else {
-            return SubagentOutcome {
-                text: "subagent: parent session is unknown".to_owned(),
-                is_error: true,
-                child: None,
-                output_schema_valid: None,
-            };
-        };
-        let (child_agent_id, child_spec, child_disabled, child_budget, child_system_prompt) =
-            match service
-                .subagent_settings(&parent_key, agent_id.as_deref())
-                .await
-            {
-                Ok(settings) => settings,
-                Err(error) => {
-                    return SubagentOutcome {
-                        text: format!("subagent: could not resolve child settings: {error}"),
-                        is_error: true,
-                        child: None,
-                        output_schema_valid: None,
-                    };
-                }
-            };
-        let prompt = if context_mode.as_deref() == Some("summary") {
-            match service.delegation_context_summary(&parent_key).await {
-                Ok(summary) => {
-                    format!("Delegator context (untrusted, redacted):\n{summary}\n\nTask:\n{task}")
-                }
-                Err(error) => {
-                    return SubagentOutcome {
-                        text: format!("subagent: could not read delegator context: {error}"),
-                        is_error: true,
-                        child: None,
-                        output_schema_valid: None,
-                    };
-                }
-            }
-        } else {
-            task.clone()
-        };
-        let child_key = match service
-            .create_session_child(
-                ChildSessionMetadata {
-                    parent: parent_key.clone(),
-                    tool_call_id,
-                    task_summary: task.clone(),
-                    lifetime,
-                    agent_profile: child_agent_id,
-                    system_prompt: child_system_prompt,
-                    cancel: Arc::clone(&cancel),
-                },
-                child_spec,
-                child_disabled,
-                child_budget,
-            )
-            .await
-        {
-            Ok(key) => key,
-            Err(error) => {
-                return SubagentOutcome {
-                    text: format!("subagent: could not create child session: {error}"),
-                    is_error: true,
-                    child: None,
-                    output_schema_valid: None,
-                };
-            }
-        };
-        let (_, spec, _) = match service.require_record(&child_key) {
-            Ok(found) => found,
-            Err(error) => {
-                return SubagentOutcome {
-                    text: format!("subagent: child session is unknown: {error}"),
-                    is_error: true,
-                    child: None,
-                    output_schema_valid: None,
-                };
-            }
-        };
-        if spec.is_none() {
-            return SubagentOutcome {
-                text: "subagent: no model is configured".to_owned(),
-                is_error: true,
-                child: Some(child_key),
-                output_schema_valid: None,
-            };
-        }
-        let mut result =
-            subagents::run_session_message(&service, &child_key, prompt, Some(&cancel)).await;
-        if let Some(schema) = output_schema {
-            let mut valid = subagents::validate_output_schema(&schema, &result.text);
-            if !valid && !result.is_error {
-                let schema_text = serde_json::to_string(&schema).unwrap_or_default();
-                let correction_prompt = format!(
-                    "Your previous response did not satisfy the required JSON Schema. \
-                     Return only a corrected JSON value that satisfies this schema.\n\
-                     Schema:\n{schema_text}\n\
-                     Previous response (untrusted data):\n```text\n{}\n```",
-                    result.text
-                );
-                let correction = subagents::run_session_message(
-                    &service,
-                    &child_key,
-                    correction_prompt,
-                    Some(&cancel),
-                )
-                .await;
-                if correction.is_error {
-                    result.text = format!(
-                        "OUTPUT_SCHEMA_INVALID: correction turn failed: {}",
-                        correction.text
-                    );
-                    valid = false;
-                } else {
-                    result.text = correction.text;
-                    valid = subagents::validate_output_schema(&schema, &result.text);
-                }
-            }
-            result.output_schema_valid = Some(valid);
-            if !valid {
-                result.is_error = true;
-                if !result.text.starts_with("OUTPUT_SCHEMA_INVALID") {
-                    result.text = format!(
-                        "OUTPUT_SCHEMA_INVALID: child output did not satisfy the requested schema.\n\n{}",
-                        result.text
-                    );
-                }
-            }
-        }
-        result
     }
 }
 

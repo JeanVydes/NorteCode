@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use terminalui::components::table::Table;
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View};
+use unicode_width::UnicodeWidthStr;
 
 use crate::ui::leaderboard_section::LeaderboardClick;
 
@@ -186,29 +187,33 @@ impl View for TelemetryPage {
         }
         buf.set_style(area, Style::default().bg(theme.background));
         let caption = self.caption();
+        let hint = match self.view {
+            TelemetryView::Charts => {
+                "wheel · ↑↓ history · [ ] interval · d density · c contrast · v size · g glyphs"
+            }
+            TelemetryView::Leaderboards => "↑↓ group · ←→ entity · j/k rows · [ ] interval",
+            TelemetryView::Sessions | TelemetryView::Requests => "j/k select · [ ] interval",
+        };
+        let hint_width = u16::try_from(UnicodeWidthStr::width(hint)).unwrap_or(u16::MAX);
+        let show_hint = area.width > hint_width.saturating_add(10);
+        let caption_width = if show_hint {
+            area.width.saturating_sub(hint_width.saturating_add(3))
+        } else {
+            area.width.saturating_sub(2)
+        };
         buf.set_stringn(
             area.x + 1,
             area.y,
             &caption,
-            usize::from(area.width.saturating_sub(2)),
+            usize::from(caption_width),
             Style::default().fg(theme.muted),
         );
-        let hint = match self.view {
-            TelemetryView::Charts => {
-                "wheel charts history | up/down stack | click bar to scroll | [ ] interval"
-            }
-            TelemetryView::Leaderboards => {
-                "up/down group, left/right entity, j/k rows | [ ] interval"
-            }
-            TelemetryView::Sessions | TelemetryView::Requests => "j/k select | [ ] interval",
-        };
-        if area.width > u16::try_from(hint.len()).unwrap_or(u16::MAX) {
-            let w = u16::try_from(hint.len()).unwrap_or(u16::MAX);
+        if show_hint {
             buf.set_stringn(
-                area.x + area.width.saturating_sub(w + 1),
+                area.x + area.width.saturating_sub(hint_width + 1),
                 area.y,
                 hint,
-                hint.len(),
+                usize::from(hint_width),
                 Style::default().fg(theme.muted),
             );
         }
@@ -276,6 +281,42 @@ impl View for TelemetryPage {
                 }
                 KeyCode::Char(']') => {
                     self.cycle_interval(false);
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('d') if key.modifiers == crossterm::event::KeyModifiers::NONE => {
+                    self.cycle_chart_density();
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('c') if key.modifiers == crossterm::event::KeyModifiers::NONE => {
+                    self.cycle_chart_contrast();
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('v') if key.modifiers == crossterm::event::KeyModifiers::NONE => {
+                    self.cycle_chart_dot_size();
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('g') if key.modifiers == crossterm::event::KeyModifiers::NONE => {
+                    self.cycle_chart_glyphs();
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('+' | '=')
+                    if matches!(
+                        key.modifiers,
+                        crossterm::event::KeyModifiers::NONE
+                            | crossterm::event::KeyModifiers::SHIFT
+                    ) =>
+                {
+                    self.zoom_chart_window(1.25);
+                    return Outcome::Consumed;
+                }
+                KeyCode::Char('-' | '_')
+                    if matches!(
+                        key.modifiers,
+                        crossterm::event::KeyModifiers::NONE
+                            | crossterm::event::KeyModifiers::SHIFT
+                    ) =>
+                {
+                    self.zoom_chart_window(0.8);
                     return Outcome::Consumed;
                 }
                 KeyCode::Char('j') | KeyCode::Down

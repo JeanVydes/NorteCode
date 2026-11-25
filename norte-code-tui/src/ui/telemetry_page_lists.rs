@@ -285,6 +285,21 @@ impl TelemetryPage {
     pub(super) fn caption(&self) -> String {
         let summary = self.report.as_ref().map(|report| &report.summary);
         let mut caption = format!("telemetry · {} buckets", self.interval.label());
+        if self.view == TelemetryView::Charts {
+            let size = match self.chart_tuning.dotsize {
+                terminalui::components::presentation::DotSize::Medium => "medium",
+                terminalui::components::presentation::DotSize::Large => "large",
+                _ => "small",
+            };
+            let _ = write!(
+                caption,
+                " · {} · density {} · contrast {:.2} · {}",
+                self.chart_glyphs.label(),
+                self.chart_tuning.density,
+                self.chart_tuning.contrast,
+                size
+            );
+        }
         if let Some(summary) = summary {
             let _ = write!(
                 caption,

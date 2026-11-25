@@ -659,12 +659,16 @@ pub enum ReplayedKind {
 #[serde(rename_all = "snake_case")]
 pub enum HistorySpeaker {
     /// The human.
+    #[serde(alias = "USER")]
     User,
     /// The model.
+    #[serde(alias = "ASSISTANT")]
     Assistant,
     /// A tool result.
+    #[serde(alias = "TOOL")]
     Tool,
     /// A system event.
+    #[serde(alias = "SYSTEM_EVENT")]
     SystemEvent,
 }
 
@@ -679,9 +683,8 @@ pub enum HistorySpeaker {
 pub struct HistoryItem {
     /// The item's stable id.
     pub id: String,
-    /// What kind of item this is: `user`, `assistant`, `tool`,
-    /// `system_event`, `reasoning`, `tool_call`, `tool_result` or `refusal`.
-    pub kind: String,
+    /// The kind of history item.
+    pub kind: HistoryItemKind,
     /// The item's text.
     pub content: String,
     /// When it was created, as Unix milliseconds.
@@ -694,6 +697,28 @@ pub struct HistoryItem {
     /// What the host knows about where the item came from, when it knows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<serde_json::Value>,
+}
+
+/// The kind of one history item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryItemKind {
+    /// User-authored text.
+    User,
+    /// Assistant-authored text.
+    Assistant,
+    /// Tool output.
+    Tool,
+    /// A system event.
+    SystemEvent,
+    /// Assistant reasoning.
+    Reasoning,
+    /// A tool invocation.
+    ToolCall,
+    /// A tool result.
+    ToolResult,
+    /// A refusal.
+    Refusal,
 }
 
 /// A turn's live phase, between its start and its terminal state.

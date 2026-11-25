@@ -1,11 +1,14 @@
 use super::*;
+use crate::http::artifacts::parse_byte_range;
 use crate::{BlobArtifactStore, HostConfig, MemoryUploadIndex};
 use axum::body::Body;
 use axum::http::Request;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use norte_code_agent::Service;
 use norte_code_protocol::InMemoryStore;
 use norte_code_wire::{ClientRequest, ClientRequestKind};
-use raep_types::{Envelope, FrameType, StandardFrameType};
+use raep_types::{AttachMode, Envelope, FrameType, SessionAttach, StandardFrameType};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -143,14 +146,14 @@ async fn text_bundle_preview_commit_restores_history_as_a_new_session() {
             Some("source".to_owned()),
             vec![
                 norte_code_agent::service::ImportedHistoryItem {
-                    role: "user".to_owned(),
+                    role: norte_code_agent::service::ImportedHistoryRole::User,
                     content: "question".to_owned(),
                     turn_id: Some("turn_1".to_owned()),
                     timestamp: Some(1),
                     origin: Some(json!({"kind": "user"})),
                 },
                 norte_code_agent::service::ImportedHistoryItem {
-                    role: "assistant".to_owned(),
+                    role: norte_code_agent::service::ImportedHistoryRole::Assistant,
                     content: "answer".to_owned(),
                     turn_id: Some("turn_1".to_owned()),
                     timestamp: Some(2),

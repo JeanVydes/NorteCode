@@ -34,6 +34,7 @@ struct ItemPaint<'a> {
     clip: u16,
     diff_mode: crate::diff::DiffMode,
     focused: bool,
+    streaming: Option<Duration>,
     doc: Option<&'a super::markdown::Markdown>,
     theme: &'a Theme,
 }
@@ -215,6 +216,8 @@ pub(crate) struct Transcript {
     /// Time spent in the current thinking phase; `None` when idle.
     #[serde(skip)]
     thinking: Option<Duration>,
+    #[serde(skip)]
+    streaming: Option<Duration>,
     /// The y of the item area, set during render; used for click hit tests.
     #[serde(skip)]
     origin_y: u16,
@@ -229,7 +232,7 @@ pub(crate) struct Transcript {
     selection: Option<Selection>,
     /// The painted lines of the last render, one per row.
     #[serde(skip)]
-    painted: Vec<String>,
+    painted: Vec<Vec<String>>,
     /// Whether the row's source item may be copied or highlighted.
     #[serde(skip)]
     painted_copyable: Vec<bool>,
@@ -276,8 +279,6 @@ pub(crate) struct Transcript {
 pub(crate) enum MessageAction {
     /// Fork the session at this message's turn.
     Fork { turn: Option<u64> },
-    /// Copy this message's text.
-    Copy { text: String },
     /// Rewind the session to this message's turn.
     Rewind { turn: Option<u64> },
 }
@@ -342,6 +343,7 @@ impl Transcript {
             heights_width: 0,
             dirty: true,
             thinking: None,
+            streaming: None,
             origin_y: 0,
             area: Rect::new(0, 0, 0, 0),
             selection: None,
@@ -407,6 +409,7 @@ impl Transcript {
     pub(crate) fn clear_all(&mut self) {
         self.items.clear();
         self.thinking = None;
+        self.streaming = None;
         self.reset_render_cache();
         self.first_visible = u16::MAX;
         self.follow_tail = true;
@@ -419,8 +422,8 @@ impl Transcript {
         self.reset_render_cache();
         let mut last_shell: Option<usize> = None;
         for item in items {
-            match item.kind.as_str() {
-                "user" => {
+            match item.kind {
+                norte_code_wire::HistoryItemKind::User => {
                     let text = match provenance_label(item.provenance.as_ref()) {
                         Some(label) if item.content.is_empty() => label,
                         Some(label) => format!("{}\n{label}", item.content),
@@ -431,19 +434,19 @@ impl Transcript {
                         turn: parse_turn(item.turn_id.as_deref()),
                     });
                 }
-                "assistant" => self.items.push(Item::Assistant {
+                norte_code_wire::HistoryItemKind::Assistant => self.items.push(Item::Assistant {
                     text: item.content,
                     turn: parse_turn(item.turn_id.as_deref()),
                 }),
-                "reasoning" => self.items.push(Item::Reasoning {
+                norte_code_wire::HistoryItemKind::Reasoning => self.items.push(Item::Reasoning {
                     text: item.content,
                     expanded: false,
                 }),
-                "refusal" => self.items.push(Item::Notice {
+                norte_code_wire::HistoryItemKind::Refusal => self.items.push(Item::Notice {
                     text: item.content,
                     tone: Tone::Warn,
                 }),
-                "tool_result" => {
+                norte_code_wire::HistoryItemKind::ToolResult => {
                     if let Some(index) = last_shell
                         && let Some(Item::Tool {
                             console: Some(console),
@@ -455,7 +458,9 @@ impl Transcript {
                         }
                     }
                 }
-                "system_event" | "tool" | "tool_call" => {
+                norte_code_wire::HistoryItemKind::SystemEvent
+                | norte_code_wire::HistoryItemKind::Tool
+                | norte_code_wire::HistoryItemKind::ToolCall => {
                     let call_id = item.id.clone();
                     let mut lines = item.content.lines();
                     let first = lines.next().unwrap_or("tool").trim();
@@ -505,7 +510,6 @@ impl Transcript {
                         console,
                     });
                 }
-                _ => {}
             }
         }
         self.trim_items();
@@ -543,6 +547,7 @@ impl Transcript {
 
     /// Begin the thinking row.
     pub(crate) fn start_thinking(&mut self) {
+        self.streaming = None;
         if self.thinking.is_none() {
             self.thinking = Some(Duration::from_millis(1));
         }
@@ -551,6 +556,7 @@ impl Transcript {
     /// End the thinking row.
     pub(crate) fn stop_thinking(&mut self) {
         self.thinking = None;
+        self.streaming = None;
     }
 
     /// Flip every `Running` tool block to `Done`.
@@ -620,6 +626,9 @@ impl Transcript {
         text: &str,
         turn: Option<&crate::ui_model::ActiveTurn>,
     ) {
+        if self.streaming.is_none() {
+            self.streaming = Some(Duration::ZERO);
+        }
         if let Some(Item::Assistant { text: existing, .. }) = self.items.last_mut() {
             existing.push_str(text);
             self.dirty = true;
@@ -834,7 +843,7 @@ impl Transcript {
             );
         }
         if let Some(console) = console {
-            let console_width = rect.width.saturating_sub(2);
+            let console_width = rect.width.saturating_sub(4);
             let rows = console.wrapped_height(console_width);
             let taken = u16::try_from(diff.as_ref().map_or(0, |diff| diff.rows(diff_mode) + 2))
                 .unwrap_or(0);
@@ -842,9 +851,10 @@ impl Transcript {
             if y < clip {
                 console.render(
                     Rect {
+                        x: rect.x.saturating_add(1),
                         y,
+                        width: rect.width.saturating_sub(2),
                         height: rows.min(clip.saturating_sub(y)),
-                        ..rect
                     },
                     buf,
                     cx,
@@ -873,7 +883,7 @@ impl Transcript {
                 if paint.focused {
                     buf.set_style(rect, Style::default().bg(theme.secondary));
                 }
-                paint_assistant(buf, rect, paint.doc, paint.clip);
+                paint_assistant(buf, rect, paint.doc, paint.clip, paint.streaming, theme);
             }
             Item::Tool { .. } => {
                 Self::paint_tool_item(item, rect, buf, cx, paint.clip, paint.diff_mode, theme);
@@ -938,7 +948,10 @@ impl Transcript {
             let Some(line) = self.painted.get(row_index) else {
                 continue;
             };
-            let text_end = line.trim_end_matches(' ').chars().count();
+            let text_end = line
+                .iter()
+                .rposition(|symbol| !symbol.trim().is_empty())
+                .map_or(0, |column| column + 1);
             if text_end == 0 {
                 continue;
             }
@@ -966,10 +979,13 @@ impl Transcript {
             }
             let y = area.y + row;
             for x in from..to {
-                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(
+                let position = ratatui::layout::Position::new(
                     area.x + u16::try_from(x).unwrap_or(u16::MAX),
                     y,
-                )) {
+                );
+                if let Some(cell) = buf.cell_mut(position)
+                    && !cell.symbol().trim().is_empty()
+                {
                     cell.set_bg(theme.accent);
                     cell.set_fg(theme.background);
                 }
@@ -1005,10 +1021,10 @@ impl Transcript {
         self.painted_user.clear();
         for y in area.y..area.y + area.height {
             let row = usize::from(y - area.y);
-            let mut line = String::with_capacity(area.width as usize);
+            let mut line = Vec::with_capacity(area.width as usize);
             for x in 0..area.width {
                 if let Some(cell) = buf.cell(ratatui::layout::Position::new(area.x + x, y)) {
-                    line.push_str(cell.symbol());
+                    line.push(cell.symbol().to_owned());
                 }
             }
             let copyable = row_map.get(row).copied().flatten().is_some_and(|index| {
@@ -1048,7 +1064,7 @@ impl Transcript {
     /// The selected text, rows joined by newlines.
     fn selection_text(&self, selection: Selection) -> Option<String> {
         let (start, end) = Self::ordered_selection(selection)?;
-        let mut out = String::new();
+        let mut selected_lines = Vec::new();
         for row in start.row..=end.row {
             let row_index = usize::from(row);
             if !self
@@ -1062,7 +1078,7 @@ impl Transcript {
             let Some(line) = self.painted.get(row_index) else {
                 continue;
             };
-            let chars: Vec<char> = line.chars().collect();
+            let cells = line;
             let from = if row == start.row {
                 usize::from(start.col)
             } else {
@@ -1074,25 +1090,22 @@ impl Transcript {
                 from
             };
             let mut to = if row == end.row {
-                usize::from(end.col).saturating_add(1).min(chars.len())
+                usize::from(end.col).saturating_add(1).min(cells.len())
             } else {
-                chars.len()
+                cells.len()
             };
             if let Some(bar) = self.scrollbar {
                 to = to.min(usize::from(bar.x.saturating_sub(self.area.x)));
             }
             if from < to {
-                let slice: String = chars[from..to].iter().collect();
-                out.push_str(slice.trim_end());
-            }
-            if row != end.row {
-                out.push('\n');
+                let slice = cells[from..to].concat();
+                let text = slice.trim_matches(' ');
+                if !text.is_empty() {
+                    selected_lines.push(text.to_owned());
+                }
             }
         }
-        if out.trim().is_empty() {
-            return None;
-        }
-        Some(out.trim_matches('\n').to_string())
+        (!selected_lines.is_empty()).then(|| selected_lines.join("\n"))
     }
 
     /// Mouse: scroll, select text to copy on release, toggle thoughts.
@@ -1305,14 +1318,7 @@ impl Transcript {
             return Outcome::Consumed;
         }
         match self.selection_text(selection) {
-            Some(text) => {
-                let chars = text.chars().count();
-                let _ = self.clipboard.write(&text);
-                self.toasts.push(ToastRequest {
-                    text: format!("copied {chars} chars to clipboard"),
-                    tone: Tone::Neutral,
-                });
-            }
+            Some(text) => self.copy_text(&text, "selection"),
             None => {
                 self.toasts.push(ToastRequest {
                     text: "selection produced no text".to_string(),
@@ -1351,17 +1357,36 @@ impl Transcript {
         let Some(menu) = self.menu.take() else {
             return;
         };
-        let (turn, text) = match self.items.get(menu.item) {
+        let (turn, source) = match self.items.get(menu.item) {
             Some(Item::User { turn, text, .. } | Item::Assistant { turn, text, .. }) => {
                 (*turn, text.clone())
             }
             _ => return,
         };
-        self.message_actions.push(match button {
-            0 => MessageAction::Fork { turn },
-            1 => MessageAction::Copy { text },
-            _ => MessageAction::Rewind { turn },
-        });
+        let text = self
+            .docs
+            .get(menu.item)
+            .and_then(Option::as_ref)
+            .map_or(source, rendered_text);
+        match button {
+            0 => self.message_actions.push(MessageAction::Fork { turn }),
+            1 => self.copy_text(&text, "message text"),
+            _ => self.message_actions.push(MessageAction::Rewind { turn }),
+        }
+    }
+
+    fn copy_text(&mut self, text: &str, description: &str) {
+        let request = match self.clipboard.write(text) {
+            Ok(()) => ToastRequest {
+                text: format!("{description} copied ({} characters)", text.chars().count()),
+                tone: Tone::Neutral,
+            },
+            Err(error) => ToastRequest {
+                text: format!("could not copy {description}: {error}"),
+                tone: Tone::Warn,
+            },
+        };
+        self.toasts.push(request);
     }
 
     fn drag_thumb(&mut self, bar: Scrollbar, local: u16) {
@@ -1388,6 +1413,8 @@ impl Transcript {
     ) {
         let bottom = area.y + area.height;
         let skip = self.first_visible;
+        let item_count = self.items.len();
+        let streaming = self.streaming;
         let mut row: u16 = 0;
         for (index, item) in self.items.iter_mut().enumerate() {
             let height = self.heights[index];
@@ -1403,6 +1430,7 @@ impl Transcript {
                 clip: bottom,
                 diff_mode: self.diff_mode,
                 focused: self.focused_item == Some(index),
+                streaming: (index + 1 == item_count).then_some(streaming).flatten(),
                 doc: docs.get(index).and_then(Option::as_ref),
                 theme,
             };
@@ -1457,6 +1485,25 @@ impl Transcript {
     }
 }
 
+fn rendered_text(document: &super::markdown::Markdown) -> String {
+    let mut lines: Vec<String> = document
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect();
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
 impl View for Transcript {
     fn as_any(&mut self) -> &mut dyn Any {
         self
@@ -1482,6 +1529,9 @@ impl View for Transcript {
         if let Some(thinking) = self.thinking {
             self.thinking = Some(thinking.saturating_add(delta));
         }
+        if let Some(streaming) = self.streaming {
+            self.streaming = Some(streaming.saturating_add(delta));
+        }
         for item in &mut self.items {
             if let Item::Tool {
                 console: Some(console),
@@ -1499,8 +1549,8 @@ impl View for Transcript {
         self.origin_y = area.y;
         self.area = area;
         let content = Rect {
-            x: area.x + 1,
-            width: area.width.saturating_sub(1),
+            x: area.x.saturating_add(2),
+            width: area.width.saturating_sub(3),
             ..area
         };
         self.compute_heights(content.width, *theme);
@@ -1601,10 +1651,11 @@ fn paint_user(
     theme: &Theme,
 ) {
     let text = Rect {
-        x: area.x + 1,
-        width: area.width.saturating_sub(1),
+        x: area.x.saturating_add(1),
+        width: area.width.saturating_sub(2),
         ..area
     };
+    buf.set_style(text, Style::default().bg(theme.secondary));
     paint_doc(buf, text, doc, clip);
     for y in area.y..(area.y + area.height).min(clip) {
         buf.set_stringn(
@@ -1624,8 +1675,49 @@ fn paint_assistant(
     area: Rect,
     doc: Option<&super::markdown::Markdown>,
     clip: u16,
+    streaming: Option<Duration>,
+    theme: &Theme,
 ) {
     paint_doc(buf, area, doc, clip);
+    let Some(elapsed) = streaming else {
+        return;
+    };
+    let Some(line) = doc.and_then(|doc| doc.lines.iter().rev().find(|line| !line.spans.is_empty()))
+    else {
+        return;
+    };
+    let row = doc
+        .and_then(|doc| doc.lines.iter().rposition(|line| !line.spans.is_empty()))
+        .unwrap_or(0);
+    let Some(y) = area.y.checked_add(u16::try_from(row).unwrap_or(u16::MAX)) else {
+        return;
+    };
+    if y >= clip || y >= area.y.saturating_add(area.height) {
+        return;
+    }
+    let width = line
+        .spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum::<usize>();
+    if width >= usize::from(area.width) {
+        return;
+    }
+    let x = area
+        .x
+        .saturating_add(u16::try_from(width).unwrap_or(u16::MAX));
+    let color = if elapsed.as_millis() / 450 % 2 == 0 {
+        theme.accent
+    } else {
+        theme.muted
+    };
+    buf.set_stringn(
+        x,
+        y,
+        "▍",
+        1,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    );
 }
 
 fn paint_doc(buf: &mut Buffer, area: Rect, doc: Option<&super::markdown::Markdown>, clip: u16) {

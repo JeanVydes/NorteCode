@@ -33,6 +33,10 @@ fn ctrl_c() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
 }
 
+fn ctrl_q() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)
+}
+
 fn escape() -> KeyEvent {
     KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
 }
@@ -157,10 +161,10 @@ fn ctrl_c_copies_the_composer_selection_without_quitting() {
 }
 
 #[test]
-fn ctrl_c_without_a_selection_quits() {
+fn ctrl_c_without_a_selection_does_not_quit() {
     let mut tree = composer_tree(Arc::new(FakeClipboard::default()));
     let mut model = UiModel::detached();
-    assert!(handle_key(
+    assert!(!handle_key(
         &mut tree,
         ctrl_c(),
         &mut None,
@@ -223,7 +227,7 @@ fn escape_closing_an_overlay_does_not_cancel_the_turn() {
 }
 
 #[test]
-fn ctrl_c_quits_without_cancelling_the_turn() {
+fn ctrl_q_quits_without_cancelling_the_turn() {
     let mut tree = composer_tree(Arc::new(FakeClipboard::default()));
     let (commands_tx, mut commands_rx) = mpsc::channel(4);
     let mut commands = Some(commands_tx);
@@ -231,7 +235,7 @@ fn ctrl_c_quits_without_cancelling_the_turn() {
 
     assert!(handle_key(
         &mut tree,
-        ctrl_c(),
+        ctrl_q(),
         &mut commands,
         &mut None,
         &mut model,

@@ -181,3 +181,54 @@ impl NorteCodeRaepHost {
         ])
     }
 }
+
+pub(crate) fn job_output_from_index(
+    job: &norte_code_wire::JobInfo,
+    from_index: u64,
+) -> Result<&str, HostError> {
+    let retained_bytes = u64::try_from(job.output.len()).unwrap_or(u64::MAX);
+    let retained_from = job.output_bytes_total.saturating_sub(retained_bytes);
+    if from_index < retained_from {
+        return Err(HostError::InvalidFrame("JOB_OUTPUT_EXPIRED".to_owned()));
+    }
+    if from_index > job.output_bytes_total {
+        return Err(HostError::InvalidFrame(
+            "JOB_GET.from_index exceeds available output".to_owned(),
+        ));
+    }
+    let relative = usize::try_from(from_index - retained_from)
+        .map_err(|_| HostError::InvalidFrame("JOB_GET.from_index is out of range".to_owned()))?;
+    job.output.get(relative..).ok_or_else(|| {
+        HostError::InvalidFrame("JOB_GET.from_index is not a UTF-8 boundary".to_owned())
+    })
+}
+
+pub(crate) fn job_finished_payload(
+    job: &norte_code_wire::JobInfo,
+    triggered_new_turn: bool,
+    new_turn_id: Option<&str>,
+    injected_into_turn_id: Option<&str>,
+) -> Value {
+    let start = job
+        .output
+        .char_indices()
+        .find_map(|(index, _)| {
+            (job.output.len().saturating_sub(16 * 1024) <= index).then_some(index)
+        })
+        .unwrap_or(0);
+    let output_snapshot = &job.output[start..];
+    payload(norte_code_wire::JobFinished {
+        job_id: Some(job.id.clone()),
+        status: job_status(job),
+        exit_code: job.exit_code,
+        signal: None,
+        summary: job.label.clone(),
+        output_snapshot: output_snapshot.to_owned(),
+        output_truncated: job.dropped || start > 0,
+        output_bytes_total: job.output_bytes_total,
+        duration_ms: job.elapsed_ms,
+        triggered_new_turn,
+        new_turn_id: new_turn_id.map(str::to_owned),
+        injected_into_turn_id: injected_into_turn_id.map(str::to_owned),
+    })
+}

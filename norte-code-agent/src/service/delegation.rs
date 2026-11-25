@@ -3,6 +3,23 @@
 //! The parent's imports are in scope through `super`, so the domain
 //! names types the same way the service does.
 
+use super::subagent_runner::SubagentRunnerImpl;
+use norte_code_wire::JobInfo;
+
+pub(super) fn job_policy_allows_turn(policy: JobTurnPolicy, job: &JobInfo) -> bool {
+    if !job.state.is_done() {
+        return false;
+    }
+    match policy {
+        JobTurnPolicy::Always => true,
+        JobTurnPolicy::OnFailure => {
+            job.state == norte_code_wire::JobState::Cancelled
+                || job.timed_out
+                || job.exit_code.is_some_and(|code| code != 0)
+        }
+        JobTurnPolicy::Never => false,
+    }
+}
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
 use super::*;

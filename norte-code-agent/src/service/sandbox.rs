@@ -84,13 +84,29 @@ pub(super) fn sandbox_request(
     network: bool,
     writable: &[PathBuf],
 ) -> std::result::Result<ShellRequest, String> {
-    let value = serde_json::to_value(request).map_err(|error| error.to_string())?;
-    let value = sandboxed_arguments(&value, workspace, network, writable)?;
-    serde_json::from_value(value).map_err(|error| error.to_string())
+    let cwd = request.cwd.as_deref();
+    let (program, args) = wrap_command(
+        request.shell.clone(),
+        vec!["-c".to_owned(), request.script.clone()],
+        cwd,
+        workspace,
+        network,
+        writable,
+    )?;
+    let mut script = shell_quote(&program);
+    for argument in &args {
+        script.push(' ');
+        script.push_str(&shell_quote(argument));
+    }
+    let mut sandboxed = request.clone();
+    sandboxed.script = script;
+    "sh".clone_into(&mut sandboxed.shell);
+    Ok(sandboxed)
 }
 
 /// Replaces the request's command with the sandbox launcher and the original
 /// command. Every other field (cwd, env, stdin, limits) is kept.
+#[cfg(test)]
 pub(super) fn sandboxed_arguments(
     arguments: &serde_json::Value,
     workspace: &Path,

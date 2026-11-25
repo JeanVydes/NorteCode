@@ -6,7 +6,6 @@ members = [
     "norte-code-client",
     "norte-code-protocol",
     "norte-code-tui",
-    "norte-code-tui-legacy",
     "norte-code-wire",
     "norte-code-raep",
     "norte-code-plugin-host",

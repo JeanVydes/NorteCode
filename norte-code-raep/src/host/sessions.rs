@@ -317,7 +317,7 @@ impl NorteCodeRaepHost {
         )
         .await?;
         self.state.lock().await.attached.remove(session_id);
-        self.replay.remove(session_id);
+        self.remove_replay(session_id).await?;
         Ok(true)
     }
     /// Returns the session a previous `Idempotency-Key` created.
@@ -374,9 +374,6 @@ impl NorteCodeRaepHost {
     /// # Errors
     ///
     /// Returns an error when the replay file cannot be read.
-    pub(crate) fn replay_after(&self, session_id: &str, last_seq: u64) -> ReplayWindow {
-        self.replay.after(session_id, last_seq)
-    }
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn attach(
         &self,
@@ -474,7 +471,7 @@ impl NorteCodeRaepHost {
             .await
             .session_agents
             .insert(session_id.clone(), agent_id);
-        let resumed = self.replay.last_seq(&session_id).unwrap_or(0);
+        let resumed = self.replay_last_seq(&session_id).await?.unwrap_or(0);
         {
             let mut state = self.state.lock().await;
             state.attached.insert(session_id.clone());
@@ -490,7 +487,7 @@ impl NorteCodeRaepHost {
         }
         let (replayed, replay_meta) = match attach.resume_from_seq {
             Some(after) => {
-                let window = self.replay_after(&session_id, after);
+                let window = self.replay_after(&session_id, after).await?;
                 let to_seq = window
                     .frames
                     .iter()

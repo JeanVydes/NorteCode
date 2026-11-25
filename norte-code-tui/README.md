@@ -14,4 +14,5 @@ Highlights:
 - Chat with honest connection state, Ctrl+R to re-attach, Ctrl+T to switch themes.
 - Models page with provider expansion and key prompts for providers that need one.
 - Ask-user overlay for questions the host parks a turn on.
-- Alt+1..9 to switch tabs, multiline composer, mouse and keyboard both.
+- Alt+1..9 to switch tabs, Ctrl+P for commands, Ctrl+C to copy and Ctrl+Q to quit.
+- Multiline composer, mouse text selection, and keyboard navigation.

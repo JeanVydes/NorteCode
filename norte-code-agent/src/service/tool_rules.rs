@@ -17,6 +17,7 @@ use norte_tools::{
 
 use norte_code_wire::{PluginId, SessionKey};
 
+use super::subagent_runner::SubagentRunnerImpl;
 use crate::ServiceError;
 
 use self::environment::ToolEnvironment;

@@ -66,7 +66,7 @@ impl Service {
                 child_session_id: key.as_str().to_owned(),
                 agent_id: agent_profile,
                 tool_call_id,
-                lifetime,
+                lifetime: lifetime.as_wire_str().to_owned(),
                 task_summary: task_summary.chars().take(512).collect(),
             },
         ));

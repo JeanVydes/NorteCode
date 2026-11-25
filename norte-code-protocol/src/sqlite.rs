@@ -1242,9 +1242,15 @@ impl SessionDirectory for SqliteStore {
                             }
                         })?,
                         phase: match phase.as_str() {
+                            "idle" => Phase::Idle,
                             "streaming" => Phase::Streaming,
                             "awaiting_tool" => Phase::AwaitingTool,
-                            _ => Phase::Idle,
+                            other => {
+                                return Err(Error::from(Fault::Corrupt {
+                                    what: "stored session phase".to_owned(),
+                                    reason: format!("unknown phase `{other}`"),
+                                }));
+                            }
                         },
                         stats: decode(&stats, "session stats")?,
                         denied_tools: extra.denied_tools,

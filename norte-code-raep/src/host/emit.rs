@@ -21,6 +21,20 @@ use super::*;
 use super::NorteCodeRaepHost;
 
 impl NorteCodeRaepHost {
+    fn emission_lock(&self, session_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .emission_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(session_id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(session_id.to_owned(), std::sync::Arc::downgrade(&lock));
+        lock
+    }
+
     pub(crate) async fn emit_event(
         &self,
         session_id: &str,
@@ -110,18 +124,21 @@ impl NorteCodeRaepHost {
         session_id: &str,
         mut frame: Envelope<Value>,
     ) -> Result<Envelope<Value>, HostError> {
+        let emission_lock = self.emission_lock(session_id);
+        let _guard = emission_lock.lock().await;
+        let current =
+            if let Some(current) = self.state.lock().await.sequences.get(session_id).copied() {
+                current
+            } else {
+                self.replay_last_seq(session_id).await?.unwrap_or(0)
+            };
+        frame.seq = Some(current.saturating_add(1));
+        self.append_replay(frame.clone()).await?;
         {
             let mut state = self.state.lock().await;
-            // The log outlives the process: a session's sequence continues
-            // from what is already on disk instead of restarting at one.
-            let current = state
+            state
                 .sequences
-                .get(session_id)
-                .copied()
-                .unwrap_or_else(|| self.replay.last_seq(session_id).unwrap_or(0));
-            let sequence = current.saturating_add(1);
-            frame.seq = Some(sequence);
-            state.sequences.insert(session_id.to_owned(), sequence);
+                .insert(session_id.to_owned(), frame.seq.unwrap_or(current));
             if let Some(turn_id) = &frame.turn_id {
                 let key = (session_id.to_owned(), turn_id.clone());
                 if state.turn_request_fingerprints.contains_key(&key) {
@@ -129,9 +146,6 @@ impl NorteCodeRaepHost {
                 }
             }
         }
-        // The file write happens outside the state lock: a slow disk must not
-        // block every other session's frames.
-        self.replay.append(&frame)?;
         let _ = self.events.send(frame.clone());
         Ok(frame)
     }

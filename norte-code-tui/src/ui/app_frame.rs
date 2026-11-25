@@ -60,6 +60,8 @@ impl View for AppFrame {
         let middle_height = area
             .height
             .saturating_sub(header_height + composer_height + status_height);
+        let horizontal_inset = u16::from(area.width >= 60);
+        let vertical_inset = u16::from(middle_height >= 12);
 
         let bands = [
             Rect {
@@ -69,21 +71,27 @@ impl View for AppFrame {
                 height: header_height,
             },
             Rect {
-                x: area.x,
-                y: area.y + header_height,
-                width: area.width,
-                height: middle_height,
+                x: area.x.saturating_add(horizontal_inset),
+                y: area.y.saturating_add(header_height + vertical_inset),
+                width: area
+                    .width
+                    .saturating_sub(horizontal_inset.saturating_mul(2)),
+                height: middle_height.saturating_sub(vertical_inset.saturating_mul(2)),
             },
             Rect {
-                x: area.x,
+                x: area.x.saturating_add(horizontal_inset),
                 y: area.y + header_height + middle_height,
-                width: area.width,
+                width: area
+                    .width
+                    .saturating_sub(horizontal_inset.saturating_mul(2)),
                 height: composer_height,
             },
             Rect {
-                x: area.x,
+                x: area.x.saturating_add(horizontal_inset),
                 y: area.y + header_height + middle_height + composer_height,
-                width: area.width,
+                width: area
+                    .width
+                    .saturating_sub(horizontal_inset.saturating_mul(2)),
                 height: status_height,
             },
         ];

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use norte_code_client::config::RetentionConfig;
-use norte_code_wire::{HistoryItem, HistorySpeaker};
+use norte_code_wire::{HistoryItem, HistoryItemKind, HistorySpeaker};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use terminalui::Outcome;
@@ -12,6 +12,10 @@ use terminalui::components::console::Console;
 
 use super::{Item, NOTICE_PREFIX_CHARS, Tone, Transcript};
 use crate::ui::scroll_drag::Scrollbar;
+
+fn painted_line(line: &str) -> Vec<String> {
+    line.chars().map(|symbol| symbol.to_string()).collect()
+}
 
 fn buffer_text(buffer: &Buffer, area: Rect) -> String {
     (0..area.height)
@@ -42,7 +46,7 @@ fn replayed_history_keeps_upload_markers_in_the_user_text() {
     let mut transcript = Transcript::new();
     transcript.replace_history(vec![HistoryItem {
         id: "h1".to_owned(),
-        kind: "user".to_owned(),
+        kind: HistoryItemKind::User,
         content: "see [Image #1] and [File #1]".to_owned(),
         created_at: 0,
         turn_id: None,
@@ -109,7 +113,7 @@ fn a_selection_never_includes_the_scrollbar_column() {
     let mut line = String::from("hello");
     line.push_str(&" ".repeat(34));
     line.push('░');
-    transcript.painted = vec![line; 10];
+    transcript.painted = vec![painted_line(&line); 10];
     transcript.painted_copyable = vec![true; 10];
     transcript.painted_user = vec![false; 10];
     let text = transcript
@@ -267,7 +271,7 @@ fn reasoning_in_a_new_turn_gets_its_own_block() {
 #[test]
 fn selection_omits_the_user_bar() {
     let mut transcript = Transcript::new();
-    transcript.painted = vec!["▌ hello".to_string(), "world".to_string()];
+    transcript.painted = vec![painted_line("▌ hello"), painted_line("world")];
     transcript.painted_user = vec![true, false];
     let text = transcript
         .selection_text(super::Selection {
@@ -301,10 +305,10 @@ fn wrapping_splits_a_word_longer_than_the_line() {
     assert_eq!(lines.concat(), "abcdefghijklmnop");
 }
 
-fn history_item(id: &str, kind: &str, content: &str) -> norte_code_wire::HistoryItem {
+fn history_item(id: &str, kind: HistoryItemKind, content: &str) -> norte_code_wire::HistoryItem {
     norte_code_wire::HistoryItem {
         id: id.to_string(),
-        kind: kind.to_string(),
+        kind,
         content: content.to_string(),
         created_at: 0,
         turn_id: None,
@@ -318,7 +322,7 @@ fn replayed_plugin_messages_show_their_origin() {
     let mut transcript = Transcript::new();
     transcript.replace_history(vec![HistoryItem {
         id: "message-1".to_owned(),
-        kind: "user".to_owned(),
+        kind: HistoryItemKind::User,
         content: "a screenshot".to_owned(),
         created_at: 0,
         turn_id: None,
@@ -339,8 +343,12 @@ fn replayed_plugin_messages_show_their_origin() {
 fn replayed_shell_calls_keep_the_command_and_its_result() {
     let mut transcript = Transcript::new();
     transcript.replace_history(vec![
-        history_item("1", "tool_call", "shell {\n  \"script\": \"echo hi\"\n}"),
-        history_item("2", "tool_result", "hi"),
+        history_item(
+            "1",
+            HistoryItemKind::ToolCall,
+            "shell {\n  \"script\": \"echo hi\"\n}",
+        ),
+        history_item("2", HistoryItemKind::ToolResult, "hi"),
     ]);
     let Some(Item::Tool {
         name,
@@ -448,8 +456,8 @@ fn long_shell_output_wraps_to_the_console_width() {
     let mut buffer = Buffer::empty(area);
     tree.render(area, &mut buffer, &Theme::default());
     let text = buffer_text(&buffer, area);
-    assert!(text.contains("abcdefghijklmnopqrstu"), "got: {text}");
-    assert!(text.contains("vwxyz0123456789"), "got: {text}");
+    assert!(text.contains("abcdefghijklmnopq"), "got: {text}");
+    assert!(text.contains("rstuvwxyz01234567"), "got: {text}");
 }
 
 #[test]
@@ -491,7 +499,7 @@ fn replayed_edit_calls_keep_their_diff() {
     let mut transcript = Transcript::new();
     transcript.replace_history(vec![norte_code_wire::HistoryItem {
         id: "call-1".to_string(),
-        kind: "tool_call".to_string(),
+        kind: HistoryItemKind::ToolCall,
         content: "edit {\n  \"path\": \"x.rs\",\n  \"edits\": [{ \"search\": \"old\", \"replace\": \"new\" }]\n}"
             .to_string(),
         created_at: 0,
@@ -579,7 +587,7 @@ fn non_reasoning_rows_are_not_toggleable() {
 #[test]
 fn selection_extracts_the_painted_cells() {
     let mut transcript = Transcript::new();
-    transcript.painted = vec!["hello world".to_string(), "second line".to_string()];
+    transcript.painted = vec![painted_line("hello world"), painted_line("second line")];
     assert_eq!(
         transcript
             .selection_text(super::Selection {
@@ -596,7 +604,7 @@ fn copying_a_transcript_selection_uses_the_shared_clipboard() {
     let clipboard = Arc::new(crate::clipboard::FakeClipboard::default());
     let mut transcript = Transcript::new();
     transcript.set_clipboard(clipboard.clone());
-    transcript.painted = vec!["hello world".to_string()];
+    transcript.painted = vec![painted_line("hello world")];
     transcript.selection = Some(super::Selection {
         anchor: super::Pos { row: 0, col: 0 },
         cur: super::Pos { row: 0, col: 5 },
@@ -606,7 +614,7 @@ fn copying_a_transcript_selection_uses_the_shared_clipboard() {
     assert_eq!(
         transcript.take_toasts(),
         vec![super::ToastRequest {
-            text: "copied 5 chars to clipboard".to_owned(),
+            text: "selection copied (5 characters)".to_owned(),
             tone: Tone::Neutral,
         }]
     );
@@ -616,7 +624,7 @@ fn copying_a_transcript_selection_uses_the_shared_clipboard() {
 #[test]
 fn reversed_selection_extracts_from_the_visual_start() {
     let mut transcript = Transcript::new();
-    transcript.painted = vec!["hello world".to_string()];
+    transcript.painted = vec![painted_line("hello world")];
     assert_eq!(
         transcript
             .selection_text(super::Selection {
@@ -631,7 +639,7 @@ fn reversed_selection_extracts_from_the_visual_start() {
 #[test]
 fn a_degenerate_selection_copies_nothing() {
     let mut transcript = Transcript::new();
-    transcript.painted = vec!["line".to_string()];
+    transcript.painted = vec![painted_line("line")];
     assert_eq!(
         transcript.selection_text(super::Selection {
             anchor: super::Pos { row: 0, col: 2 },
@@ -645,9 +653,9 @@ fn a_degenerate_selection_copies_nothing() {
 fn notice_rows_are_excluded_from_the_selection() {
     let mut transcript = Transcript::new();
     transcript.painted = vec![
-        "hello".to_string(),
-        "x notice row".to_string(),
-        "world".to_string(),
+        painted_line("hello"),
+        painted_line("x notice row"),
+        painted_line("world"),
     ];
     transcript.painted_copyable = vec![true, false, true];
     assert_eq!(
@@ -732,7 +740,7 @@ fn clearing_the_stream_drops_the_render_cache() {
     });
     transcript.docs.push(None);
     transcript.heights.push(2);
-    transcript.painted.push("hello".to_owned());
+    transcript.painted.push(painted_line("hello"));
     transcript.painted_copyable.push(true);
     transcript.painted_user.push(true);
     transcript.row_map.push(Some(0));
@@ -840,7 +848,7 @@ fn replaying_a_long_history_is_bounded() {
     let retention = RetentionConfig::default();
     let mut transcript = Transcript::new();
     let items = (0..retention.transcript_max_items + 25)
-        .map(|index| history_item(&index.to_string(), "user", "hello"))
+        .map(|index| history_item(&index.to_string(), HistoryItemKind::User, "hello"))
         .collect();
     transcript.replace_history(items);
 

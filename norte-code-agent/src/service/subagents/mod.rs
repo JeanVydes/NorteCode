@@ -52,14 +52,14 @@ pub(super) struct SubagentArgs {
     /// The child must return a JSON value matching this schema, when set.
     pub output_schema: Option<serde_json::Value>,
     /// Whether the child is tied to the parent turn or session.
-    pub lifetime: String,
+    pub lifetime: ChildLifetime,
     /// The configured child agent to use, when one is requested explicitly.
     /// It must be in the parent profile's `delegates`; when omitted, the
     /// profile's `subagent` default (or the parent's own) is used. `list_agents`
     /// shows the allowed `delegates` for this session.
     pub agent_id: Option<String>,
     /// Whether to include a redacted excerpt of the parent history.
-    pub context_mode: Option<String>,
+    pub context_mode: Option<ContextMode>,
 }
 
 /// What one run of a child session produced.
@@ -86,9 +86,9 @@ pub(super) struct SubagentRequest {
     pub(super) parent: SessionId,
     pub(super) tool_call_id: String,
     pub(super) output_schema: Option<serde_json::Value>,
-    pub(super) lifetime: String,
+    pub(super) lifetime: ChildLifetime,
     pub(super) agent_id: Option<String>,
-    pub(super) context_mode: Option<String>,
+    pub(super) context_mode: Option<ContextMode>,
 }
 
 struct DetachedRun {
@@ -145,10 +145,20 @@ impl Gate {
 
     /// Gives a slot back when a run ends.
     pub(super) fn release_slot(&self) {
-        // One decrement, no loop: a lost race only ever under-counts, which
-        // the next acquire retries against the value it sees.
-        if self.running.load(Ordering::Acquire) > 0 {
-            self.running.fetch_sub(1, Ordering::AcqRel);
+        // `load` followed by `fetch_sub` can underflow if two callers release
+        // the last slot concurrently. Update atomically and keep the count
+        // valid even if a caller accidentally releases twice.
+        let mut running = self.running.load(Ordering::Acquire);
+        while running > 0 {
+            match self.running.compare_exchange_weak(
+                running,
+                running - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => running = observed,
+            }
         }
     }
 }
@@ -230,66 +240,6 @@ impl SubagentTool {
     #[cfg(test)]
     pub(super) fn gate_for_test(&self) -> &Gate {
         &self.gate
-    }
-
-    fn spawn_detached(&self, run: DetachedRun) -> ToolOutput {
-        let DetachedRun {
-            parent,
-            call_id,
-            tool_call_id,
-            label,
-            args,
-            cancel,
-            token,
-        } = run;
-        let id = match self
-            .jobs
-            .try_start(parent, call_id, &label, Arc::clone(&cancel))
-        {
-            Ok(id) => id,
-            Err(error) => {
-                self.gate.release_slot();
-                self.detaches.release(parent, &token);
-                return ToolOutput::error(error.to_string());
-            }
-        };
-        let runner = Arc::clone(&self.runner);
-        let jobs = Arc::clone(&self.jobs);
-        let steering = Arc::clone(&self.steering);
-        let children = Arc::clone(&self.children);
-        let service_slot = Arc::clone(&self.service);
-        let gate = Arc::clone(&self.gate);
-        let request = SubagentRequest {
-            prompt: args.prompt,
-            parent,
-            tool_call_id,
-            output_schema: args.output_schema,
-            lifetime: args.lifetime,
-            agent_id: args.agent_id,
-            context_mode: args.context_mode,
-        };
-        let job_id = id.clone();
-        tokio::spawn(async move {
-            let outcome = runner.run(request, Arc::clone(&cancel)).await;
-            jobs.write_id(&job_id, &outcome.text);
-            jobs.finish(&job_id, None);
-            steering.push(
-                parent,
-                Steered::new(
-                    format!("subagent:{job_id}"),
-                    report(&job_id, &outcome),
-                    Vec::new(),
-                    Vec::new(),
-                ),
-            );
-            if let Some(service) = service_of(&service_slot) {
-                service.schedule_auto_turn(parent);
-            }
-            emit_child_update(&children, &service_slot, parent, &outcome);
-            gate.release_slot();
-        });
-        self.detaches.release(parent, &token);
-        started(&id, &label)
     }
 
     /// RAEP delegation equivalent: `spawn_agent`.
@@ -444,121 +394,6 @@ fn report(id: &str, outcome: &SubagentOutcome) -> String {
     format!("{head} from `{id}`.\n\n{clipped}{tail}")
 }
 
-#[async_trait]
-impl FnExecutor<SubagentArgs, ToolOutput> for SubagentTool {
-    async fn call(&self, _args: SubagentArgs) -> norte::Result<ToolOutput> {
-        Ok(ToolOutput::error(
-            "spawn_agent needs a client attached: a child session belongs to a parent one",
-        ))
-    }
-
-    async fn call_with_context(
-        &self,
-        context: &ToolContext,
-        args: SubagentArgs,
-    ) -> norte::Result<ToolOutput> {
-        let (Some(parent), Some(call_id)) = (context.session, context.call_id) else {
-            return Ok(ToolOutput::error(
-                "spawn_agent needs a client attached: a child session belongs to a parent one",
-            ));
-        };
-        let tool_call_id = call_id.to_string();
-        // The delegation depth is the parent's depth plus one (RFC 8.2.4):
-        // past the limit the call is an error the model reads, not a child
-        // that cannot do anything.
-        if let Some(service) = service_of(&self.service)
-            && let Some(depth) = parent_key(&service, parent).map(|key| service.depth_of(&key))
-        {
-            let max_depth =
-                u32::try_from(service.delegation_limits().max_depth).unwrap_or(u32::MAX);
-            if depth >= max_depth {
-                return Ok(ToolOutput::error(format!(
-                    "BUDGET_EXCEEDED: maximum delegation depth ({max_depth}) reached at this session"
-                )));
-            }
-        }
-        if let Some(error) = invalid_spawn_args(&args) {
-            return Ok(ToolOutput::error(error));
-        }
-        if let Err(message) = self.gate.acquire() {
-            return Ok(ToolOutput::error(message));
-        }
-        let label = subagent_label(&args);
-        let cancel = Arc::new(Cancellation::new());
-        // The detach token this call watches, published so `Ctrl-G` reaches
-        // it, like any other call of the session.
-        let token = Arc::new(Cancellation::new());
-        self.detaches.attach(parent, Arc::clone(&token));
-
-        if args.detach {
-            return Ok(self.spawn_detached(DetachedRun {
-                parent,
-                call_id,
-                tool_call_id,
-                label,
-                args,
-                cancel,
-                token,
-            }));
-        }
-
-        // A waited call remains part of the parent turn and can be detached
-        // by the user while it is running.
-        let turn_cancelled = context.cancellation();
-        let outcome = tokio::select! {
-            outcome = self.runner.run(
-                SubagentRequest {
-                    prompt: args.prompt.clone(),
-                    parent,
-                    tool_call_id: tool_call_id.clone(),
-                    output_schema: args.output_schema.clone(),
-                    lifetime: args.lifetime.clone(),
-                    agent_id: args.agent_id.clone(),
-                    context_mode: args.context_mode.clone(),
-                },
-                Arc::clone(&cancel),
-            ) => outcome,
-            () = token.cancelled() => {
-                cancel.cancel();
-                SubagentOutcome {
-                    text: String::new(),
-                    is_error: false,
-                    child: None,
-                    output_schema_valid: None,
-                }
-            },
-            () = turn_cancelled.cancelled() => {
-                cancel.cancel();
-                SubagentOutcome {
-                    text: String::new(),
-                    is_error: true,
-                    child: None,
-                    output_schema_valid: None,
-                }
-            },
-        };
-        self.detaches.release(parent, &token);
-        self.gate.release_slot();
-
-        self.emit_child_update(parent, &outcome);
-        Ok(outcome_to_output(outcome))
-    }
-}
-
-fn invalid_spawn_args(args: &SubagentArgs) -> Option<String> {
-    if !matches!(args.lifetime.as_str(), "turn" | "session") {
-        return Some("spawn_agent: lifetime must be `turn` or `session`".to_owned());
-    }
-    if args
-        .context_mode
-        .as_deref()
-        .is_some_and(|mode| mode != "summary")
-    {
-        return Some("spawn_agent: context_mode must be `summary` when provided".to_owned());
-    }
-    None
-}
-
 /// The one line a listing has for the child.
 fn subagent_label(args: &SubagentArgs) -> String {
     match &args.title {
@@ -607,9 +442,9 @@ impl FnExecutor<SpawnArgs, ToolOutput> for SpawnTool {
                     title: args.title.clone(),
                     detach: args.detach,
                     output_schema: args.output_schema.clone(),
-                    lifetime: args.lifetime.clone(),
+                    lifetime: args.lifetime,
                     agent_id: args.agent_id.clone(),
-                    context_mode: args.context_mode.clone(),
+                    context_mode: args.context_mode,
                 },
             )
             .await
@@ -636,8 +471,8 @@ pub(super) struct SpawnArgs {
     /// How long the child lives: `turn` (default) or `session` (RFC 8.2.2).
     ///
     /// `session` keeps the child session available after its first turn.
-    #[serde(default = "default_lifetime")]
-    pub lifetime: String,
+    #[serde(default)]
+    pub lifetime: ChildLifetime,
     /// A JSON Schema the child's final output must validate against
     /// (RFC 8.2.6). Validated against the child's text as JSON when it
     /// parses, and against the text itself otherwise.
@@ -645,21 +480,20 @@ pub(super) struct SpawnArgs {
     pub output_schema: Option<serde_json::Value>,
     /// `summary` adds a redacted, bounded excerpt of the parent history.
     #[serde(default)]
-    pub context_mode: Option<String>,
-}
-
-fn default_lifetime() -> String {
-    "turn".to_owned()
+    pub context_mode: Option<ContextMode>,
 }
 
 /// What a child is doing, as the model reads it (RFC 8.2.7, `child_status`).
-pub(super) fn child_state_label(phase: norte_code_wire::Phase, running: bool) -> &'static str {
+pub(super) fn child_state_label(
+    phase: norte_code_wire::Phase,
+    running: bool,
+) -> norte_code_wire::ChildState {
     use norte_code_wire::Phase;
     match phase {
-        Phase::Idle | _ if running => "RUNNING",
-        Phase::Streaming => "RUNNING",
-        Phase::AwaitingTool => "AWAITING_APPROVAL",
-        Phase::Idle | _ => "IDLE",
+        Phase::Idle | _ if running => ChildState::Running,
+        Phase::Streaming => ChildState::Running,
+        Phase::AwaitingTool => ChildState::AwaitingApproval,
+        Phase::Idle | _ => ChildState::Idle,
     }
 }
 
@@ -701,6 +535,7 @@ pub(super) fn child_result(outcome: &SubagentOutcome) -> serde_json::Value {
 }
 
 mod args;
+mod run;
 mod state;
 mod tools;
 mod validation;

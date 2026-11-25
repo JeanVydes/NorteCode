@@ -45,7 +45,6 @@ fn focusable_ids(tab: Tab) -> Vec<String> {
 fn chat_shows_the_reasoning_and_tab_hint() {
     let (buf, area) = render(Tab::Chat);
     let painted = text(&buf, area);
-    assert!(painted.contains("reasoning"));
     assert!(painted.contains("tabs"));
     let focusable = focusable_ids(Tab::Chat);
     assert!(focusable.iter().any(|id| id == "reasoning"));

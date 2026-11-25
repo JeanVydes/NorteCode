@@ -185,3 +185,86 @@ impl NorteCodeRaepHost {
         Ok((export_id, expires_at, byte_count, digest))
     }
 }
+
+pub(crate) fn validate_export_request(request: &ExportRequest) -> Result<(), HostError> {
+    if request
+        .quiesce
+        .is_some_and(|policy| policy != QuiescePolicy::Reject)
+    {
+        return Err(HostError::InvalidFrame(
+            "SESSION_EXPORT currently supports only quiesce=reject".to_owned(),
+        ));
+    }
+    if request.wait_timeout_s.is_some() {
+        return Err(HostError::InvalidFrame(
+            "wait_timeout_s is only valid with quiesce=wait".to_owned(),
+        ));
+    }
+    if request.encrypt.is_some() {
+        return Err(HostError::InvalidFrame(
+            "encrypted exports are not supported".to_owned(),
+        ));
+    }
+    if request.include.children
+        || request.include.uploads
+        || request.include.job_output
+        || request.include.outputs
+        || request.include.workspace
+    {
+        return Err(HostError::InvalidFrame(
+            "SESSION_EXPORT requires children, uploads, job_output, outputs, and workspace all false"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) type PortableHistoryEntry = (
+    Option<u64>,
+    norte_code_wire::MessageRole,
+    norte_code_wire::ReplayedKind,
+    String,
+    i64,
+    Option<Value>,
+);
+
+pub(crate) fn serialize_plain_text_history(
+    history: Vec<PortableHistoryEntry>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, HostError> {
+    let mut bytes = Vec::new();
+    for (turn, role, kind, content, timestamp, origin) in history {
+        // The bundle carries text, and a conversation is more than text: the
+        // model reasons, calls tools, and reads their results. Exporting only
+        // refused those, so any real session could not be exported at all.
+        // Each non-text part is written as the assistant text it already
+        // renders as (`name {json}` for a call), and tool output is dropped
+        // because it is reproducible from the call.
+        let role = match (role, kind) {
+            (norte_code_wire::MessageRole::User, norte_code_wire::ReplayedKind::Text) => {
+                ExportHistoryRole::User
+            }
+            (norte_code_wire::MessageRole::Assistant, _) => ExportHistoryRole::Assistant,
+            // A user row that is not text has no counterpart in the bundle's
+            // two roles; tool output is reproducible from the call; and the
+            // system prompt is not the conversation. All of them are dropped
+            // rather than failing the whole export.
+            _ => continue,
+        };
+        let item = HistoryExportItem {
+            role,
+            content: &content,
+            turn_id: turn.map(|turn| format!("turn_{turn}")),
+            timestamp,
+            origin,
+        };
+        serde_json::to_writer(&mut bytes, &item)?;
+        bytes.push(b'\n');
+        if bytes.len() > max_bytes {
+            return Err(HostError::InvalidFrame(
+                "PAYLOAD_TOO_LARGE: export exceeds max_export_bytes".to_owned(),
+            ));
+        }
+    }
+    Ok(bytes)
+}

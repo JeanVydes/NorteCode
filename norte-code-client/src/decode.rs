@@ -153,20 +153,20 @@ pub(crate) fn standard_event_from_frame(
             match frame_kind {
                 FrameKind::TokenDelta => {
                     let decoded: TokenDeltaPayload = from_payload(payload)?;
-                    let delta = match decoded.channel.as_str() {
-                        "reasoning" => norte_code_wire::Delta::Reasoning {
+                    let delta = match decoded.channel {
+                        TokenDeltaChannel::Reasoning => norte_code_wire::Delta::Reasoning {
                             index: decoded.index,
                             text: decoded.delta,
                         },
                         // A call's arguments are not answer text: the frame
                         // says so, and a client that draws them as text is
                         // the bug this channel exists to prevent.
-                        "tool_arguments" => norte_code_wire::Delta::ToolArguments {
+                        TokenDeltaChannel::ToolArguments => norte_code_wire::Delta::ToolArguments {
                             index: decoded.index,
                             call_id: String::new(),
                             arguments: decoded.delta,
                         },
-                        _ => norte_code_wire::Delta::Text {
+                        TokenDeltaChannel::Text => norte_code_wire::Delta::Text {
                             index: decoded.index,
                             text: decoded.delta,
                         },

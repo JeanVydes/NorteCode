@@ -68,6 +68,9 @@ pub(in crate::app) fn handle_key(
     config: Option<&ClientConfig>,
 ) -> bool {
     let mut pass_to_tree = true;
+    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
+        return true;
+    }
     if handle_palette_key(tree, key, commands, model) {
         return false;
     }
@@ -88,10 +91,7 @@ pub(in crate::app) fn handle_key(
             let copied = tree
                 .find_mut::<ui::Composer>("composer")
                 .is_some_and(ui::Composer::copy_selection);
-            if !copied {
-                return true;
-            }
-            pass_to_tree = false;
+            pass_to_tree = !copied;
         }
         (KeyModifiers::NONE, KeyCode::Tab) if model.tab.is_list_tab() => {
             toggle_list_focus(tree, model.tab);

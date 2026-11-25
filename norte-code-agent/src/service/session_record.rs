@@ -12,6 +12,7 @@ use crate::provider::ModelSpec as ProviderModelSpec;
 use super::StoredSession;
 use super::session_stats::StoredStats;
 use super::steering::Steered;
+use super::subagents::ChildLifetime;
 
 /// The immutable conversation head reached when one turn finished.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -40,7 +41,7 @@ pub(super) struct ChildSessionMetadata {
     pub(super) parent: SessionKey,
     pub(super) tool_call_id: String,
     pub(super) task_summary: String,
-    pub(super) lifetime: String,
+    pub(super) lifetime: ChildLifetime,
     pub(super) agent_profile: String,
     pub(super) system_prompt: String,
     pub(super) cancel: Arc<norte::Cancellation>,
@@ -244,7 +245,7 @@ pub(super) fn imported_history_nodes(
     let mut current_turn_head = None;
     for (index, item) in items.into_iter().enumerate() {
         let source_turn = item.turn_id.clone().unwrap_or_else(|| {
-            if item.role == "user" || current_source_turn.is_none() {
+            if item.role == super::ImportedHistoryRole::User || current_source_turn.is_none() {
                 format!("imported-{index}")
             } else {
                 current_source_turn.clone().unwrap_or_default()
@@ -261,7 +262,7 @@ pub(super) fn imported_history_nodes(
             current_turn = current_turn.saturating_add(1);
             current_source_turn = Some(source_turn);
         }
-        let message = if item.role == "user" {
+        let message = if item.role == super::ImportedHistoryRole::User {
             norte::Message::user(item.content)
         } else {
             norte::Message::assistant(item.content)

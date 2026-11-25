@@ -20,6 +20,8 @@ pub(crate) const WAITING: &str = "waiting";
 pub(crate) const TAB_HINT: &str = "tabs";
 pub(crate) const SEND: &str = "send";
 pub(crate) const NEWLINE: &str = "newline";
+pub(crate) const COPY: &str = "copy";
+pub(crate) const QUIT: &str = "quit";
 pub(crate) const THEME_KEY: &str = "⌃T";
 
 pub(crate) const CONTEXT: &str = "CONTEXT";
@@ -138,8 +140,12 @@ impl ShortcutHint {
             node("label_tabs", Text::new(TAB_HINT).with_style(label)),
             node("key_send", Kbd::new("↵").with_style(cap.clone())),
             node("label_send", Text::new(SEND).with_style(label)),
-            node("key_newline", Kbd::new("⇧↵").with_style(cap)),
+            node("key_newline", Kbd::new("⇧↵").with_style(cap.clone())),
             node("label_newline", Text::new(NEWLINE).with_style(label)),
+            node("key_copy", Kbd::new("Ctrl+C").with_style(cap.clone())),
+            node("label_copy", Text::new(COPY).with_style(label)),
+            node("key_quit", Kbd::new("Ctrl+Q").with_style(cap.clone())),
+            node("label_quit", Text::new(QUIT).with_style(label)),
         ];
         Self { children }
     }
