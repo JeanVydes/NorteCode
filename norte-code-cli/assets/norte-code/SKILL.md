@@ -7,7 +7,7 @@ description: Use and configure Norte Code, including its service, providers, mod
 
 Use `norte --help` and `norte service <command> --help` to inspect supported commands and options. `norte` starts the local service if needed and opens the TUI. `norte tui` attaches without starting it. `norte service up`, `down`, `restart`, `status`, `logs`, `doctor`, `config`, and `catalog` manage or inspect the service. Use `norte service providers`, `mcps`, and `plugins` with `--help` for their operations.
 
-Before modifying a configuration, read `references/configuration.md` for the field tables, types, defaults, examples and validation constraints for `service.json`, `providers.json`, `models.json`, `cli.json`, MCP, skills, budgets and tools. Read `references/tui.md` for the actual TUI preferences and for corrections to the reference's documented paths. Inspect the existing file first and preserve unrelated fields.
+Before modifying a configuration, read `references/service-catalog.md` for service, agent, provider and model configuration, `references/configuration.md` for field tables and constraints, and `references/tui.md` for TUI preferences and documented corrections. Inspect the existing file first and preserve unrelated fields.
 
 Configuration paths use `$XDG_CONFIG_HOME/norte-code` when set, otherwise `~/.config/norte-code`:
 

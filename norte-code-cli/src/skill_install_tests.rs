@@ -11,6 +11,7 @@ fn managed_skill_is_created_preserved_and_removed() {
     assert!(dir.join(MARKER).is_file());
     assert!(dir.join("references/configuration.md").is_file());
     assert!(dir.join("references/tui.md").is_file());
+    assert!(dir.join("references/service-catalog.md").is_file());
     let registry = norte_code_protocol::skills::SkillRegistry::discover(
         std::slice::from_ref(&root),
         10,
@@ -20,6 +21,12 @@ fn managed_skill_is_created_preserved_and_removed() {
         registry.get("norte-code").is_some(),
         "{:?}",
         registry.warnings()
+    );
+    fs::write(dir.join("SKILL.md"), super::PREVIOUS_SKILL).expect("previous version");
+    sync_at(&root, true).expect("upgrade unmodified skill");
+    assert_eq!(
+        fs::read_to_string(dir.join("SKILL.md")).expect("upgraded"),
+        super::SKILL
     );
     fs::write(dir.join("SKILL.md"), "customized").expect("edit");
     sync_at(&root, true).expect("keep existing");
