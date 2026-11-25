@@ -13,6 +13,7 @@ mod output;
 mod plugins;
 mod providers;
 mod service;
+mod skill_install;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -97,6 +98,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if let Err(error) = skill_install::sync() {
+        eprintln!("norte: could not update the built-in skill: {error}");
+        return ExitCode::FAILURE;
+    }
 
     match cli.command {
         None => {

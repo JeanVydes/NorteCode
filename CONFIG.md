@@ -394,6 +394,7 @@ The CLI-only file contains:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `service_url` | string | `"http://127.0.0.1:8787"` | RAEP service endpoint. |
+| `norte_code_skill` | boolean | `true` | Install the CLI-managed Norte Code skill at startup; `false` removes the managed skill. |
 | `service_type` | `"local"` or `"remote"` | `"local"` | Local enables lifecycle commands; remote rejects start/stop/restart. |
 | `service_auth` | string or `null` | `null` | Raw bearer token. Leave `null` for an unauthenticated local service. |
 | `agent_id` | string | `"norte-code"` | Agent identifier sent during RAEP attachment. |

@@ -14,6 +14,13 @@ fn the_ui_block_is_a_subset_and_says_nothing_by_default() {
     assert_eq!(config.service_url, "http://127.0.0.1:8787");
     assert_eq!(config.service_type, ServiceType::Local);
     assert_eq!(config.service_auth, None);
+    assert!(config.norte_code_skill);
+    assert!(
+        !CliConfig::from_json(r#"{"norte_code_skill":false}"#)
+            .expect("disable skill")
+            .config
+            .norte_code_skill
+    );
 }
 
 #[cfg(test)]

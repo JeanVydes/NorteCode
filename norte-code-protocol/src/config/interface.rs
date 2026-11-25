@@ -16,6 +16,8 @@ use super::loading::{merge, read_text, read_value};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CliConfig {
+    /// Install the built-in Norte Code operations skill on CLI startup.
+    pub norte_code_skill: bool,
     /// The service endpoint used by the CLI.
     pub service_url: String,
     /// Whether lifecycle commands may manage the local service process.
@@ -118,6 +120,7 @@ impl CliConfig {
 impl Default for CliConfig {
     fn default() -> Self {
         Self {
+            norte_code_skill: true,
             service_url: "http://127.0.0.1:8787".to_owned(),
             service_type: ServiceType::Local,
             service_auth: None,

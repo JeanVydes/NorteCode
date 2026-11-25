@@ -1,4 +1,5 @@
 {
+  "norte_code_skill": true,
   "service_url": "http://127.0.0.1:8787",
   "service_type": "local",
   "service_auth": null,
