@@ -323,7 +323,6 @@ impl Catalog {
             }
             if model.provider_id.trim().is_empty()
                 || model.provider_id.trim() != model.provider_id
-                || model.provider_id.contains('/')
             {
                 skipped.push(format!(
                     "model `{}`: invalid provider id `{}`",
@@ -385,7 +384,6 @@ impl Catalog {
             }
             if model.provider_id.trim().is_empty()
                 || model.provider_id.trim() != model.provider_id
-                || model.provider_id.contains('/')
             {
                 return Err(CatalogError::InvalidProviderId {
                     id: model.provider_id.clone(),
@@ -548,7 +546,7 @@ fn validate_quirks(
 }
 
 fn validate_provider(id: &str, provider: &Provider) -> Result<(), CatalogError> {
-    if id.trim().is_empty() || id.trim() != id || id.contains('/') {
+    if id.trim().is_empty() || id.trim() != id {
         return Err(CatalogError::InvalidProviderId { id: id.to_owned() });
     }
     let mut schemas = Vec::new();
