@@ -1,102 +1,85 @@
 # Norte Code
 
-Norte Code is a single-binary agent host. One command, `norte`, manages a
-background service (sessions, execution, catalogues, plugins) and, when asked,
-opens the terminal interface that talks to it. Everything else — providers,
-models, MCP servers, plugins — is configured from the same command.
+**An open source coding agent for the terminal.** Norte Code combines a Rust
+agent service with a keyboard-driven terminal interface. It supports local or
+remote service connections, multiple agents, model providers, tools, plugins,
+MCP servers, plans, and session telemetry.
 
-## Install
+Start with the [getting started guide](guide/src/getting-started.md), or install
+the command line and open the interface:
 
 ```sh
-cargo install --git https://github.com/JeanVydes/NorteCode norte-code-cli --force
+cargo install --git https://github.com/JeanVydes/NorteCode --branch dev norte-code-cli --force
+norte
 ```
 
-`--force` (re)installs the binary, so running the same command is also how you
-update to the latest `dev` build. The binary installs into `~/.cargo/bin/norte`.
-Everything else — the background service, the TUI, the catalogue, the
-configuration — is managed from that one command.
+The binary is named `norte` and installs into `~/.cargo/bin`. `--force` replaces
+an existing installation. This command follows the `dev` branch.
 
-## Run
+## Use Norte Code
 
 ```sh
-# start the service if needed and open the terminal interface:
+# Open the TUI. A local service is prepared for the current workspace.
 norte
 
-# open only the terminal interface:
-norte tui
-
-# manage the background service:
+# Start a local service independently of a TUI.
 norte service up
-norte service down
-norte service restart
 norte service status
-norte service catalog
-norte service config
-norte service logs [--live|-f|--follow]
-norte service doctor
+norte service logs --follow
+
+# Open the TUI without changing the service lifecycle.
+norte tui
 ```
 
-The service runs detached: closing the terminal interface does not stop it.
+When the last TUI opened with `norte` exits, its local service is stopped. Use
+`norte service up` when you want the service to remain detached. To connect to
+a remote service, set `service_type` and `service_url` in `cli.json` as shown in
+the [configuration guide](CONFIG.md).
 
-## Configure providers
+Inside the TUI, use `/help` to see chat commands. Tabs include chat, sessions,
+models, telemetry, and settings.
 
-Providers and models live in two files beside the configuration
-(`providers.json`, `models.json`). They are empty by default — nothing is
-fetched or bundled. Manage them from the CLI:
+## Providers and models
+
+Norte Code includes OpenAI, Anthropic, and Google wire adapters. Provider and
+model entries are managed separately. Add a provider and its API wire with
+the CLI:
 
 ```sh
-norte service providers add openrouter \
-  --wire openai --base-url https://openrouter.ai/api/v1 \
-  --key OPENROUTER_API_KEY
-
-norte service providers list
-norte service providers remove openrouter
+norte service providers add my-provider --name "My Provider" --keys MY_PROVIDER_API_KEY
+norte service providers add-wire my-provider \
+  --schema openai \
+  --base-url https://api.example.com/v1 \
+  --auth bearer
 ```
 
-`--key` names an environment variable; the value is never written to disk.
-Keys can also come from a private `secrets.json` (mode 0600) beside the config.
+Add model entries to `models.json`, or install a trusted catalogue plugin that
+provides models dynamically. The API key value stays in the environment or in
+the private `secrets.json` file. See [provider configuration](guide/src/guides/configure-a-provider.md)
+for complete examples.
 
-## MCP servers
+## Extend the service
 
-```sh
-norte service mcps add fs --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg /tmp
-norte service mcps add remote --url https://mcp.example.com/mcp --header 'Authorization=Bearer x'
-norte service mcps list
-norte service mcps remove fs
-```
-
-MCP servers are connected when the service starts, so restart it after adding
-or removing one.
-
-## Plugins
-
-Plugins are git repositories built as cdylibs and copied into the plugin
-directory:
+Norte Code supports plugins for tools, slash commands, widgets, and catalogues.
+Plugins run as native libraries, so install them only from sources you trust.
 
 ```sh
-norte service plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
 norte service plugins list
-norte service plugins disable <name>
-norte service plugins enable <name>
-norte service plugins remove <name>
 ```
 
-Plugins are loaded when the service starts, so restart it after installing,
-updating, removing, enabling or disabling.
+Add plugins and configure local or remote MCP servers using the [plugin guide](guide/src/guides/plugins.md)
+and [CLI reference](guide/src/reference/cli.md).
 
-## Configuration
+## Documentation
 
-- `CONFIG.md`: the full configuration schema (`service.json`, `cli.json`,
-  catalogue files, secrets).
-- `AGENTS.md`: the crate layout and the rules that keep it that way.
-- `guide/` — the user guide.
-
-Selecting a model in the TUI checks the provider's `environment_keys`, then
-`secrets.json`. If no key is available, a prompt asks for one; it is saved
-to `secrets.json` (mode 0600) and the model switch continues. Press
-Ctrl+D on a model or provider to remove its stored key after a
-confirmation. Ctrl+Delete also works when the terminal reports it.
-Environment variables stay set.
+- [Getting started](guide/src/getting-started.md)
+- [Configuration reference](guide/src/reference/configuration.md)
+- [CLI reference](guide/src/reference/cli.md)
+- [Plugins and security](guide/src/guides/plugins.md)
+- [Terminal interface](norte-code-tui/README.md)
+- [Norte model and tool library](https://github.com/JeanVydes/Norte)
+- [terminalui library](https://github.com/JeanVydes/terminalui)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
