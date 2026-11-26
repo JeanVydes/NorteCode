@@ -169,6 +169,7 @@ impl SessionsPage {
             node("title_field", field),
             Self::dialog_actions("rename_cancel", "rename_confirm", false),
         ])
+        .without_overlay()
         .with_title(super::copy::RENAME_TITLE)
     }
 
@@ -178,6 +179,7 @@ impl SessionsPage {
             "delete_confirm",
             true,
         )])
+        .without_overlay()
         .with_title(super::copy::DELETE_TITLE)
         .with_message(delete_question(title))
     }

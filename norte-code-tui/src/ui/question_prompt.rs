@@ -28,7 +28,7 @@ pub(crate) enum InputMode {
     Answer,
 }
 
-/// A full-screen scrim with the question and its answer controls.
+/// A floating question with answer controls.
 #[derive(Default, Serialize)]
 pub(crate) struct QuestionPrompt {
     /// The question, `None` when closed.
@@ -323,17 +323,6 @@ impl View for QuestionPrompt {
         if !self.is_open() {
             return;
         }
-        let dim = Style::default().bg(theme.background).fg(theme.muted);
-        for row in area.y..area.y + area.height {
-            buf.set_stringn(
-                area.x,
-                row,
-                " ".repeat(area.width as usize),
-                area.width as usize,
-                dim,
-            );
-        }
-
         let inner_width = (area.width.saturating_sub(8)).min(88);
         let full_prompt_lines = self.wrapped_prompt(usize::from(inner_width));
         let prompt_max = 4usize;

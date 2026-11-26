@@ -90,16 +90,6 @@ impl View for HostOverlay {
             return;
         }
         self.area = area;
-        buf.set_style(area, Style::default().bg(theme.background));
-        for y in area.y..area.bottom() {
-            buf.set_stringn(
-                area.x,
-                y,
-                " ".repeat(usize::from(area.width)),
-                usize::from(area.width),
-                Style::default().bg(theme.background),
-            );
-        }
         let width = area.width.saturating_sub(4).min(92);
         let height = area.height.saturating_sub(2).min(36);
         if width < 8 || height < 5 {

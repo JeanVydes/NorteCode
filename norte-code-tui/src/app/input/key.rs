@@ -26,7 +26,7 @@ fn switch_tab(tree: &mut terminalui::Tree, model: &mut UiModel, tab: Tab) {
     model.tab = tab;
     ui::sync_views(tree, model);
     if tree
-        .find::<terminalui::Pane>("root")
+        .find::<ui::ModalPane>("root")
         .is_none_or(|root| root.visible() == 0)
     {
         let target = match tab {

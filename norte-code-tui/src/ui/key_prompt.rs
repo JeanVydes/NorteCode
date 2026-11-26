@@ -77,6 +77,7 @@ impl KeyPrompt {
                 ]),
             ),
         ])
+        .without_overlay()
         .with_title(KEY_PROMPT_TITLE)
         .with_message(key_expectation(environment_keys))
     }

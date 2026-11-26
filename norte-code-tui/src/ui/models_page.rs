@@ -224,6 +224,7 @@ impl ModelsPage {
                 ),
             ]),
         )])
+        .without_overlay()
         .with_title(DELETE_KEY_TITLE)
         .with_message(delete_key_question(provider))
     }

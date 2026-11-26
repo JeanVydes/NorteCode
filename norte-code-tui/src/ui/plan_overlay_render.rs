@@ -19,7 +19,6 @@ impl PlanOverlay {
             return;
         };
         self.area = area;
-        paint_scrim(buf, area, theme);
         let inner = draw_box(buf, dialog(area), &self.animated_chrome(theme), theme);
         let title = if self.question.is_some() {
             format!(" {} ", crate::ui::copy::PLAN_REVIEW)
@@ -65,7 +64,6 @@ impl PlanOverlay {
 
     fn paint_list(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme) {
         self.area = area;
-        paint_scrim(buf, area, theme);
         let inner = draw_box(buf, dialog(area), &self.animated_chrome(theme), theme);
         paint_title(buf, inner, theme, " Plans ");
         if inner.height < 4 || inner.width < 4 {
@@ -166,14 +164,6 @@ fn chrome(theme: &Theme) -> Chrome {
         },
         border_gradient: None,
         fill_gradient: None,
-    }
-}
-
-fn paint_scrim(buf: &mut Buffer, area: Rect, theme: &Theme) {
-    let style = Style::default().bg(theme.background).fg(theme.muted);
-    let blank = " ".repeat(usize::from(area.width));
-    for y in area.y..area.y + area.height {
-        buf.set_stringn(area.x, y, &blank, usize::from(area.width), style);
     }
 }
 

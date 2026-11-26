@@ -1210,6 +1210,10 @@ fn host_command_shows_information_and_escape_returns_to_chat() {
         text.contains("HOST") && text.contains("127.0.0.1:8787"),
         "{text}"
     );
+    assert!(
+        text.contains("1 Chat"),
+        "the chat header remains visible: {text}"
+    );
     press_app_key(&mut tree, KeyCode::Esc, &mut commands, &mut model);
     assert!(
         !tree
@@ -1293,6 +1297,30 @@ fn clear_data_confirmation_stays_open_when_service_is_disconnected() {
             .is_open()
     );
     assert_eq!(model.tab, Tab::Chat);
+}
+
+#[test]
+fn settings_clear_button_uses_the_shared_confirmation_without_erasing_immediately() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Settings;
+    let mut tree = rendered_tree(&model, 80);
+    tree.focus("settings");
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    for _ in 0..12 {
+        press_app_key(&mut tree, KeyCode::Down, &mut commands, &mut model);
+    }
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert!(
+        tree.find::<ui::ClearDataOverlay>("clear_data_overlay")
+            .unwrap()
+            .is_open()
+    );
+    assert!(receiver.try_recv().is_err());
+    press_app_key(&mut tree, KeyCode::Right, &mut commands, &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert!(matches!(receiver.try_recv(), Ok(UiCommand::ClearData)));
+    assert_eq!(model.tab, Tab::Settings);
 }
 
 #[test]

@@ -43,6 +43,7 @@ mod key_status;
 mod layout_tests;
 mod leaderboard_section;
 mod markdown;
+mod modal_pane;
 mod models_page;
 mod node_lookup;
 mod overlay_frame;
@@ -86,6 +87,7 @@ pub(crate) use config_page::{ConfigAction, ConfigData, Setting};
 pub(crate) use debug_overlay::{DebugOverlay, OverlayClock};
 pub(crate) use header::Header;
 pub(crate) use host_overlay::HostOverlay;
+pub(crate) use modal_pane::ModalPane;
 
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt, KeyPromptAction};
 pub(crate) use key_status::invalidate_key;
@@ -185,7 +187,7 @@ pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionCon
 
     let root = node(
         "root",
-        Pane::new(vec![
+        modal_pane::ModalPane::new(vec![
             frame,
             node("key_prompt", key_prompt::KeyPrompt::new()),
             node("question_prompt", question_prompt::QuestionPrompt::new()),
@@ -288,9 +290,9 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
         dock.set_chat_visible(chat && visible == 0);
     }
     let overlay_changed = tree
-        .find::<Pane>("root")
+        .find::<modal_pane::ModalPane>("root")
         .is_none_or(|root| root.visible() != visible);
-    if let Some(root) = tree.find_mut::<Pane>("root") {
+    if let Some(root) = tree.find_mut::<modal_pane::ModalPane>("root") {
         root.set_visible(visible);
     }
     if let Some(overlay) = tree.find_mut::<question_prompt::QuestionPrompt>("question_prompt") {

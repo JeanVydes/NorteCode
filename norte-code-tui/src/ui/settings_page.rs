@@ -5,6 +5,7 @@ use std::any::Any;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position as RatatuiPosition, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::widgets::{Clear, Widget};
 use serde::Serialize;
 use terminalui::components::panel::Panel;
 use terminalui::components::scroll::{Scroll, ScrollbarStyle, render_scrollbar};
@@ -61,7 +62,6 @@ enum Prompt {
     Repository,
     Package,
     ConfirmRemove,
-    ConfirmClearData,
 }
 
 #[derive(Clone, Copy)]
@@ -351,10 +351,7 @@ impl SettingsPage {
                     self.config_actions.push(ConfigAction::Cycle(setting));
                 }
             }
-            Focus::ClearData => {
-                self.error = None;
-                self.prompt = Prompt::ConfirmClearData;
-            }
+            Focus::ClearData => self.clear_data_requested = true,
         }
     }
 
@@ -426,10 +423,6 @@ impl SettingsPage {
                     self.prompt = Prompt::None;
                 }
                 Prompt::ConfirmRemove => self.activate(),
-                Prompt::ConfirmClearData => {
-                    self.clear_data_requested = true;
-                    self.prompt = Prompt::None;
-                }
                 Prompt::None => {}
             },
             KeyCode::Backspace => match self.prompt {
@@ -466,11 +459,6 @@ impl SettingsPage {
                     .map_or("", |plugin| plugin.name.as_str());
                 ("remove plugin", name, "Enter removes, Esc cancels")
             }
-            Prompt::ConfirmClearData => (
-                "clear service data",
-                "Sessions, telemetry, replays and uploads will be erased.",
-                "All users of this service are affected. Enter confirms, Esc cancels",
-            ),
             Prompt::None => {
                 if let Some(job) = &self.job {
                     let box_rect = Rect {
@@ -479,6 +467,7 @@ impl SettingsPage {
                         width: area.width.saturating_sub(2),
                         height: 3,
                     };
+                    Clear.render(box_rect.intersection(buf.area), buf);
                     buf.set_style(box_rect, Style::default().bg(theme.secondary));
                     let text = format!(
                         "{} · {}/{} · {}",
@@ -501,6 +490,7 @@ impl SettingsPage {
             width: area.width.saturating_sub(4),
             height: 5,
         };
+        Clear.render(box_rect.intersection(buf.area), buf);
         buf.set_style(box_rect, Style::default().bg(theme.secondary));
         buf.set_stringn(
             box_rect.x + 1,
@@ -892,7 +882,7 @@ impl SettingsPage {
                     self.plugin_selected = index;
                 } else if row == layout.section(SettingsSection::Data).y + 1 {
                     self.focus = Focus::ClearData;
-                    self.prompt = Prompt::ConfirmClearData;
+                    self.clear_data_requested = true;
                 }
                 Outcome::Consumed
             }

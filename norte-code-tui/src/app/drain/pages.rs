@@ -102,8 +102,9 @@ pub(in crate::app) fn drain_plugins_actions(
     let clear_data = tree
         .find_mut::<ui::SettingsPage>("settings")
         .is_some_and(ui::SettingsPage::take_clear_data_requested);
-    if clear_data && let Some(commands) = commands.as_ref() {
-        let _ = commands.try_send(UiCommand::ClearData);
+    if clear_data && let Some(overlay) = tree.find_mut::<ui::ClearDataOverlay>("clear_data_overlay")
+    {
+        overlay.open();
     }
     let actions = tree
         .find_mut::<ui::SettingsPage>("settings")

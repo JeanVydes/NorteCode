@@ -289,8 +289,6 @@ pub(in crate::app) fn drain_server_events(
                 if let Some(overlay) = tree.find_mut::<ui::ClearDataOverlay>("clear_data_overlay") {
                     overlay.close();
                 }
-                model.tab = crate::ui_model::Tab::Chat;
-                tree.focus("composer");
                 if let Some(dock) = tree.find_mut::<ui::CommandDock>("command_dock") {
                     dock.show("Session data cleared", false);
                 }

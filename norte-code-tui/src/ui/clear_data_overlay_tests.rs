@@ -41,3 +41,18 @@ fn confirmation_remains_visible_in_a_small_terminal() {
         .collect::<String>();
     assert!(row.contains("Clear data?"));
 }
+
+#[test]
+fn confirmation_hides_glyphs_inside_while_preserving_the_surrounding_screen() {
+    let mut overlay = ClearDataOverlay::default();
+    overlay.open();
+    let mut tree = Tree::new(node("dialog", overlay));
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buffer = Buffer::empty(area);
+    for y in 0..area.height {
+        buffer.set_string(0, y, "X".repeat(80), ratatui::style::Style::default());
+    }
+    tree.render(area, &mut buffer, &Theme::default());
+    assert_eq!(buffer[(0, 0)].symbol(), "X");
+    assert_eq!(buffer[(40, 7)].symbol(), " ");
+}

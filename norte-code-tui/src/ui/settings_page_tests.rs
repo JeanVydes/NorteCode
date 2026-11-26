@@ -191,20 +191,6 @@ fn clear_data_requires_confirmation_and_is_listed_last() {
     }
     tree.handle_event(&key(crossterm::event::KeyCode::Down));
     tree.handle_event(&key(crossterm::event::KeyCode::Enter));
-    assert_eq!(
-        tree.find::<SettingsPage>("settings")
-            .expect("settings page")
-            .prompt,
-        super::Prompt::ConfirmClearData
-    );
-    assert!(
-        !tree
-            .find_mut::<SettingsPage>("settings")
-            .expect("settings page")
-            .take_clear_data_requested()
-    );
-
-    tree.handle_event(&key(crossterm::event::KeyCode::Enter));
     assert!(
         tree.find_mut::<SettingsPage>("settings")
             .expect("settings page")
