@@ -4,7 +4,7 @@
 //! enhancement flags the composer needs to tell a newline apart from a send,
 //! then restores everything on drop.
 
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::{
@@ -64,23 +64,7 @@ impl TerminalSession {
     pub(crate) fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
-        ) {
-            let _ = disable_raw_mode();
-            return Err(error);
-        }
-        if let Err(error) = execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            crossterm::event::EnableBracketedPaste
-        ) {
+        if let Err(error) = enter_screen(&mut stdout) {
             restore_terminal();
             return Err(error);
         }
@@ -113,6 +97,33 @@ impl TerminalSession {
     }
 }
 
+fn enter_screen(output: &mut impl Write) -> io::Result<()> {
+    // Keyboard enhancement state belongs to the active terminal screen.
+    execute!(
+        output,
+        EnterAlternateScreen,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        ),
+        EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste
+    )
+}
+
+fn leave_screen(output: &mut impl Write) -> io::Result<()> {
+    execute!(
+        output,
+        crossterm::style::ResetColor,
+        crossterm::cursor::Show,
+        crossterm::event::DisableBracketedPaste,
+        DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen
+    )
+}
+
 /// Give the terminal back completely; idempotent.
 ///
 /// Resets the text attributes, shows the cursor, drops the mouse and the
@@ -130,15 +141,7 @@ pub(crate) fn restore_terminal() {
         Ok(file) => Box::new(file),
         Err(_) => Box::new(io::stdout()),
     };
-    if let Err(error) = execute!(
-        out,
-        crossterm::style::ResetColor,
-        crossterm::cursor::Show,
-        crossterm::event::DisableBracketedPaste,
-        DisableMouseCapture,
-        LeaveAlternateScreen,
-        PopKeyboardEnhancementFlags,
-    ) {
+    if let Err(error) = leave_screen(&mut out) {
         errors.push(format!("the escape sequence restore failed: {error}"));
     }
     if let Err(error) = disable_raw_mode() {
@@ -156,3 +159,7 @@ impl Drop for TerminalSession {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "terminal_tests.rs"]
+mod tests;
