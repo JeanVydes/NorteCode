@@ -2,6 +2,7 @@
 
 use crate::NorteCodeExtension;
 use crate::payloads::payload;
+use norte_code_wire::plugin_widgets::PluginSelection;
 use norte_code_wire::{ClientRequest, ClientRequestKind, ServerEvent, ServerEventKind};
 use raep_types::{AttachMode, Envelope, FrameType, StandardFrameType, WIRE_VERSION};
 use serde_json::Value;
@@ -310,7 +311,10 @@ impl NorteCodeRaepHost {
             },
             ClientRequestKind::RunCommand {
                 command, arguments, ..
-            } => self.run_plugin_command(command, arguments).await?,
+            } => {
+                self.run_plugin_command(session_id, command, arguments)
+                    .await?
+            }
             ClientRequestKind::InstallPlugin { url, package, all } => {
                 // The build runs on a blocking thread, and the page following
                 // it watches the session's stream: the steps go there while
@@ -403,6 +407,7 @@ impl NorteCodeRaepHost {
 
     async fn run_plugin_command(
         &self,
+        session_id: &str,
         command: String,
         arguments: Vec<String>,
     ) -> Result<ServerEventKind, HostError> {
@@ -411,9 +416,22 @@ impl NorteCodeRaepHost {
             .as_ref()
             .ok_or_else(|| HostError::Service("plugin commands are unavailable".to_owned()))?
             .clone();
+        let session = norte_code_wire::SessionKey::new(session_id);
+        let service = self.service_for_session(session_id).ok();
+        let invocation = service.as_ref().and_then(|service| {
+            let spec = service.session_spec(&session)?;
+            Some(crate::plugin_host::invocation(
+                PluginSelection {
+                    session: Some(session),
+                    provider: Some(spec.provider),
+                    model: Some(spec.model),
+                },
+                Some(service),
+            ))
+        });
         let command_for_run = command.clone();
         let output = tokio::task::spawn_blocking(move || {
-            plugin_host.execute_command(&command_for_run, &arguments)
+            plugin_host.execute_command(&command_for_run, &arguments, invocation.as_ref())
         })
         .await
         .map_err(|error| HostError::Service(error.to_string()))?

@@ -72,6 +72,8 @@ pub enum Endpoint<'a> {
     HealthReady,
     /// The principal's quota.
     Quota,
+    /// The chosen plugin widgets for the current selection.
+    PluginWidgets(&'a norte_code_wire::plugin_widgets::PluginWidgetRequest),
     /// Request telemetry.
     Telemetry(TelemetryQuery<'a>),
     /// The agents the host exposes.
@@ -154,7 +156,8 @@ impl Endpoint<'_> {
     #[must_use]
     pub fn method(&self) -> Method {
         match self {
-            Self::CreateSession(_)
+            Self::PluginWidgets(_)
+            | Self::CreateSession(_)
             | Self::SessionCommands { .. }
             | Self::Commands
             | Self::SessionUpload { .. }
@@ -189,6 +192,7 @@ impl Endpoint<'_> {
             Self::HealthLive => "/raep/v1/health/live".to_owned(),
             Self::HealthReady => "/raep/v1/health/ready".to_owned(),
             Self::Quota => "/raep/v1/quota".to_owned(),
+            Self::PluginWidgets(_) => "/raep/v1/plugin-widgets".to_owned(),
             Self::Telemetry(query) => query.session.map_or_else(
                 || "/raep/v1/telemetry".to_owned(),
                 |session| format!("/raep/v1/telemetry?session={}", encode(session)),
@@ -238,6 +242,10 @@ impl Endpoint<'_> {
     /// serialized, which a closed struct cannot do.
     pub fn body(&self) -> Result<Option<Value>, ApiError> {
         let body = match self {
+            Self::PluginWidgets(request) => Some(
+                serde_json::to_value(request)
+                    .map_err(|error| ApiError::InvalidResponse(error.to_string()))?,
+            ),
             Self::CreateSession(request) => Some(
                 serde_json::to_value(request)
                     .map_err(|error| ApiError::InvalidResponse(error.to_string()))?,

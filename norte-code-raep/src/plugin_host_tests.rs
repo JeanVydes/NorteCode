@@ -1,62 +1,95 @@
 use super::*;
 
-fn service() -> Arc<Service> {
-    let spec = norte_code_agent::ModelSpec {
-        quirks: std::collections::BTreeSet::new(),
-        provider: "test".to_owned(),
-        model: "scripted".to_owned(),
-        endpoint: "https://example.invalid/v1".to_owned(),
-        api_key: norte_code_protocol::config::ApiKey::new("test"),
-        schema: norte_code_wire::catalog::WireSchema::OpenAI,
-        auth: None,
-        capabilities: norte::Capabilities::builder().max_context(4096).build(),
-        headers: std::collections::BTreeMap::new(),
-        http: norte_code_protocol::config::ProviderHttpConfig::default(),
-    };
-    Arc::new(
-        Service::new(
-            norte_code_protocol::config::Config::default(),
-            Arc::new(norte_code_protocol::catalog::Catalog::default()),
-            Some(spec),
-            Arc::new(norte_code_agent::VendorModels),
-            Arc::new(norte_code_protocol::InMemoryStore::new()),
-            Arc::new(norte::InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    )
+use norte_code_plugin_host::{Plugin, WidgetDefinition};
+use norte_code_wire::{
+    SessionKey,
+    plugin_widgets::{Widget, WidgetId, WidgetView},
+};
+
+const OWNER: &str = "example";
+const USAGE: &str = "usage";
+const OTHER: &str = "other";
+
+struct PerSession;
+
+impl Plugin for PerSession {
+    fn name(&self) -> &'static str {
+        OWNER
+    }
+
+    fn widgets(&self) -> Vec<WidgetDefinition> {
+        [USAGE, OTHER]
+            .into_iter()
+            .map(|id| WidgetDefinition {
+                id: WidgetId::new(id),
+                title: id.to_owned(),
+            })
+            .collect()
+    }
+
+    fn widget(&self, id: &WidgetId, invocation: &PluginInvocation) -> Option<WidgetView> {
+        let selection = &invocation.selection;
+        if id.as_str() != USAGE || selection.provider.as_deref() != Some("codex") {
+            return None;
+        }
+        Some(WidgetView {
+            title: None,
+            content: vec![Widget::Text {
+                text: selection.session.as_ref()?.as_str().to_owned(),
+            }],
+        })
+    }
+}
+
+fn request(session: &str, provider: &str, after: Option<u64>) -> PluginWidgetRequest {
+    PluginWidgetRequest {
+        selection: PluginSelection {
+            session: Some(SessionKey::new(session)),
+            provider: Some(provider.to_owned()),
+            model: Some("example".to_owned()),
+        },
+        widgets: vec![WidgetKey {
+            plugin: OWNER.to_owned(),
+            widget: WidgetId::new(USAGE),
+        }],
+        after,
+    }
 }
 
 #[tokio::test]
-async fn the_adapter_answers_from_the_default_spec_before_a_session_is_attached() {
-    let adapter = PluginHostAdapter::new();
-    adapter.install_services(
-        HashMap::from([("main".to_owned(), service())]),
-        "main".to_owned(),
+async fn updating_one_widget_preserves_every_clients_selection() {
+    let mut plugins = Plugins::new();
+    plugins.add(Box::new(PerSession));
+    let host = PluginHostAdapter::new();
+    let widgets = plugins.widget_registrations();
+    host.install_plugins(Arc::new(plugins), &widgets);
+    let first = host.widgets(request("first", "codex", None), None).await;
+    let second = host.widgets(request("second", "openai", None), None).await;
+    assert_eq!(second.updates, []);
+
+    let waiting = host.widgets(request("first", "codex", Some(first.revision)), None);
+    tokio::pin!(waiting);
+    host.context(OWNER)
+        .request_widget_update(&WidgetId::new(OTHER));
+    host.context("different-plugin")
+        .request_widget_update(&WidgetId::new(USAGE));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(15), &mut waiting)
+            .await
+            .is_err()
     );
 
-    assert_eq!(adapter.session(), None);
-    assert_eq!(adapter.session_model(), Some("scripted".to_owned()));
-    assert_eq!(adapter.session_provider(), Some("test".to_owned()));
-    assert_eq!(adapter.session_title(), None);
+    host.context(OWNER)
+        .request_widget_update(&WidgetId::new(USAGE));
+    let refreshed = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap();
+    assert_ne!(first.revision, refreshed.revision);
+    assert_eq!(first.updates, refreshed.updates);
     assert_eq!(
-        adapter.session_context(),
-        ContextUsage {
-            used: 0,
-            window: Some(4096),
-        }
+        refreshed.updates[0].view.content,
+        [Widget::Text {
+            text: "first".to_owned()
+        }]
     );
-}
-
-#[test]
-fn the_adapter_reports_the_last_attached_session() {
-    let adapter = PluginHostAdapter::new();
-    adapter.install_services(HashMap::new(), "main".to_owned());
-
-    assert_eq!(adapter.session(), None);
-
-    adapter.set_session("session-1", "main");
-
-    assert_eq!(adapter.session(), Some(SessionKey::new("session-1")));
-    assert_eq!(adapter.session_model(), None);
 }

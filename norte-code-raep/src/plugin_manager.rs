@@ -684,10 +684,10 @@ pub fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
             // remembers the name it loaded under: both spellings name the same
             // library, so a plugin disabled after it loaded still reads as
             // loaded until the process restarts.
-            let loaded = norte_code_plugin_host::is_loaded(&file)
-                || norte_code_plugin_host::is_loaded(&format!("{name}.so"))
-                || norte_code_plugin_host::is_loaded(&format!("{name}.dll"))
-                || norte_code_plugin_host::is_loaded(&format!("{name}.dylib"));
+            let loaded_name = norte_code_plugin_host::loaded_plugin_name(
+                file.strip_suffix(DISABLED_SUFFIX).unwrap_or(&file),
+            );
+            let loaded = loaded_name.is_some();
             // The reason is only meaningful for an enabled plugin that did not
             // load: a disabled library was never tried.
             let load_error = if !loaded && !disabled {
@@ -697,10 +697,15 @@ pub fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
             };
             let recorded = sources.get(&name);
             Some(norte_code_wire::PluginInfo {
-                status: crate::plugin_display::status_for(&name),
-                banner: crate::plugin_display::banner_for(&name),
-                tools: crate::plugin_display::tools_for(&name),
-                commands: crate::plugin_display::commands_for(&name),
+                widgets: loaded_name
+                    .as_deref()
+                    .map_or_else(Vec::new, crate::plugin_metadata::widgets_for),
+                tools: loaded_name
+                    .as_deref()
+                    .map_or_else(Vec::new, crate::plugin_metadata::tools_for),
+                commands: loaded_name
+                    .as_deref()
+                    .map_or_else(Vec::new, crate::plugin_metadata::commands_for),
                 name,
                 enabled: !disabled,
                 loaded,

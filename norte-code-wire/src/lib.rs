@@ -43,3 +43,6 @@ pub enum PlanStatus {
     /// The user rejected or canceled this plan.
     Canceled,
 }
+
+/// Plugin widget transport types.
+pub mod plugin_widgets;

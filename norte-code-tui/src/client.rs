@@ -68,6 +68,10 @@ pub(crate) enum ClientEvent {
     CostGlobal(norte_code_client::CostReport),
     /// The list of installed plugins.
     Plugins(Vec<norte_code_client::PluginSummary>),
+    PluginWidgets(
+        crate::plugin_widgets::Scope,
+        Vec<norte_code_wire::plugin_widgets::WidgetUpdate>,
+    ),
     /// The catalogue detail (providers, models) for the HOST view.
     Catalog(norte_code_client::CatalogDetail),
     /// The server-reported agents.
@@ -199,6 +203,7 @@ pub(crate) enum UiCommand {
     RefreshViews,
     /// Refetch only the plans and jobs shown in the rail.
     RefreshRail,
+    WatchPluginWidgets(Option<crate::plugin_widgets::Scope>),
     /// Answer the question the turn is parked on.
     AnswerQuestion {
         /// The session the question belongs to.
@@ -671,10 +676,20 @@ async fn connection(
     let command_client = Arc::clone(&client);
     let command_api = Arc::clone(&api);
     let command_events = events.clone();
+    let (rail_selection, rail_requests) = tokio::sync::watch::channel(None);
+    let rail_task = tokio::spawn(crate::plugin_widgets::follow(
+        Arc::clone(&api),
+        rail_requests,
+        events.clone(),
+    ));
     let command_task = tokio::spawn(async move {
         let mut session_rx = command_session_rx;
         let mut commands = commands;
         while let Some(command) = commands.recv().await {
+            if let UiCommand::WatchPluginWidgets(selection) = command {
+                rail_selection.send_replace(selection);
+                continue;
+            }
             let active = session_rx.borrow_and_update().clone();
             if let Some(outcome) = Box::pin(apply_command(
                 command,
@@ -745,6 +760,7 @@ async fn connection(
         }
     }
     command_task.abort();
+    rail_task.abort();
 }
 
 async fn wait_for_sessions(
@@ -1227,6 +1243,7 @@ async fn apply_command(
     events: &Sender<ClientEvent>,
 ) -> Option<StreamOutcome> {
     match command {
+        UiCommand::WatchPluginWidgets(_) => {}
         UiCommand::OpenSession { session } => return Some(StreamOutcome::Switch(session)),
         UiCommand::Plugin(op) => {
             spawn_host_op(BackgroundOp::Plugin(op), Arc::clone(api), events.clone());

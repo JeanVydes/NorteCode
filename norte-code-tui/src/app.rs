@@ -76,6 +76,7 @@ pub(super) fn run() -> Result<(), crate::TuiError> {
 
     let mut model = UiModel::detached();
     let (config, mut commands, mut events) = attach_client(&mut model);
+    let mut plugin_rail = crate::plugin_widgets::Subscription::default();
     let retention = config
         .as_ref()
         .map_or_else(RetentionConfig::default, |config| config.retention);
@@ -111,6 +112,7 @@ pub(super) fn run() -> Result<(), crate::TuiError> {
             views_dirty = false;
         }
         let sync_started = Instant::now();
+        plugin_rail.sync(commands.as_ref(), &model);
         sync_chrome(&mut tree, &model);
         metrics.record(Phase::SyncChrome, sync_started.elapsed());
 

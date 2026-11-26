@@ -1,10 +1,4 @@
-//! Display lines and tools contributed by plugins loaded at server start.
-//!
-//! A plugin answers `status()`, `banner()` and `tools()`. The host captures what
-//! they offer once, before anything else asks the plugins, and keeps each line
-//! beside the name of the plugin that offered it. `PluginInfo` carries the lines
-//! and tool names as part of the plugin's own metadata. No second event is
-//! needed to paint the sidebar or list a plugin's tools.
+//! Tools and commands contributed by plugins loaded at server start.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -13,8 +7,7 @@ use norte_code_plugin_host::Plugins;
 
 #[derive(Clone, Debug, Default)]
 struct PluginOfferings {
-    status: BTreeMap<String, String>,
-    banner: BTreeMap<String, String>,
+    widgets: Vec<norte_code_wire::plugin_widgets::WidgetRegistration>,
     tools_by_plugin: BTreeMap<String, Vec<String>>,
     commands_by_plugin: BTreeMap<String, Vec<norte_code_wire::PluginCommandInfo>>,
 }
@@ -29,7 +22,10 @@ pub(crate) struct PluginTools {
 }
 
 /// Captures everything the loaded plugins offer at startup.
-pub(crate) fn capture(plugins: &Plugins) -> PluginTools {
+pub(crate) fn capture(
+    plugins: &Plugins,
+    widgets: Vec<norte_code_wire::plugin_widgets::WidgetRegistration>,
+) -> PluginTools {
     let named = plugins.tools_named();
     let mut functions = Vec::with_capacity(named.len());
     let mut origins = BTreeMap::new();
@@ -63,22 +59,11 @@ pub(crate) fn capture(plugins: &Plugins) -> PluginTools {
             });
     }
     let _ = OFFERINGS.set(PluginOfferings {
-        status: plugins.status_named().into_iter().collect(),
-        banner: plugins.banner_named().into_iter().collect(),
+        widgets,
         tools_by_plugin,
         commands_by_plugin,
     });
     PluginTools { functions, origins }
-}
-
-/// The status line a named plugin offered, when it offered one.
-pub(crate) fn status_for(name: &str) -> Option<String> {
-    OFFERINGS.get()?.status.get(name).cloned()
-}
-
-/// The banner line a named plugin offered, when it offered one.
-pub(crate) fn banner_for(name: &str) -> Option<String> {
-    OFFERINGS.get()?.banner.get(name).cloned()
 }
 
 /// The names of the tools a named plugin declared.
@@ -97,4 +82,16 @@ pub(crate) fn commands_for(name: &str) -> Vec<norte_code_wire::PluginCommandInfo
         .and_then(|offerings| offerings.commands_by_plugin.get(name))
         .cloned()
         .unwrap_or_default()
+}
+
+/// Widget declarations advertised by a loaded plugin.
+pub(crate) fn widgets_for(name: &str) -> Vec<norte_code_wire::plugin_widgets::WidgetRegistration> {
+    OFFERINGS.get().map_or_else(Vec::new, |offerings| {
+        offerings
+            .widgets
+            .iter()
+            .filter(|entry| entry.key.plugin == name)
+            .cloned()
+            .collect()
+    })
 }

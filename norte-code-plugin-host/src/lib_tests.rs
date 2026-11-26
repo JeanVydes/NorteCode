@@ -12,3 +12,15 @@ fn rejects_plugins_built_for_an_older_interface_before_loading_them() {
     assert!(error.contains(&format!("plugin interface {older}")));
     assert!(error.contains(&format!("host speaks {PLUGIN_ABI_VERSION}")));
 }
+
+#[test]
+fn a_loaded_library_resolves_to_its_declared_plugin_name() {
+    use std::path::Path;
+
+    let file = "libidentity_test_plugin.so";
+    super::remember_loaded(Path::new(file), "different-plugin-name");
+    assert_eq!(
+        super::loaded_plugin_name(file).as_deref(),
+        Some("different-plugin-name")
+    );
+}

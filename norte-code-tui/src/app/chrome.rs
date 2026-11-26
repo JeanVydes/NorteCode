@@ -73,22 +73,12 @@ pub(in crate::app) fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) 
         if rail.todos() != model.todos.as_slice() {
             rail.set_todos(model.todos.clone());
         }
-        let plugin_status: Vec<String> = model
-            .plugins
-            .iter()
-            .filter_map(|plugin| plugin.status.clone())
-            .collect();
-        if rail.plugin_status() != plugin_status.as_slice() {
-            rail.set_plugin_status(plugin_status);
-        }
-        let plugin_banner: Vec<String> = model
-            .plugins
-            .iter()
-            .filter_map(|plugin| plugin.banner.clone())
-            .collect();
-        if rail.plugin_banner() != plugin_banner.as_slice() {
-            rail.set_plugin_banner(plugin_banner);
-        }
+        let views = model
+            .plugin_rail
+            .as_ref()
+            .filter(|(selection, _)| model.plugin_widget_scope().as_ref() == Some(selection))
+            .map_or(&[][..], |(_, views)| views.as_slice());
+        rail.set_plugin_views(views);
         let compact = model.active.is_some();
         if rail.compact_enabled() != compact {
             rail.set_compact_enabled(compact);

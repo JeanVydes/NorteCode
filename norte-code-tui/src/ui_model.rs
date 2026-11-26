@@ -8,6 +8,7 @@ use crate::diff::DiffMode;
 use crate::theme::{ThemeCatalog, ThemeChoice, ThemeKind};
 use crate::ui::RailPosition;
 use norte_code_wire::SessionSummary;
+use norte_code_wire::plugin_widgets::{PluginSelection, WidgetUpdate};
 
 /// Where the active turn is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -259,6 +260,8 @@ pub(crate) struct UiModel {
     pub(crate) telemetry_usage: crate::session_stats::SharedUsage,
     /// Installed plugins.
     pub(crate) plugins: Vec<norte_code_client::PluginSummary>,
+    /// Rail sections tied to the effective selection at request time.
+    pub(crate) plugin_rail: Option<(crate::plugin_widgets::Scope, Vec<WidgetUpdate>)>,
     /// The model the host reports for the attached session, when known.
     pub(crate) active_model: Option<norte_code_wire::AgentRef>,
     /// The provider the host reports for the attached session, when known.
@@ -459,6 +462,36 @@ impl UiModel {
             .unwrap_or(self.preferences.debug)
     }
 
+    pub(crate) fn plugin_widget_scope(&self) -> Option<crate::plugin_widgets::Scope> {
+        if self.tab != Tab::Chat
+            || self.preferences.rail_position == RailPosition::Hide
+            || !matches!(
+                self.attachment,
+                SessionAttachmentState::Ready | SessionAttachmentState::Attached
+            )
+        {
+            return None;
+        }
+        let (provider, model) = self.effective_model_selection().unzip();
+        let widgets: Vec<_> = self
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.loaded && plugin.enabled)
+            .flat_map(|plugin| plugin.widgets.iter().map(|widget| widget.key.clone()))
+            .collect();
+        if widgets.is_empty() {
+            return None;
+        }
+        Some(crate::plugin_widgets::Scope {
+            selection: PluginSelection {
+                session: self.active.clone(),
+                provider: provider.map(str::to_owned),
+                model: model.map(str::to_owned),
+            },
+            widgets,
+        })
+    }
+
     /// The provider and model for the active session or the next draft.
     pub(crate) fn effective_model_selection(&self) -> Option<(&str, &str)> {
         if let Some(model) = self.active_model.as_ref() {
@@ -552,6 +585,7 @@ impl UiModel {
             telemetry: None,
             telemetry_usage: crate::session_stats::SharedUsage::default(),
             plugins: Vec::new(),
+            plugin_rail: None,
             catalog: None,
             agents: Vec::new(),
             server_info: None,

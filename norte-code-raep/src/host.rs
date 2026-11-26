@@ -294,7 +294,7 @@ pub struct NorteCodeRaepHost {
     upload_index: Option<Arc<dyn UploadIndex>>,
     connections: Arc<Semaphore>,
     turn_handles: Arc<turn_handles::TurnHandles>,
-    plugin_host: Option<Arc<PluginHostAdapter>>,
+    pub(crate) plugin_host: Option<Arc<PluginHostAdapter>>,
 }
 
 pub(crate) fn summarize_plugin_updates(

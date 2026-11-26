@@ -23,6 +23,7 @@ mod leaderboard;
 pub mod lifecycle;
 mod metrics;
 mod palette;
+mod plugin_widgets;
 mod process_stats;
 mod review_feedback;
 mod session_stats;

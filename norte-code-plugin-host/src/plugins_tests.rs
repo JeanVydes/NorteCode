@@ -49,14 +49,6 @@ impl Plugin for Everything {
     fn tools(&self) -> Vec<Arc<dyn AnyFunction>> {
         vec![hello_tool()]
     }
-
-    fn status(&self) -> Option<String> {
-        Some("hello".to_owned())
-    }
-
-    fn banner(&self) -> Option<String> {
-        Some("  hello  ".to_owned())
-    }
 }
 
 /// A plugin that adds one tool and nothing else.
@@ -101,6 +93,7 @@ impl Plugin for CommandPlugin {
         &self,
         command: &CommandName,
         arguments: &[String],
+        _selection: Option<&PluginInvocation>,
     ) -> Result<CommandOutput, CommandExecutionError> {
         if command.as_str() != "deploy" {
             return Err(CommandExecutionError::UnknownCommand);
@@ -118,7 +111,7 @@ fn plugins_register_commands_and_execute_their_own_actions() {
     let registry = plugins.command_registry();
     let command = CommandName::new("deploy").expect("valid command");
     let result = plugins
-        .execute_command(&registry, &command, &["staging".to_owned()])
+        .execute_command(&registry, &command, &["staging".to_owned()], None)
         .expect("plugin command");
     assert_eq!(result.message, "deployed to staging");
 }
@@ -150,6 +143,7 @@ impl Plugin for SameNamedCommand {
         &self,
         command: &CommandName,
         _arguments: &[String],
+        _selection: Option<&PluginInvocation>,
     ) -> Result<CommandOutput, CommandExecutionError> {
         if command.as_str() != self.command {
             return Err(CommandExecutionError::UnknownCommand);
@@ -174,7 +168,7 @@ fn commands_route_to_the_declaring_plugin_even_when_names_repeat() {
     let registry = plugins.command_registry();
     let command = CommandName::new("second-action").expect("valid command");
     let output = plugins
-        .execute_command(&registry, &command, &[])
+        .execute_command(&registry, &command, &[], None)
         .expect("second plugin command");
     assert_eq!(output.message, "second");
 }
@@ -262,8 +256,7 @@ fn a_plugin_that_implements_one_thing_says_nothing_about_the_rest() {
         plugins
     };
     assert_eq!(plugins.tools().len(), 1);
-    assert_eq!(plugins.status().len(), 0);
-    assert_eq!(plugins.banner().len(), 0);
+    assert_eq!(plugins.widget_registrations(), []);
 }
 
 #[test]
@@ -311,94 +304,6 @@ fn two_plugins_may_share_a_name_and_both_are_kept() {
     plugins.add(Box::new(Same));
     assert_eq!(plugins.names(), ["everything", "everything"]);
     assert_eq!(plugins.len(), 2);
-}
-
-/// A host that answers for one session, so the plugin has something to ask.
-struct Answering;
-
-impl PluginHost for Answering {
-    fn session(&self) -> Option<SessionKey> {
-        Some(SessionKey::new("s"))
-    }
-
-    fn session_model(&self) -> Option<String> {
-        Some("nvidia/nemotron".to_owned())
-    }
-
-    fn session_provider(&self) -> Option<String> {
-        Some("nvidia".to_owned())
-    }
-
-    fn session_title(&self) -> Option<String> {
-        Some("a session".to_owned())
-    }
-
-    fn session_context(&self) -> ContextUsage {
-        ContextUsage {
-            used: 4_096,
-            window: Some(128_000),
-        }
-    }
-}
-
-/// A plugin that asks the host what it may not know.
-struct Asking {
-    host: Option<Arc<dyn PluginHost>>,
-}
-
-impl Plugin for Asking {
-    fn name(&self) -> &'static str {
-        "asking"
-    }
-
-    fn set_context(&mut self, ctx: PluginContext) {
-        self.host = ctx.host;
-    }
-
-    fn status(&self) -> Option<String> {
-        let host = self.host.as_ref()?;
-        Some(format!(
-            "{} {} {}",
-            host.session_model().unwrap_or_default(),
-            host.session_provider().unwrap_or_default(),
-            host.session_context().used
-        ))
-    }
-}
-
-#[test]
-fn a_plugin_asks_the_host_and_the_host_answers() {
-    let mut plugins = Plugins::new();
-    plugins.add(Box::new(Asking { host: None }));
-    plugins.set_context_on_all(&PluginContext {
-        host: Some(Arc::new(Answering)),
-    });
-    let statuses = plugins.status();
-    assert_eq!(statuses, ["nvidia/nemotron nvidia 4096"]);
-}
-
-#[test]
-fn a_context_without_a_host_is_not_an_error() {
-    let context = PluginContext { host: None };
-    assert!(context.host.is_none());
-}
-
-#[test]
-fn the_context_share_is_the_used_part_of_the_window() {
-    let usage = ContextUsage {
-        used: 32_000,
-        window: Some(128_000),
-    };
-    assert_eq!(usage.share(), Some(0.25));
-}
-
-#[test]
-fn a_session_without_a_window_has_no_share() {
-    let usage = ContextUsage {
-        used: 1_000,
-        window: None,
-    };
-    assert_eq!(usage.share(), None);
 }
 
 /// A plugin that offers a provider and a model of its own.

@@ -191,18 +191,15 @@ pub struct PluginInfo {
     /// The workspace package installed from that source, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
-    /// The status line this plugin contributed, when it offered one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// The banner line this plugin contributed, when it offered one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub banner: Option<String>,
     /// The names of the tools this plugin declared.
     #[serde(default)]
     pub tools: Vec<String>,
     /// Slash commands this loaded plugin registered.
     #[serde(default)]
     pub commands: Vec<PluginCommandInfo>,
+    /// Widget declarations clients may choose to display.
+    #[serde(default)]
+    pub widgets: Vec<crate::plugin_widgets::WidgetRegistration>,
 }
 
 /// Client-visible metadata for one plugin slash command.

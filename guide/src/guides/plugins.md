@@ -1,22 +1,22 @@
 # Plugins
 
 A plugin is a shared library (`.so` / `.dll` / `.dylib`) that adds things to
-Norte Code without changing it: tools the model can call, a status line field,
-a banner line, or providers and models in the catalogue. The
+Norte Code without changing it: tools, slash commands, widgets, and providers and models in the catalogue. The
 [catalog-plugin](https://github.com/JeanVydes/catalog-plugin) is the
 ready-made example: it offers a catalogue so you do not write
 `providers.json` and `models.json` by hand.
 
 ## What a plugin can do
 
-One trait, five optional surfaces, all default to nothing:
+The plugin trait defines these surfaces:
 
 | Surface | What it adds |
 | --- | --- |
 | `name()` | The name reported in `/plugins`, in load errors and as the origin of its tools. |
 | `tools()` | Norte `AnyFunction` values the host registers with the tool registry. |
-| `status()` | One line in the plugin status section of the sidebar. |
-| `banner()` | One line in the plugin banner section of the sidebar. |
+| `widgets()` | Stable widget IDs and titles that clients can discover. |
+| `widget(id, selection)` | JSON content for a widget the client requested. |
+| `register_commands()` | Slash commands with typed arguments and completion. |
 | `catalogue()` | Providers and models the catalogue knows for that run. |
 
 A tool declared by a plugin is a normal tool from the model's point of view.
@@ -25,12 +25,17 @@ approval flow and audit record as a built-in tool. `tools.disabled` applies to
 plugin tools too. The tool's name is listed in `/plugins`, and a call shows
 which plugin declared it in the transcript.
 
-`set_context()` is how the host gives the plugin a way to ask about the
-session. The host passes a `PluginHost`, and the plugin may keep it and ask
-later. The answer follows the most recently attached session: its id, title,
-model, provider and context usage. Before any session is attached, the model
-and provider fall back to the configured default. The session can move, for
-example after a compaction, so ask when needed instead of caching one key.
+A widget can publish text, progress, lists, key-value fields, tables, badges,
+sparklines and separators. Its content does not specify a position or size.
+The TUI converts it into terminal components and places its chosen widgets
+inside the chat rail. Other clients can choose their own placements.
+
+The selection supplied to `widget()` identifies the caller's session, provider
+and model. It may describe a draft model before a session exists. Return
+`None` when the widget is unavailable for that selection. Keep the context
+received in `set_context()` and call `request_widget_update(&id)` when a
+registered widget changes. The host wakes only subscriptions to that widget.
+Slash command execution receives the invoking session's selection.
 
 ## What a plugin cannot do
 
@@ -82,19 +87,14 @@ image when the model has no image input. This stays off until an agent opts in:
 }
 ```
 
-The envelope lives in `ToolOutput.structured`, which already crosses the plugin
-boundary, so the host supports it under ABI 1. Older plugins that never attach
-an envelope keep working unchanged.
-
 ## Loading and lifecycle
 
 A plugin that fails to load is reported and skipped. The server starts either
 way. The host checks the library's `norte_plugin_abi_version` against its own
-before loading it. The current interface is ABI version 1. A mismatch is
+before loading it. The current interface is ABI version 4. A mismatch is
 refused with both numbers named, never loaded on a guess.
 
-Plugins are loaded once at server startup. Tools, catalogue entries, status
-and banner are captured then. Install, update, remove, enable and disable
+Plugins are loaded once at server startup. Tools, commands and catalogue entries are registered then. Widgets are evaluated on demand. Install, update, remove, enable and disable
 change files and emit `PluginChanged`, but they do not load or unload a shared
 library in the running process. Restart the service to apply any of them:
 
@@ -103,13 +103,17 @@ norte service restart
 ```
 
 Until a restart, a plugin disabled after it loaded still reports as loaded,
-and its startup snapshot still supplies its tools, status and banner. There is
+and its tools and views can still be supplied by that process. There is
 no explicit plugin reload request.
 
 ## The catalogue plugin, in detail
 
-`catalog-plugin` uses only the `catalogue()` surface. Its providers and
+`catalog-plugin` registers providers and models through `catalogue()`. Its providers and
 models are merged into the catalogue **for that run**; the files you own
 are not written and do not have to exist. That is the whole point: a
 plugin that serves a model the catalogue does not know offers it there,
 and it is selectable in `/model` like any other.
+
+The Codex plugin displays the available account usage windows when a model
+from its catalogue is selected. It reads them through the local Codex CLI
+on the Norte Code server. That CLI must be installed and signed in.

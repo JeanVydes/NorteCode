@@ -98,6 +98,16 @@ fn fold_catalog_event(event: &ClientEvent, model: &mut UiModel) -> bool {
             model.cost = Some(cost.clone());
         }
         ClientEvent::Plugins(plugins) => model.plugins.clone_from(plugins),
+        ClientEvent::PluginWidgets(selection, views) => {
+            if model.plugin_widget_scope().as_ref() != Some(selection) {
+                return false;
+            }
+            let rail = (selection.clone(), views.clone());
+            if model.plugin_rail.as_ref() == Some(&rail) {
+                return false;
+            }
+            model.plugin_rail = Some(rail);
+        }
         ClientEvent::Catalog(catalog) => model.catalog = Some(catalog.clone()),
         ClientEvent::Agents(agents) => model.agents.clone_from(agents),
         _ => return false,
@@ -292,6 +302,7 @@ pub(in crate::app) fn drain_server_events(
                 model.telemetry_usage = crate::session_stats::SharedUsage::default();
                 model.cost = None;
                 model.quota = None;
+                model.plugin_rail = None;
                 model.question = None;
                 model.context = crate::context::ContextUsage::default();
                 model.attached_title = None;
@@ -312,6 +323,7 @@ pub(in crate::app) fn drain_server_events(
                 | ClientEvent::CostSession(_)
                 | ClientEvent::CostGlobal(_)
                 | ClientEvent::Plugins(_)
+                | ClientEvent::PluginWidgets(..)
                 | ClientEvent::Catalog(_)
                 | ClientEvent::Agents(_)),
             ) => {

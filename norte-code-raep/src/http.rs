@@ -29,6 +29,7 @@ use crate::{HostError, NorteCodeRaepHost};
 
 mod artifacts;
 mod events;
+mod plugin_widgets;
 mod resources;
 mod seen_frames;
 mod websocket;
@@ -178,6 +179,10 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
         .route(
             "/raep/v1/commands",
             post(agent_commands).layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
+        )
+        .route(
+            "/raep/v1/plugin-widgets",
+            post(plugin_widgets::read).layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
         )
         .route("/raep/v1/quota", get(quota))
         .layer(RequestBodyTimeoutLayer::new(limits.command_timeout))

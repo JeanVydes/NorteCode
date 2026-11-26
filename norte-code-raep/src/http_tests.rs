@@ -1341,3 +1341,86 @@ async fn clear_data_removes_sessions_and_requires_an_authenticated_route() {
         .expect("protected clear");
     assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn plugin_widgets_are_returned_to_an_authenticated_client() {
+    use norte_code_plugin_host::{Plugin, Plugins, WidgetDefinition};
+    use norte_code_wire::plugin_widgets::{
+        PluginSelection, PluginWidgetRequest, PluginWidgetSnapshot, Widget, WidgetId, WidgetView,
+    };
+
+    struct Example;
+    impl Plugin for Example {
+        fn name(&self) -> &'static str {
+            "example"
+        }
+
+        fn widgets(&self) -> Vec<WidgetDefinition> {
+            vec![WidgetDefinition {
+                id: WidgetId::new("quota"),
+                title: "Quota".to_owned(),
+            }]
+        }
+
+        fn widget(
+            &self,
+            _: &WidgetId,
+            invocation: &norte_code_plugin_host::PluginInvocation,
+        ) -> Option<WidgetView> {
+            let provider = invocation.selection.provider.clone()?;
+            Some(WidgetView {
+                title: None,
+                content: vec![Widget::Text { text: provider }],
+            })
+        }
+    }
+
+    let mut plugins = Plugins::new();
+    plugins.add(Box::new(Example));
+    let registrations = plugins.widget_registrations();
+    let plug = crate::plugin_host::PluginHostAdapter::new();
+    plug.install_plugins(Arc::new(plugins), &registrations);
+    let host = NorteCodeRaepHost::new(
+        test_service(),
+        HostConfig {
+            auth_token: Some("test-token".to_owned()),
+            ..HostConfig::default()
+        },
+    )
+    .unwrap()
+    .with_plugin_host(plug);
+    let app = router(Arc::new(host));
+    let request = PluginWidgetRequest {
+        selection: PluginSelection {
+            session: None,
+            provider: Some("example-provider".to_owned()),
+            model: None,
+        },
+        widgets: vec![registrations[0].key.clone()],
+        after: None,
+    };
+    let send = |token: &str| {
+        Request::post("/raep/v1/plugin-widgets")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&request).unwrap()))
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone().oneshot(send("wrong")).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = app.oneshot(send("test-token")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 65_536)
+        .await
+        .unwrap();
+    let snapshot: PluginWidgetSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot.updates[0].key, registrations[0].key);
+    assert_eq!(
+        snapshot.updates[0].view.content,
+        [Widget::Text {
+            text: "example-provider".to_owned()
+        }]
+    );
+}

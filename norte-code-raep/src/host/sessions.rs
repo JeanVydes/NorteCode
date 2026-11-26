@@ -559,9 +559,6 @@ impl NorteCodeRaepHost {
             Some(value) => self.apply_agent_override(&session_id, value).await?,
             None => Vec::new(),
         };
-        if let Some(plugin_host) = &self.plugin_host {
-            plugin_host.set_session(&session_id, &agent_id);
-        }
         self.state
             .lock()
             .await

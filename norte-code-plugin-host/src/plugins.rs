@@ -1,45 +1,4 @@
-//! The plugin registry: what a plugin may add to a Norte Code client.
-//!
-//! A plugin is a box that is asked for things. It answers with **data** — tools
-//! to register, status lines, a wordmark fragment and catalogue entries — and
-//! the host draws or registers it. That is the whole design, and everything else
-//! follows from it:
-//!
-//! - A plugin **cannot** write to the terminal. It has no way to reach it, so
-//!   it cannot clear a line it does not own, leave the cursor somewhere, or
-//!   fight the frame for a row. The bugs this client has spent its life fixing
-//!   are not available to a plugin because the API does not hand them over.
-//! - A plugin **cannot** block. Everything here is a function that returns; a
-//!   plugin that wants to wait owns its own task and hands back what it found.
-//! - A plugin **is testable without a terminal**, because what it produces is
-//!   text and the text is what a test reads.
-//!
-//! # What a plugin can add
-//!
-//! | Where | What |
-//! | --- | --- |
-//! | The tool registry | tools the model can call, with their schemas and executors |
-//! | The command registry | slash commands with argument completion and plugin-owned actions |
-//! | The sidebar | a status line and a line of the wordmark |
-//! | The catalogue | providers and models for this run |
-//!
-//! # What it cannot
-//!
-//! Write to the terminal or block a frame — those remain the host's job.
-//! Everything else is possible: a plugin can ask the host about the session
-//! through the context the host hands it ([`PluginContext::host`]), keep
-//! whatever state it wants in its own fields, register a command with
-//! [`Plugin::register_commands`] and handle it in [`Plugin::execute_command`],
-//! and offer providers and models of its own to the catalogue
-//! ([`Plugin::catalogue`]). The trait itself carries no state; a plugin that
-//! needs to remember something stores it in a field of its own type.
-//!
-//! # Extending it
-//!
-//! Adding a capability is adding a method here and a handler in the host — one
-//! place each, and the tests for the host's side can use the same `Plugin` trait
-//! a real plugin does. Nothing here knows what a plugin is for; that is the
-//! point.
+//! Plugin declarations, commands and widgets.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -47,8 +6,11 @@ use std::sync::Arc;
 
 use crate::{CommandExecutionError, CommandName, CommandOutput, CommandRegistry};
 use norte::AnyFunction;
+use norte_code_wire::ContextUsage;
 use norte_code_wire::catalog::{Model, Provider};
-use norte_code_wire::{ContextUsage, SessionKey};
+use norte_code_wire::plugin_widgets::{
+    PluginSelection, WidgetId, WidgetKey, WidgetRegistration, WidgetView,
+};
 
 /// The version of the plugin interface a plugin was built against.
 ///
@@ -65,7 +27,7 @@ use norte_code_wire::{ContextUsage, SessionKey};
 /// The check is an exact match on purpose: a plugin built against another
 /// version is a plugin whose method table this host cannot call safely, so it
 /// is refused with the two numbers named rather than loaded on a guess.
-pub const PLUGIN_ABI_VERSION: u32 = 3;
+pub const PLUGIN_ABI_VERSION: u32 = 4;
 
 /// The symbol a plugin exports to say which version it was built against.
 ///
@@ -92,32 +54,20 @@ pub trait Plugin: Send + Sync {
         Vec::new()
     }
 
-    /// A field on the status row, under the conversation.
+    /// Lists the widgets this plugin can supply to clients.
+    fn widgets(&self) -> Vec<WidgetDefinition> {
+        Vec::new()
+    }
+
+    /// Returns a widget's current view for the caller's selection.
     ///
-    /// `None` adds nothing. A row is one line and the host bounds it, so a
-    /// plugin that returns a paragraph gets its beginning and no more.
-    fn status(&self) -> Option<String> {
+    /// Return cached data and schedule I/O separately. Notify the host via
+    /// [`PluginContext::request_widget_update`] when that widget changes.
+    fn widget(&self, _id: &WidgetId, _invocation: &PluginInvocation) -> Option<WidgetView> {
         None
     }
 
-    /// One line of the screen's wordmark, drawn under the built-in one.
-    ///
-    /// A plugin that wants its own banner says it here rather than printing it:
-    /// the screen has one place for art and this is it.
-    fn banner(&self) -> Option<String> {
-        None
-    }
-
-    /// Receives the host context before the host asks anything of the plugin.
-    ///
-    /// The host calls this once, before `tools`, `status` or `banner`.
-    /// A plugin stores whatever it wants from the context in its
-    /// own fields — the trait does not keep a copy. The host is passed as a
-    /// [`PluginHost`] so this crate never names a concrete service type; the
-    /// host that built the context implements it.
-    ///
-    /// The default implementation ignores the context. A plugin that wants the
-    /// host overrides this and keeps it.
+    /// Receives the handle used to notify clients about widget updates.
     fn set_context(&mut self, _ctx: PluginContext) {}
 
     /// The providers and models this plugin offers the catalogue.
@@ -144,6 +94,7 @@ pub trait Plugin: Send + Sync {
         &self,
         _command: &CommandName,
         _arguments: &[String],
+        _invocation: Option<&PluginInvocation>,
     ) -> Result<CommandOutput, CommandExecutionError> {
         Err(CommandExecutionError::UnknownCommand)
     }
@@ -164,67 +115,47 @@ pub struct Catalogue {
     pub models: Vec<Model>,
 }
 
-/// What a plugin may ask the host about the session it is running in.
-///
-/// The host implements it and the plugin calls it, and that is the whole
-/// reason it is a trait and not a cast.
-///
-/// A plugin is a shared library with its **own copy** of this crate and of
-/// everything it depends on, so the two sides do not share a single type: a
-/// `TypeId` is only the same on both sides when the type comes from the same
-/// compilation, and it does not. Casting the host's service to a concrete type
-/// therefore fails every time, and the plugin is left holding nothing — which
-/// is what "the service is not available" was, every time it was said.
-///
-/// A trait object crosses that line, because the call goes through the vtable
-/// the *host* built. The plugin never names the host's types and never needs
-/// to compile against them, which is also what lets a plugin depend on this
-/// crate alone.
-pub trait PluginHost: Send + Sync {
-    /// The session the client is in, if there is one.
-    ///
-    /// It is asked for rather than handed over because the session moves: a
-    /// compaction opens another one, and a plugin that was told the old key
-    /// would keep reporting the old model.
-    fn session(&self) -> Option<SessionKey>;
-
-    /// The model that session runs on.
-    fn session_model(&self) -> Option<String>;
-
-    /// The provider serving it.
-    fn session_provider(&self) -> Option<String>;
-
-    /// The title of the session, when it has one.
-    fn session_title(&self) -> Option<String>;
-
-    /// How much of the model's context the session is using.
-    fn session_context(&self) -> ContextUsage;
+/// Request-scoped session information provided by the host to a plugin.
+pub struct PluginInvocation {
+    /// The requesting client's session, provider and model.
+    pub selection: PluginSelection,
+    /// Server-known title of the invoking session, if any.
+    pub title: Option<String>,
+    /// Server-known context usage of the invoking session.
+    pub context_usage: ContextUsage,
 }
 
-/// The host context handed to a plugin before the host asks anything of it.
-///
-/// The host is optional: the host passes what it has at the moment, and a
-/// plugin that needs something absent simply does without it. The plugin may
-/// keep the context — or any part of it — in its own fields and use it later,
-/// when the host builds its tools or redraws.
+/// Metadata for a widget declared by one plugin.
+pub struct WidgetDefinition {
+    /// Stable identifier within the plugin.
+    pub id: WidgetId,
+    /// A title a client can show in its widget picker.
+    pub title: String,
+}
+
+/// The update handle bound to one loaded plugin.
 #[derive(Clone)]
 pub struct PluginContext {
-    /// The host, which answers what the plugin may ask about the session.
-    ///
-    /// The host that built the context implements it and hands the plugin a
-    /// handle to it. A plugin that wants the model, the provider, the title or
-    /// the context asks the host when it needs them.
-    pub host: Option<Arc<dyn PluginHost>>,
+    invalidate_widget: Arc<dyn Fn(&WidgetId) + Send + Sync>,
+}
+
+impl PluginContext {
+    /// Constructs a context bound to the declaring plugin.
+    pub fn new(invalidate_widget: impl Fn(&WidgetId) + Send + Sync + 'static) -> Self {
+        Self {
+            invalidate_widget: Arc::new(invalidate_widget),
+        }
+    }
+
+    /// Requests new content for one of this plugin's registered widgets.
+    pub fn request_widget_update(&self, id: &WidgetId) {
+        (self.invalidate_widget)(id);
+    }
 }
 
 impl fmt::Debug for PluginContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The host is a trait object and says nothing about itself, so what is
-        // written is what a reader can act on: there is a host to ask, or
-        // there is not.
-        f.debug_struct("PluginContext")
-            .field("host", &self.host.as_ref().map(|_| "yes"))
-            .finish()
+        f.debug_struct("PluginContext").finish_non_exhaustive()
     }
 }
 
@@ -287,13 +218,38 @@ impl Plugins {
             .collect()
     }
 
-    /// The status fields, in the order the plugins were loaded.
+    /// Collects declarations in plugin load order.
     #[must_use]
-    pub fn status(&self) -> Vec<String> {
+    pub fn widget_registrations(&self) -> Vec<WidgetRegistration> {
+        let mut known = std::collections::BTreeSet::new();
         self.loaded
             .iter()
-            .filter_map(|plugin| plugin.status())
+            .flat_map(|plugin| {
+                plugin
+                    .widgets()
+                    .into_iter()
+                    .map(|definition| WidgetRegistration {
+                        key: WidgetKey {
+                            plugin: plugin.name().to_owned(),
+                            widget: definition.id,
+                        },
+                        title: definition.title,
+                    })
+            })
+            .filter(|entry| {
+                let id = entry.key.widget.as_str();
+                !id.is_empty() && id.len() <= 128 && known.insert(entry.key.clone())
+            })
             .collect()
+    }
+
+    /// Evaluates one registered widget for the requesting client.
+    #[must_use]
+    pub fn widget(&self, key: &WidgetKey, invocation: &PluginInvocation) -> Option<WidgetView> {
+        self.loaded
+            .iter()
+            .find(|plugin| plugin.name() == key.plugin)?
+            .widget(&key.widget, invocation)
     }
 
     /// Every tool paired with the name of the plugin that declared it.
@@ -334,6 +290,7 @@ impl Plugins {
         registry: &CommandRegistry,
         command: &CommandName,
         arguments: &[String],
+        invocation: Option<&PluginInvocation>,
     ) -> Result<CommandOutput, CommandExecutionError> {
         let registered = registry
             .get(command)
@@ -367,54 +324,9 @@ impl Plugins {
                 "arguments do not match the registered command".to_owned(),
             ));
         }
-        plugin.execute_command(command, arguments)
+        plugin.execute_command(command, arguments, invocation)
     }
 
-    /// The status fields paired with the name of the plugin that offered them.
-    ///
-    /// The host uses this to publish a display line beside the plugin it came
-    /// from, so a reader can tell which plugin wrote what.
-    #[must_use]
-    pub fn status_named(&self) -> Vec<(String, String)> {
-        self.loaded
-            .iter()
-            .filter_map(|plugin| plugin.status().map(|line| (plugin.name().to_owned(), line)))
-            .collect()
-    }
-
-    /// The banner lines, in the order the plugins were loaded.
-    #[must_use]
-    pub fn banner(&self) -> Vec<String> {
-        self.loaded
-            .iter()
-            .filter_map(|plugin| plugin.banner())
-            .collect()
-    }
-
-    /// The banner lines paired with the name of the plugin that offered them.
-    #[must_use]
-    pub fn banner_named(&self) -> Vec<(String, String)> {
-        self.loaded
-            .iter()
-            .filter_map(|plugin| plugin.banner().map(|line| (plugin.name().to_owned(), line)))
-            .collect()
-    }
-
-    /// Give every loaded plugin the same host context.
-    ///
-    /// Called after the service and session exist, so plugins can reach them
-    /// when the host builds their tools or redraws.
-    pub fn set_context_on_all(&mut self, ctx: &PluginContext) {
-        for plugin in &mut self.loaded {
-            plugin.set_context(ctx.clone());
-        }
-    }
-
-    /// What every loaded plugin offers the catalogue, merged.
-    ///
-    /// A provider two plugins offer is one provider and a model two plugins
-    /// offer is one model: the first one wins and the second is left out,
-    /// because two entries with the same id would leave the catalogue saying
     /// one thing and meaning another.
     #[must_use]
     pub fn catalogue(&self) -> Catalogue {

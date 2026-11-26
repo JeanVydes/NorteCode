@@ -164,37 +164,55 @@ fn the_rail_shows_todos_with_their_statuses() {
 }
 
 #[test]
-fn the_rail_shows_plugin_status_and_banner_lines() {
-    let mut model = UiModel::detached();
-    model.plugins = vec![
-        norte_code_client::PluginSummary {
-            name: "catalog".to_owned(),
-            status: Some("catalog ready".to_owned()),
-            banner: Some("NORTE CATALOG".to_owned()),
-            ..Default::default()
-        },
-        norte_code_client::PluginSummary {
-            name: "style".to_owned(),
-            status: Some("style active".to_owned()),
-            banner: None,
-            ..Default::default()
-        },
-    ];
+fn plugin_progress_fits_inside_the_rail() {
+    use norte_code_wire::plugin_widgets::{Widget, WidgetId, WidgetKey, WidgetUpdate, WidgetView};
+
+    let model = UiModel::detached();
     let theme = model.preferences.catalog.theme(&model.preferences.theme);
     let mut tree = build_tree(&model);
-    let rail = tree.find_mut::<Rail>("rail").expect("rail in tree");
-    rail.set_plugin_status(vec!["catalog ready".to_owned(), "style active".to_owned()]);
-    rail.set_plugin_banner(vec!["NORTE CATALOG".to_owned()]);
+    tree.find_mut::<Rail>("rail")
+        .unwrap()
+        .set_plugin_views(&[WidgetUpdate {
+            key: WidgetKey {
+                plugin: "codex".to_owned(),
+                widget: WidgetId::new("usage"),
+            },
+            view: WidgetView {
+                title: Some("CODEX USAGE".to_owned()),
+                content: vec![
+                    Widget::Progress {
+                        label: "5h left".to_owned(),
+                        percent: 72,
+                        resets_at: None,
+                    },
+                    Widget::Progress {
+                        label: "Week left".to_owned(),
+                        percent: 35,
+                        resets_at: None,
+                    },
+                ],
+            },
+        }]);
     let area = Rect::new(0, 0, 100, 40);
-
     let mut buf = Buffer::empty(area);
     tree.render(area, &mut buf, &theme);
     let text = painted_text(&buf, area);
-    assert!(text.contains("PLUGIN STATUS"), "{text}");
-    assert!(text.contains("catalog ready"), "{text}");
-    assert!(text.contains("style active"), "{text}");
-    assert!(text.contains("PLUGIN BANNER"), "{text}");
-    assert!(text.contains("NORTE CATALOG"), "{text}");
+    assert!(text.contains("CODEX USAGE"), "{text}");
+    assert!(text.contains("5h left 72%"), "{text}");
+    assert!(text.contains("Week left 35%"), "{text}");
+    let colored: Vec<_> = buf
+        .content
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| cell.bg == theme.primary && cell.fg == theme.primary)
+        .collect();
+    assert_ne!(colored, []);
+    assert!(
+        colored
+            .iter()
+            .all(|(offset, _)| offset % usize::from(area.width) < 26),
+        "{text}"
+    );
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> terminalui::InputEvent {

@@ -7,6 +7,18 @@ use super::types::{
 use super::{ApiError, RestClient};
 
 impl RestClient {
+    /// Reads plugin widgets for a client selection, optionally waiting for an update.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, authorization or decoding error.
+    pub async fn plugin_widgets(
+        &self,
+        request: &norte_code_wire::plugin_widgets::PluginWidgetRequest,
+    ) -> Result<norte_code_wire::plugin_widgets::PluginWidgetSnapshot, ApiError> {
+        self.execute(super::Endpoint::PluginWidgets(request)).await
+    }
+
     /// The installed plugins.
     ///
     /// # Errors

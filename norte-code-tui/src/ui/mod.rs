@@ -44,6 +44,7 @@ mod models_page;
 mod node_lookup;
 mod overlay_frame;
 mod plan_overlay;
+mod plugin_rail_view;
 mod plugins_page;
 mod question_prompt;
 mod rail;

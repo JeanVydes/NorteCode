@@ -17,7 +17,10 @@ pub use commands::{
     CommandRegistry, CommandSpec, RegisteredCommand,
 };
 pub use norte_code_plugin_api::{HOST_EFFECTS_KEY, HostEffects, UserMessageDraft};
-pub use plugins::{PLUGIN_ABI_SYMBOL, PLUGIN_ABI_VERSION, Plugin, PluginContext, Plugins};
+pub use plugins::{
+    PLUGIN_ABI_SYMBOL, PLUGIN_ABI_VERSION, Plugin, PluginContext, PluginInvocation, Plugins,
+    WidgetDefinition,
+};
 
 static LIBRARIES: Mutex<Vec<(PathBuf, Arc<libloading::Library>)>> = Mutex::new(Vec::new());
 
@@ -26,23 +29,32 @@ static LIBRARIES: Mutex<Vec<(PathBuf, Arc<libloading::Library>)>> = Mutex::new(V
 /// The host reports what is on disk and what is running separately: a library
 /// that failed to load is on disk and not here, and a plugin that answers a
 /// different name than its file still counts as loaded under that file.
-static LOADED_FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static LOADED_FILES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// The file names of the plugin libraries that loaded in this process.
 #[must_use]
 pub fn loaded_files() -> Vec<String> {
     LOADED_FILES
         .lock()
-        .map(|files| files.clone())
+        .map(|files| files.iter().map(|(file, _)| file.clone()).collect())
         .unwrap_or_default()
 }
 
 /// Whether a plugin file loaded in this process.
 #[must_use]
 pub fn is_loaded(file_name: &str) -> bool {
-    LOADED_FILES
-        .lock()
-        .is_ok_and(|files| files.iter().any(|known| known == file_name))
+    loaded_plugin_name(file_name).is_some()
+}
+
+/// The name declared by the plugin loaded from a library file.
+#[must_use]
+pub fn loaded_plugin_name(file_name: &str) -> Option<String> {
+    LOADED_FILES.lock().ok().and_then(|files| {
+        files
+            .iter()
+            .find(|(file, _)| file == file_name)
+            .map(|(_, name)| name.clone())
+    })
 }
 
 /// The plugin files that failed to load in this process, with the reason.
@@ -71,14 +83,14 @@ fn remember_failure(path: &Path, reason: &str) {
 }
 
 /// Records a plugin file that loaded, once.
-fn remember_loaded(path: &Path) {
+fn remember_loaded(path: &Path, name: &str) {
     let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
         return;
     };
     if let Ok(mut files) = LOADED_FILES.lock()
-        && !files.iter().any(|known| known == file)
+        && !files.iter().any(|(known, _)| known == file)
     {
-        files.push(file.to_owned());
+        files.push((file.to_owned(), name.to_owned()));
     }
 }
 
@@ -86,7 +98,7 @@ fn remember_loaded(path: &Path) {
 ///
 /// Invalid or incompatible libraries are reported and skipped so one broken
 /// optional plugin cannot prevent the server from starting.
-pub fn load_plugins(plugins: &mut Plugins, ctx: Option<&PluginContext>) {
+pub fn load_plugins(plugins: &mut Plugins, context: impl Fn(&str) -> PluginContext) {
     let plugin_dir = plugin_dir();
     let Ok(entries) = std::fs::read_dir(&plugin_dir) else {
         return;
@@ -99,9 +111,16 @@ pub fn load_plugins(plugins: &mut Plugins, ctx: Option<&PluginContext>) {
         if !matches!(ext, "so" | "dll" | "dylib") {
             continue;
         }
-        match load_one(&path, ctx) {
-            Ok(plugin) => {
-                remember_loaded(&path);
+        match load_one(&path) {
+            Ok(mut plugin) => {
+                let name = plugin.name();
+                if plugins.names().contains(&name) {
+                    remember_failure(&path, "a plugin with this name is already loaded");
+                    continue;
+                }
+                remember_loaded(&path, name);
+                let ctx = context(name);
+                plugin.set_context(ctx);
                 plugins.add(plugin);
             }
             Err(error) => {
@@ -112,7 +131,7 @@ pub fn load_plugins(plugins: &mut Plugins, ctx: Option<&PluginContext>) {
     }
 }
 
-fn load_one(path: &Path, ctx: Option<&PluginContext>) -> Result<Box<dyn Plugin>, String> {
+fn load_one(path: &Path) -> Result<Box<dyn Plugin>, String> {
     let library = library(path)?;
     check_abi(&library)?;
     let create: libloading::Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> =
@@ -122,11 +141,7 @@ fn load_one(path: &Path, ctx: Option<&PluginContext>) -> Result<Box<dyn Plugin>,
     if raw.is_null() {
         return Err("create_plugin returned a null pointer".to_owned());
     }
-    let mut plugin = unsafe { Box::from_raw(raw) };
-    if let Some(ctx) = ctx {
-        plugin.set_context(ctx.clone());
-    }
-    Ok(plugin)
+    Ok(unsafe { Box::from_raw(raw) })
 }
 
 fn library(path: &Path) -> Result<Arc<libloading::Library>, String> {

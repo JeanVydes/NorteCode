@@ -1,154 +1,191 @@
-//! Adapter that lets plugins ask the host about the session they run in.
+//! Loaded plugins and scoped widget invalidations.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
-use norte_code_agent::Service;
-use norte_code_plugin_host::plugins::PluginHost;
-use norte_code_plugin_host::{CommandName, CommandRegistry, Plugins};
-use norte_code_wire::{ContextUsage, SessionKey};
+use norte_code_plugin_host::{
+    CommandExecutionError, CommandName, CommandOutput, CommandRegistry, PluginContext,
+    PluginInvocation, Plugins,
+};
+use norte_code_wire::plugin_widgets::{
+    PluginSelection, PluginWidgetRequest, PluginWidgetSnapshot, Widget, WidgetKey,
+    WidgetRegistration, WidgetUpdate,
+};
+use tokio::sync::watch;
 
-#[derive(Default)]
-struct AdapterState {
-    services: HashMap<String, Arc<Service>>,
-    session_agents: HashMap<String, String>,
-    current_session: Option<SessionKey>,
-    default_agent: Option<String>,
-    plugins: Option<Arc<Plugins>>,
+const MAX_SUBSCRIBED_WIDGETS: usize = 64;
+const MAX_WIDGET_RESPONSE_BYTES: usize = 64 * 1024;
+
+struct Registry {
+    plugins: Arc<Plugins>,
     commands: CommandRegistry,
 }
 
-/// A plugin host backed by the services the RAEP server owns.
-///
-/// The adapter exists before the services do, because plugins receive their
-/// context while they are being loaded. Calls made before the services are
-/// installed answer with what is known, and calls made afterwards answer from
-/// the most recently attached session.
+#[derive(Default)]
+struct WidgetRevisions {
+    current: u64,
+    by_widget: BTreeMap<WidgetKey, u64>,
+}
+
+impl WidgetRevisions {
+    fn invalidate(&mut self, key: &WidgetKey) -> bool {
+        let Some(revision) = self.by_widget.get_mut(key) else {
+            return false;
+        };
+        self.current = self.current.wrapping_add(1);
+        *revision = self.current;
+        true
+    }
+
+    fn latest(&self, keys: &[WidgetKey]) -> u64 {
+        keys.iter()
+            .filter_map(|key| self.by_widget.get(key).copied())
+            .max()
+            .unwrap_or_default()
+    }
+}
+
 pub(crate) struct PluginHostAdapter {
-    state: RwLock<AdapterState>,
+    registry: OnceLock<Registry>,
+    revisions: Arc<watch::Sender<WidgetRevisions>>,
 }
 
 impl PluginHostAdapter {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            state: RwLock::new(AdapterState::default()),
+            registry: OnceLock::new(),
+            revisions: Arc::new(watch::Sender::new(WidgetRevisions::default())),
         })
     }
 
-    pub(crate) fn install_services(
-        &self,
-        services: HashMap<String, Arc<Service>>,
-        default_agent: String,
-    ) {
-        let mut state = self.write();
-        state.services = services;
-        state.default_agent = Some(default_agent);
+    pub(crate) fn context(&self, plugin: &str) -> PluginContext {
+        let revisions = Arc::clone(&self.revisions);
+        let plugin = plugin.to_owned();
+        PluginContext::new(move |id| {
+            let key = WidgetKey {
+                plugin: plugin.clone(),
+                widget: id.clone(),
+            };
+            revisions.send_if_modified(|state| state.invalidate(&key));
+        })
     }
 
-    pub(crate) fn install_plugins(&self, plugins: Arc<Plugins>) {
-        let commands = plugins.command_registry();
-        let mut state = self.write();
-        state.plugins = Some(plugins);
-        state.commands = commands;
+    pub(crate) fn install_plugins(&self, plugins: Arc<Plugins>, widgets: &[WidgetRegistration]) {
+        self.revisions.send_modify(|revisions| {
+            revisions.by_widget = widgets.iter().map(|entry| (entry.key.clone(), 0)).collect();
+        });
+        let _ = self.registry.set(Registry {
+            commands: plugins.command_registry(),
+            plugins,
+        });
+    }
+
+    pub(crate) async fn widgets(
+        &self,
+        mut request: PluginWidgetRequest,
+        session_service: Option<Arc<norte_code_agent::Service>>,
+    ) -> PluginWidgetSnapshot {
+        request.widgets.truncate(MAX_SUBSCRIBED_WIDGETS);
+        let mut revisions = self.revisions.subscribe();
+        {
+            let state = revisions.borrow();
+            let mut seen = std::collections::BTreeSet::new();
+            request
+                .widgets
+                .retain(|key| state.by_widget.contains_key(key) && seen.insert(key.clone()));
+        }
+        let revision = wait_for_revision(&mut revisions, &request).await;
+        let updates = if let Some(registry) = self.registry.get() {
+            let plugins = Arc::clone(&registry.plugins);
+            tokio::task::spawn_blocking(move || {
+                widget_updates(&plugins, request, session_service.as_deref())
+            })
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        PluginWidgetSnapshot { revision, updates }
     }
 
     pub(crate) fn execute_command(
         &self,
         name: &str,
         arguments: &[String],
-    ) -> Result<norte_code_plugin_host::CommandOutput, norte_code_plugin_host::CommandExecutionError>
-    {
-        let name = CommandName::new(name.to_owned())
-            .map_err(|_| norte_code_plugin_host::CommandExecutionError::UnknownCommand)?;
-        let state = self.read();
-        let plugins = state
+        invocation: Option<&PluginInvocation>,
+    ) -> Result<CommandOutput, CommandExecutionError> {
+        let name =
+            CommandName::new(name.to_owned()).map_err(|_| CommandExecutionError::UnknownCommand)?;
+        let registry = self
+            .registry
+            .get()
+            .ok_or(CommandExecutionError::UnknownCommand)?;
+        registry
             .plugins
-            .as_ref()
-            .ok_or(norte_code_plugin_host::CommandExecutionError::UnknownCommand)?;
-        plugins.execute_command(&state.commands, &name, arguments)
-    }
-
-    pub(crate) fn set_session(&self, session: &str, agent: &str) {
-        let mut state = self.write();
-        state.current_session = Some(SessionKey::new(session));
-        state
-            .session_agents
-            .insert(session.to_owned(), agent.to_owned());
-    }
-
-    fn snapshot(&self) -> (Option<SessionKey>, Option<Arc<Service>>) {
-        let state = self.read();
-        let session = state.current_session.clone();
-        let service = session
-            .as_ref()
-            .and_then(|session| state.session_agents.get(session.as_str()))
-            .and_then(|agent| state.services.get(agent))
-            .or_else(|| {
-                state
-                    .default_agent
-                    .as_ref()
-                    .and_then(|agent| state.services.get(agent))
-            })
-            .cloned();
-        (session, service)
-    }
-
-    fn read(&self) -> RwLockReadGuard<'_, AdapterState> {
-        self.state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn write(&self) -> RwLockWriteGuard<'_, AdapterState> {
-        self.state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .execute_command(&registry.commands, &name, arguments, invocation)
     }
 }
 
-impl PluginHost for PluginHostAdapter {
-    fn session(&self) -> Option<SessionKey> {
-        self.snapshot().0
-    }
-
-    fn session_model(&self) -> Option<String> {
-        let (session, service) = self.snapshot();
-        let service = service?;
-        match session {
-            Some(session) => service.session_spec(&session).map(|spec| spec.model),
-            None => service.default_spec().map(|spec| spec.model),
+async fn wait_for_revision(
+    revisions: &mut watch::Receiver<WidgetRevisions>,
+    request: &PluginWidgetRequest,
+) -> u64 {
+    let _ = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if request.after != Some(revisions.borrow_and_update().latest(&request.widgets))
+                || revisions.changed().await.is_err()
+            {
+                break;
+            }
         }
-    }
+    })
+    .await;
+    // Read the revision before asking the plugins. An update that races with
+    // evaluation will remain visible to the client's next request.
+    revisions.borrow().latest(&request.widgets)
+}
 
-    fn session_provider(&self) -> Option<String> {
-        let (session, service) = self.snapshot();
-        let service = service?;
-        match session {
-            Some(session) => service.session_spec(&session).map(|spec| spec.provider),
-            None => service.default_spec().map(|spec| spec.provider),
-        }
+pub(crate) fn invocation(
+    selection: PluginSelection,
+    service: Option<&norte_code_agent::Service>,
+) -> PluginInvocation {
+    let current = service.zip(selection.session.as_ref());
+    let title = current.and_then(|(service, session)| service.session_title(session));
+    let context_usage = current.map_or_else(
+        norte_code_wire::ContextUsage::default,
+        |(service, session)| service.session_context(session),
+    );
+    PluginInvocation {
+        selection,
+        title,
+        context_usage,
     }
+}
 
-    fn session_title(&self) -> Option<String> {
-        let (session, service) = self.snapshot();
-        session.and_then(|session| service?.session_title(&session))
-    }
-
-    fn session_context(&self) -> ContextUsage {
-        let (session, service) = self.snapshot();
-        let Some(service) = service else {
-            return ContextUsage::default();
-        };
-        match session {
-            Some(session) => service.session_context(&session),
-            None => ContextUsage {
-                used: 0,
-                window: service
-                    .default_spec()
-                    .and_then(|spec| spec.capabilities.max_context),
-            },
-        }
-    }
+fn widget_updates(
+    plugins: &Plugins,
+    request: PluginWidgetRequest,
+    service: Option<&norte_code_agent::Service>,
+) -> Vec<WidgetUpdate> {
+    let invocation = invocation(request.selection, service);
+    let mut bytes_left = MAX_WIDGET_RESPONSE_BYTES;
+    request
+        .widgets
+        .into_iter()
+        .filter_map(|key| {
+            let mut view = plugins.widget(&key, &invocation)?;
+            for widget in &mut view.content {
+                if let Widget::Sparkline { samples, .. } = widget {
+                    samples.retain(|value| value.is_finite());
+                }
+            }
+            let update = WidgetUpdate { key, view };
+            let bytes = serde_json::to_vec(&update).ok()?.len().saturating_add(1);
+            bytes_left = bytes_left.checked_sub(bytes)?;
+            Some(update)
+        })
+        .collect()
 }
 
 #[cfg(test)]

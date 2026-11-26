@@ -21,8 +21,7 @@ use terminalui::{Context, InputEvent, Node, Outcome, Theme, View, node};
 use crate::context::{ContextUsage, compaction_threshold, human_count};
 use crate::ui::copy::{
     ATTACHED, COMPACT_AT, CONNECTING_DOT, CONNECTION, CONTEXT, DETACHED, FAILED, NO_SESSION, NONE,
-    PLANS, PLUGIN_BANNER, PLUGIN_STATUS, SESSION, TODO_COMPLETED, TODO_IN_PROGRESS, TODO_PENDING,
-    TODOS,
+    PLANS, SESSION, TODO_COMPLETED, TODO_IN_PROGRESS, TODO_PENDING, TODOS,
 };
 use crate::ui_model::SessionAttachmentState;
 
@@ -34,7 +33,7 @@ fn preview_id(index: usize) -> String {
 }
 
 /// Where virtual rail rows land on screen.
-struct RailViewport {
+struct WidgetViewport {
     /// The rail's inner rectangle.
     inner: Rect,
     /// Rows scrolled out of view.
@@ -118,10 +117,7 @@ pub(crate) struct Rail {
     plans: Vec<norte_code_wire::PlanSummary>,
     /// The task list of the attached session.
     todos: Vec<norte_code_wire::TodoInfo>,
-    /// Status lines offered by loaded plugins.
-    plugin_status: Vec<String>,
-    /// Banner lines offered by loaded plugins.
-    plugin_banner: Vec<String>,
+    plugin_views: Vec<norte_code_wire::plugin_widgets::WidgetUpdate>,
     /// Clickable plan rows, recorded during render.
     plan_rows: Vec<(Rect, String)>,
     /// A plan the user clicked, waiting for the host to open it.
@@ -156,8 +152,7 @@ impl Rail {
             context: ContextUsage::default(),
             plans: Vec::new(),
             todos: Vec::new(),
-            plugin_status: Vec::new(),
-            plugin_banner: Vec::new(),
+            plugin_views: Vec::new(),
             plan_rows: Vec::new(),
             pending_plan: None,
             reveal_plans: false,
@@ -220,22 +215,13 @@ impl Rail {
         self.reveal_todos |= revealed;
     }
 
-    /// The status lines currently shown by the rail.
-    pub(crate) fn plugin_status(&self) -> &[String] {
-        &self.plugin_status
-    }
-
-    pub(crate) fn set_plugin_status(&mut self, lines: Vec<String>) {
-        self.plugin_status = lines;
-    }
-
-    /// The banner lines currently shown by the rail.
-    pub(crate) fn plugin_banner(&self) -> &[String] {
-        &self.plugin_banner
-    }
-
-    pub(crate) fn set_plugin_banner(&mut self, lines: Vec<String>) {
-        self.plugin_banner = lines;
+    pub(crate) fn set_plugin_views(
+        &mut self,
+        views: &[norte_code_wire::plugin_widgets::WidgetUpdate],
+    ) {
+        if self.plugin_views != views {
+            self.plugin_views = views.to_vec();
+        }
     }
 
     fn sync_plan_buttons(&mut self, count: usize) {
@@ -313,12 +299,7 @@ impl Rail {
             };
         }
         height += 5;
-        if !self.plugin_status.is_empty() {
-            height += section_rows(self.plugin_status.len());
-        }
-        if !self.plugin_banner.is_empty() {
-            height += section_rows(self.plugin_banner.len());
-        }
+        height += super::plugin_rail_view::height(&self.plugin_views);
         if !self.todos.is_empty() {
             height += section_rows(self.todos.len());
         }
@@ -326,7 +307,7 @@ impl Rail {
         height
     }
 
-    fn to_screen(rect: Rect, viewport: &RailViewport) -> Rect {
+    fn to_screen(rect: Rect, viewport: &WidgetViewport) -> Rect {
         Rect {
             x: viewport.inner.x + rect.x,
             y: viewport.inner.y + 1 + rect.y.saturating_sub(viewport.scroll),
@@ -341,7 +322,7 @@ impl Rail {
         buf: &mut Buffer,
         cx: &mut Context,
         theme: &Theme,
-        viewport: &RailViewport,
+        viewport: &WidgetViewport,
     ) -> u16 {
         let usage = self.context;
         let start = y + 1;
@@ -412,45 +393,6 @@ impl Rail {
     }
 
     /// Paints a titled list of plain lines, clipped to the rail width.
-    fn paint_lines(
-        buf: &mut Buffer,
-        inner: Rect,
-        y: u16,
-        theme: &Theme,
-        title: &str,
-        lines: &[String],
-    ) -> u16 {
-        if lines.is_empty() || y + 1 >= inner.y + inner.height {
-            return y;
-        }
-        let dim = Style::default().fg(theme.muted).bg(theme.background);
-        buf.set_stringn(
-            inner.x + 1,
-            y,
-            title,
-            title.len(),
-            dim.add_modifier(Modifier::BOLD),
-        );
-        let width = usize::from(inner.width.saturating_sub(3));
-        let mut row = y + 1;
-        for line in lines {
-            if row >= inner.y + inner.height {
-                break;
-            }
-            buf.set_stringn(inner.x + 1, row, clipped(line, width), width, dim);
-            row += 1;
-        }
-        row
-    }
-
-    fn paint_plugin_status(&self, buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme) -> u16 {
-        Self::paint_lines(buf, inner, y, theme, PLUGIN_STATUS, &self.plugin_status)
-    }
-
-    fn paint_plugin_banner(&self, buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme) -> u16 {
-        Self::paint_lines(buf, inner, y, theme, PLUGIN_BANNER, &self.plugin_banner)
-    }
-
     fn paint_todos(&self, buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme) -> u16 {
         if self.todos.is_empty() || y + 1 >= inner.y + inner.height {
             return y;
@@ -493,7 +435,7 @@ impl Rail {
         inner: Rect,
         y: u16,
         theme: &Theme,
-        viewport: &RailViewport,
+        viewport: &WidgetViewport,
         cx: &mut Context,
     ) {
         self.plan_rows.clear();
@@ -631,13 +573,12 @@ impl View for Rail {
             );
             y = paint_connection(&mut scratch, content, y, &self.attachment, cx, theme);
         }
-        let viewport = RailViewport {
+        let viewport = WidgetViewport {
             inner,
             scroll: self.scroll,
         };
         y = self.paint_context(content, y, &mut scratch, cx, theme, &viewport);
-        y = self.paint_plugin_status(&mut scratch, content, y, theme);
-        y = self.paint_plugin_banner(&mut scratch, content, y, theme);
+        y = super::plugin_rail_view::paint(&self.plugin_views, &mut scratch, content, y, theme);
         y = self.paint_todos(&mut scratch, content, y, theme);
         self.paint_plans(&mut scratch, content, y, theme, &viewport, cx);
 

@@ -13,9 +13,9 @@ mod commands;
 mod host;
 mod http;
 mod payloads;
-mod plugin_display;
 mod plugin_host;
 pub mod plugin_manager;
+mod plugin_metadata;
 
 pub use commands::AgentCommand;
 pub use host::replay::ReplayLog;
@@ -60,7 +60,7 @@ use std::{
 
 use norte_code_agent::{DEFAULT_SYSTEM_PROMPT, ModelSpec, Service, VendorModels};
 use norte_code_plugin_host::load_plugins;
-use norte_code_plugin_host::plugins::{Catalogue, PluginContext, PluginHost, Plugins};
+use norte_code_plugin_host::plugins::{Catalogue, Plugins};
 use norte_code_protocol::{
     catalog::{Catalog, CatalogError, ensure_catalog_files, load_catalog_files},
     config::{
@@ -150,7 +150,7 @@ async fn migrate_pins_to_session_stats(
 
 struct ServicePluginData<'a> {
     catalogue: &'a Catalogue,
-    tools: &'a crate::plugin_display::PluginTools,
+    tools: &'a crate::plugin_metadata::PluginTools,
 }
 
 async fn build_services(
@@ -253,16 +253,17 @@ fn load_catalog(offered: Catalogue) -> Result<Catalog, Box<dyn std::error::Error
 }
 
 fn load_plugins_for_host() -> (
-    Plugins,
-    crate::plugin_display::PluginTools,
+    Arc<Plugins>,
+    crate::plugin_metadata::PluginTools,
     Arc<crate::plugin_host::PluginHostAdapter>,
 ) {
     let plugin_host = crate::plugin_host::PluginHostAdapter::new();
-    let host: Arc<dyn PluginHost> = plugin_host.clone();
-    let context = PluginContext { host: Some(host) };
     let mut plugins = Plugins::new();
-    load_plugins(&mut plugins, Some(&context));
-    let plugin_tools = crate::plugin_display::capture(&plugins);
+    load_plugins(&mut plugins, |name| plugin_host.context(name));
+    let plugins = Arc::new(plugins);
+    let widgets = plugins.widget_registrations();
+    plugin_host.install_plugins(Arc::clone(&plugins), &widgets);
+    let plugin_tools = crate::plugin_metadata::capture(&plugins, widgets);
     (plugins, plugin_tools, plugin_host)
 }
 
@@ -361,9 +362,7 @@ async fn prepare_router() -> Result<axum::Router, Box<dyn std::error::Error>> {
     )
     .await?;
     tracing::info!(agents = services.len(), "agent services initialized");
-    plugin_host.install_plugins(Arc::new(plugins));
     migrate_pins_to_session_stats(&services, &database.with_file_name("pins")).await;
-    plugin_host.install_services(services.clone(), agent_id.clone());
     let auth_principals = std::env::var("NORTE_CODE_AUTH_USERS")
         .ok()
         .map(|users| {

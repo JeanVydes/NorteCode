@@ -132,18 +132,15 @@ pub struct PluginSummary {
     /// The workspace package installed from that source, when recorded.
     #[serde(default)]
     pub package: Option<String>,
-    /// The status line this plugin contributed, when it offered one.
-    #[serde(default)]
-    pub status: Option<String>,
-    /// The banner line this plugin contributed, when it offered one.
-    #[serde(default)]
-    pub banner: Option<String>,
     /// The names of the tools this plugin declared.
     #[serde(default)]
     pub tools: Vec<String>,
     /// Slash commands this plugin registered.
     #[serde(default)]
     pub commands: Vec<norte_code_wire::PluginCommandInfo>,
+    /// Widget declarations clients may choose to display.
+    #[serde(default)]
+    pub widgets: Vec<norte_code_wire::plugin_widgets::WidgetRegistration>,
 }
 
 /// The result of a plugin operation.
