@@ -50,6 +50,7 @@ mod models_page;
 mod node_lookup;
 mod overlay_frame;
 mod plan_overlay;
+mod plugin_list_overlay;
 mod plugin_rail_view;
 mod plugins_page;
 mod question_prompt;
@@ -95,6 +96,7 @@ pub(crate) use key_prompt::{KeyIntent, KeyPrompt, KeyPromptAction};
 pub(crate) use key_status::invalidate_key;
 pub(crate) use models_page::{ModelsAction, ModelsData, ModelsPage, ProviderKeyStatus};
 pub(crate) use plan_overlay::{PLAN_REVIEW_PREFIX, PlanOverlay, PlanReviewAction};
+pub(crate) use plugin_list_overlay::PluginListOverlay;
 pub(crate) use plugins_page::PluginsAction;
 pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::{Rail, RailPosition};
@@ -195,6 +197,7 @@ pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionCon
             node("question_prompt", question_prompt::QuestionPrompt::new()),
             node("plan_overlay", plan_overlay::PlanOverlay::default()),
             node("host_overlay", host_overlay::HostOverlay::default()),
+            node("plugin_list_overlay", PluginListOverlay::default()),
         ]),
     );
 
@@ -279,7 +282,17 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     let host_open = tree
         .find::<host_overlay::HostOverlay>("host_overlay")
         .is_some_and(host_overlay::HostOverlay::is_open);
-    let visible = if plan_open {
+    let plugin_list_open = tree
+        .find::<plugin_list_overlay::PluginListOverlay>("plugin_list_overlay")
+        .is_some_and(plugin_list_overlay::PluginListOverlay::is_open);
+    if let Some(overlay) =
+        tree.find_mut::<plugin_list_overlay::PluginListOverlay>("plugin_list_overlay")
+    {
+        overlay.sync_plugins(&model.plugins);
+    }
+    let visible = if plugin_list_open {
+        5
+    } else if plan_open {
         3
     } else if host_open {
         4
@@ -309,6 +322,7 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     }
     if overlay_changed {
         let focus = match visible {
+            5 => "plugin_list_overlay",
             4 => "host_overlay",
             3 => "plan_overlay",
             2 => "question_prompt",

@@ -34,12 +34,7 @@ pub(super) fn execute_slash_command(
             return;
         }
     };
-    if command_has_attachments(tree, parts) {
-        notice(
-            tree,
-            "slash commands cannot include attachments; draft kept".into(),
-            ui::Tone::Warn,
-        );
+    if warn_command_attachments(tree, parts) {
         return;
     }
     if execute_local_slash_command(tree, commands, model, &command, input) {
@@ -78,6 +73,7 @@ pub(super) fn execute_slash_command(
         SlashCommand::SetQueueMode(_)
         | SlashCommand::ToggleDebug
         | SlashCommand::Plans
+        | SlashCommand::ListPlugins
         | SlashCommand::Host
         | SlashCommand::ClearData
         | SlashCommand::Preference(_) => {
@@ -128,6 +124,21 @@ fn command_has_attachments(
             .is_some_and(|composer| !composer.pending_attachments().is_empty())
 }
 
+fn warn_command_attachments(
+    tree: &mut terminalui::Tree,
+    parts: &[norte_code_wire::UserInputPart],
+) -> bool {
+    if !command_has_attachments(tree, parts) {
+        return false;
+    }
+    notice(
+        tree,
+        "slash commands cannot include attachments; draft kept".into(),
+        ui::Tone::Warn,
+    );
+    true
+}
+
 fn execute_local_slash_command(
     tree: &mut terminalui::Tree,
     commands: Option<&tokio::sync::mpsc::Sender<UiCommand>>,
@@ -171,6 +182,25 @@ fn execute_local_slash_command(
     if matches!(command, SlashCommand::Plans) {
         if let Some(overlay) = tree.find_mut::<ui::PlanOverlay>("plan_overlay") {
             overlay.open_list(model.plans.clone());
+        }
+        clear_command_draft(tree, input);
+        ui::sync_views(tree, model);
+        return true;
+    }
+    if matches!(command, SlashCommand::ListPlugins) {
+        if let Some(overlay) = tree.find_mut::<ui::PluginListOverlay>("plugin_list_overlay") {
+            overlay.open(model.plugins.clone());
+            if commands.is_some() {
+                overlay.set_loading(true);
+            } else {
+                overlay.fail("service is not connected".to_owned());
+            }
+        }
+        if let Some(commands) = commands
+            && let Err(error) = commands.try_send(UiCommand::RefreshPlugins)
+            && let Some(overlay) = tree.find_mut::<ui::PluginListOverlay>("plugin_list_overlay")
+        {
+            overlay.fail(format!("could not request plugin list: {error}"));
         }
         clear_command_draft(tree, input);
         ui::sync_views(tree, model);

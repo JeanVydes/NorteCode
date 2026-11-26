@@ -68,6 +68,10 @@ pub(crate) enum ClientEvent {
     CostGlobal(norte_code_client::CostReport),
     /// The list of installed plugins.
     Plugins(Vec<norte_code_client::PluginSummary>),
+    /// A fresh plugin list requested by the command overlay.
+    PluginListLoaded(Vec<norte_code_client::PluginSummary>),
+    /// The requested plugin list could not be loaded.
+    PluginListFailed(ClientError),
     PluginWidgets(
         crate::plugin_widgets::Scope,
         Vec<norte_code_wire::plugin_widgets::WidgetUpdate>,
@@ -201,6 +205,8 @@ pub(crate) enum UiCommand {
     },
     /// Refetch the catalogue views for the current session.
     RefreshViews,
+    /// Fetch installed plugins for the plugin list overlay.
+    RefreshPlugins,
     /// Refetch only the plans and jobs shown in the rail.
     RefreshRail,
     WatchPluginWidgets(Option<crate::plugin_widgets::Scope>),
@@ -346,6 +352,8 @@ async fn cancel_turn(
 enum BackgroundOp {
     /// A plugin operation.
     Plugin(PluginOp),
+    /// Fetch the current installed plugin list.
+    RefreshPlugins,
     /// Run a plugin command away from the stream loop.
     Command {
         session: SessionKey,
@@ -371,6 +379,7 @@ fn spawn_host_op(kind: BackgroundOp, api: Arc<RestClient>, events: Sender<Client
     tokio::spawn(async move {
         match kind {
             BackgroundOp::Plugin(op) => run_plugin_op(&api, op, &events).await,
+            BackgroundOp::RefreshPlugins => refresh_plugins(&api, &events).await,
             BackgroundOp::Command {
                 session,
                 command,
@@ -382,6 +391,19 @@ fn spawn_host_op(kind: BackgroundOp, api: Arc<RestClient>, events: Sender<Client
             BackgroundOp::Delete { session } => delete_session(&api, &session, &events).await,
         }
     });
+}
+
+async fn refresh_plugins(api: &RestClient, events: &Sender<ClientEvent>) {
+    match api.plugins().await {
+        Ok(plugins) => {
+            let _ = events.send(ClientEvent::PluginListLoaded(plugins)).await;
+        }
+        Err(error) => {
+            let _ = events
+                .send(ClientEvent::PluginListFailed(ClientError::plugin(error)))
+                .await;
+        }
+    }
 }
 
 async fn run_command(
@@ -1415,6 +1437,13 @@ async fn apply_command(
             } else {
                 Box::pin(fetch_global_views(api, events)).await;
             }
+        }
+        UiCommand::RefreshPlugins => {
+            spawn_host_op(
+                BackgroundOp::RefreshPlugins,
+                Arc::clone(api),
+                events.clone(),
+            );
         }
         UiCommand::RefreshRail => {
             if let Some(active) = active {

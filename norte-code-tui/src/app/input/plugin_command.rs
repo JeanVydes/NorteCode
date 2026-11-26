@@ -48,7 +48,7 @@ pub(super) fn suggestions(input: &str, plugins: &[PluginSummary]) -> Vec<String>
         return Vec::new();
     };
     if !args.contains(' ') {
-        return ["enable", "disable", "install", "update", "remove"]
+        return ["list", "enable", "disable", "install", "update", "remove"]
             .into_iter()
             .filter(|action| action.starts_with(args))
             .map(|action| format!("/plugin {action} "))

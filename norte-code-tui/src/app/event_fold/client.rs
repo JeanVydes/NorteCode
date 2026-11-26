@@ -321,6 +321,21 @@ pub(in crate::app) fn drain_server_events(
                 }
                 changed = true;
             }
+            Ok(ClientEvent::PluginListLoaded(plugins)) => {
+                model.plugins.clone_from(&plugins);
+                if let Some(overlay) = tree.find_mut::<ui::PluginListOverlay>("plugin_list_overlay")
+                {
+                    overlay.loaded(plugins);
+                }
+                changed = true;
+            }
+            Ok(ClientEvent::PluginListFailed(reason)) => {
+                if let Some(overlay) = tree.find_mut::<ui::PluginListOverlay>("plugin_list_overlay")
+                {
+                    overlay.fail(reason.to_string());
+                }
+                changed = true;
+            }
             Ok(
                 event @ (ClientEvent::Models(_)
                 | ClientEvent::Plans(_)

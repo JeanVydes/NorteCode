@@ -185,6 +185,7 @@ impl ReasoningEffort {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SlashCommand {
     ManagePlugin(crate::client::PluginOp),
+    ListPlugins,
     Host,
     ClearData,
     Preference(super::preferences::PreferenceCommand),
@@ -250,6 +251,9 @@ pub(super) fn parse(
             .map_err(|()| SlashCommandError::InvalidArguments);
     }
     match CommandName::parse(label) {
+        Some(CommandName::PluginManager) if args.as_slice() == ["list"] => {
+            Ok(SlashCommand::ListPlugins)
+        }
         Some(CommandName::PluginManager) => super::plugin_command::parse(&args)
             .map(SlashCommand::ManagePlugin)
             .map_err(|()| SlashCommandError::InvalidArguments),
