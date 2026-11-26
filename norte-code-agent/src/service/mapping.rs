@@ -304,7 +304,9 @@ pub(super) fn to_phase(phase: crate::runtime::Phase) -> norte_code_wire::Phase {
 /// so the client should resume instead of resending its message.
 pub(super) fn error_code(error: &norte::Error) -> ErrorCode {
     match error {
-        norte::Error::StoreConflict { .. } => ErrorCode::Conflict,
+        norte::Error::Other(message) if message.starts_with("store conflict on session ") => {
+            ErrorCode::Conflict
+        }
         // A capability the model lacks is the request's fault, not the
         // provider's: the wire was never reached, and retrying it would spend
         // the same refusal again. Reporting it as `Provider` read as a flaky

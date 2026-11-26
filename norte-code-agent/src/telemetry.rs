@@ -10,13 +10,14 @@
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use crate::runtime::{EngineEvent, Observer};
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
+use norte::id::{VendorExtensionKey, WireFamily};
 use norte::{
     Continuation, Layer, LayerContext, ModelRequest, ModelStream, ReasoningRequest, StreamEvent,
     Usage,
@@ -31,7 +32,13 @@ use crate::provider::ModelSpec;
 const MAX_TELEMETRY_RECORDS: usize = 2_000;
 
 /// The vendor extension that names an upstream provider, when a host pins one.
-const ROUTE_EXTENSION: &str = "openai.chat:provider";
+static ROUTE_EXTENSION: LazyLock<VendorExtensionKey> = LazyLock::new(|| {
+    VendorExtensionKey::new(
+        WireFamily::new("openai.chat").expect("valid wire family"),
+        "provider",
+    )
+    .expect("valid route extension key")
+});
 
 /// Engine-event counters that an observer can update without blocking.
 #[derive(Debug, Default)]
@@ -299,7 +306,7 @@ impl RequestMetadata {
                 // OpenRouter, `openai.chat:provider`. `served` is what the
                 // response named, and stays null until Norte exposes it.
                 "route": json!({
-                    "requested": request.extensions.get(ROUTE_EXTENSION),
+                    "requested": request.extensions.get(&*ROUTE_EXTENSION),
                     "served": Value::Null,
                 }),
             }),

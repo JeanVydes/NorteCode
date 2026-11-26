@@ -1156,10 +1156,7 @@ mod streaming_regressions {
             .blobs(Arc::new(InMemoryBlobStore::new()))
             .model(model)
             .config(HarnessConfig {
-                limits: norte::model::StreamLimits {
-                    max_buffered_events: 1,
-                    ..norte::model::StreamLimits::default()
-                },
+                event_buffer_capacity: 1,
                 ..HarnessConfig::default()
             })
             .build()
@@ -1205,7 +1202,7 @@ mod streaming_regressions {
 
     #[tokio::test]
     async fn service_streams_more_deltas_than_the_event_buffer_without_losing_text() {
-        let count = HarnessConfig::default().limits.max_buffered_events + 17;
+        let count = HarnessConfig::default().event_buffer_capacity + 17;
         let chunks: Vec<String> = (0..count).map(|index| format!("{index}:é;")).collect();
         let expected = chunks.concat();
         let model = Arc::new(ScriptedModel::new(reference()).turn_deltas(chunks));

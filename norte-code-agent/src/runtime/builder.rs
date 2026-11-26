@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use norte::id::ToolName;
+use norte::id::{ToolName, VendorExtensionKey};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -296,8 +296,8 @@ impl<'a> TurnBuilder<'a> {
     /// (Section 12), for example `google.gemini:safetySettings`. A key whose
     /// family does not match the active wire is ignored.
     #[must_use]
-    pub fn extension(mut self, key: impl Into<String>, value: Value) -> Self {
-        self.options.extensions.insert(key.into(), value);
+    pub fn extension(mut self, key: VendorExtensionKey, value: Value) -> Self {
+        self.options.extensions.insert(key, value);
         self
     }
 
@@ -468,7 +468,7 @@ impl HarnessBuilder {
         let model = self
             .model
             .ok_or_else(|| Error::InvalidInput("engine requires a model".to_owned()))?;
-        let buffer = self.config.limits.max_buffered_events;
+        let buffer = self.config.event_buffer_capacity;
         Ok(Harness {
             store,
             blobs,

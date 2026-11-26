@@ -287,7 +287,7 @@ impl TurnInterceptor for ToolRuleInterceptor {
         let ConsultationPoint::ToolCall { call } = &context.point else {
             return Ok(Interception::Continue);
         };
-        if self.rules.denies(context.session, &call.name) {
+        if self.rules.denies(context.session, call.name.as_str()) {
             let reason = format!(
                 "`{}` is denied by the approval rules; change the rule before calling it",
                 call.name

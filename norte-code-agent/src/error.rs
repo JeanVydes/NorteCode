@@ -28,6 +28,9 @@ pub enum ServiceError {
     /// The engine failed.
     #[error(transparent)]
     Norte(#[from] norte::Error),
+    /// Conversation state could not be read or committed.
+    #[error(transparent)]
+    Store(#[from] norte_code_protocol::store::StoreError),
     /// Session data could not be removed from the persistence store.
     #[error("data cleanup failed: {source}")]
     DataCleanup {

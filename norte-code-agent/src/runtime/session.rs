@@ -68,9 +68,9 @@ impl Harness {
     ///
     /// # Errors
     ///
-    /// Returns the store's error, including [`Error::SessionNotFound`].
+    /// Returns the store's error when the session is not found.
     pub async fn session(&self, session: SessionId) -> Result<Session> {
-        self.store.load(session).await
+        self.store.load(session).await.map_err(Into::into)
     }
 
     /// Loads the ancestor conversation for the session head.
@@ -80,7 +80,7 @@ impl Harness {
     /// Propagates the store error while walking the graph.
     pub async fn history(&self, session: SessionId) -> Result<Vec<Message>> {
         let session = self.store.load(session).await?;
-        self.store.history(session.head).await
+        self.store.history(session.head).await.map_err(Into::into)
     }
 
     /// Appends `messages` to the session as durable history, in order, without
@@ -100,7 +100,7 @@ impl Harness {
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] when the session is not `Idle`, and
-    /// propagates the store error, including [`Error::StoreConflict`] when the
+    /// propagates the store error, including [`crate::runtime::StoreError::Conflict`] when the
     /// session advanced under the caller (FR-ENG-2).
     pub async fn append_history(
         &self,
@@ -181,16 +181,15 @@ impl Harness {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::SchemaVersion`] for an envelope this build does not
-    /// understand, and propagates the store error, including
-    /// [`Error::StoreConflict`] when the id already exists.
+    /// Returns [`Error::InvalidInput`] for an envelope this build does not
+    /// understand, and propagates a store error when the id already exists.
     #[allow(missing_docs, clippy::missing_errors_doc)]
     pub async fn import(&self, conversation: Conversation) -> Result<Session> {
         if conversation.schema_version != CONVERSATION_SCHEMA_VERSION {
-            return Err(Error::SchemaVersion {
-                kind: "conversation".to_owned(),
-                found: conversation.schema_version,
-            });
+            return Err(Error::InvalidInput(format!(
+                "unsupported conversation schema version {}",
+                conversation.schema_version
+            )));
         }
 
         let mut parent = None;

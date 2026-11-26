@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::runtime::{EngineEvent, Harness};
 use norte::domain::part::Part;
-use norte::id::SessionId;
+use norte::id::{SessionId, VendorExtensionKey, WireFamily};
 use norte::{Message, MessageStatus, ReasoningRequest};
 use norte_code_protocol::costs::BudgetBook;
 use norte_code_wire::{Attachment, ErrorCode, ServerEvent, ServerEventKind, SessionKey};
@@ -128,7 +128,14 @@ impl Service {
                 turn_builder = turn_builder.input(message);
             }
             for (key, value) in &self.config().extensions {
-                turn_builder = turn_builder.extension(key.clone(), value.clone());
+                let (family, path) = key.split_once(':').ok_or_else(|| {
+                    norte::Error::InvalidInput(format!(
+                        "invalid vendor extension key `{key}`; expected <wire-family>:<path>"
+                    ))
+                })?;
+                let extension =
+                    VendorExtensionKey::new(WireFamily::new(family.to_owned())?, path.to_owned())?;
+                turn_builder = turn_builder.extension(extension, value.clone());
             }
             let mut running_turn = turn_builder.cancellation(cancellation.clone()).start();
 

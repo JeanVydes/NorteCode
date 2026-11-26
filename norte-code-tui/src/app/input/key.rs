@@ -222,16 +222,23 @@ fn key_intent_for(provider: String, model_id: Option<String>) -> crate::ui::KeyI
     }
 }
 
-/// Ask the host to switch the attached session's model.
+/// Select a model for the active session or the next sessionless draft.
 pub(in crate::app) fn set_model(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
-    model: &UiModel,
+    model: &mut UiModel,
     provider: &str,
     model_id: &str,
 ) {
-    if let (Some(commands), Some(session)) = (commands.as_ref(), model.active.clone()) {
-        let _ = commands.try_send(UiCommand::SetModel {
-            session,
+    if let Some(session) = model.active.clone() {
+        if let Some(commands) = commands.as_ref() {
+            let _ = commands.try_send(UiCommand::SetModel {
+                session,
+                provider: provider.to_owned(),
+                model: model_id.to_owned(),
+            });
+        }
+    } else {
+        model.pending_new_session_model = Some(crate::client::NewSessionModel {
             provider: provider.to_owned(),
             model: model_id.to_owned(),
         });

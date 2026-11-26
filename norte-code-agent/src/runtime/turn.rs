@@ -41,7 +41,7 @@ impl Turn {
         options: TurnOptions,
         cancellation: CancellationToken,
     ) -> Self {
-        let (sender, events) = mpsc::channel(engine.config.limits.max_buffered_events.max(1));
+        let (sender, events) = mpsc::channel(engine.config.event_buffer_capacity.max(1));
         let token = cancellation.clone();
         let task = tokio::spawn(async move {
             engine

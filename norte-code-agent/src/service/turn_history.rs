@@ -318,7 +318,7 @@ pub(super) fn restored_todos(history: &[Message]) -> Vec<norte_code_wire::TodoIn
     let mut latest = Vec::new();
     for message in history {
         for call in message.tool_calls() {
-            if call.name != "todo" {
+            if call.name.as_str() != "todo" {
                 continue;
             }
             let Some(todos) = call.arguments.get("todos").and_then(|it| it.as_array()) else {

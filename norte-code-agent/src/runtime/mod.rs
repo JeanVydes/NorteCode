@@ -75,7 +75,7 @@ use norte::tool::{
 };
 pub use norte_code_protocol::Session;
 pub use norte_code_protocol::Store;
-pub use norte_code_protocol::{Node, NodeKind};
+pub use norte_code_protocol::{Node, NodeKind, StoreError, StoreResult};
 pub use norte_code_wire::Phase;
 
 /// The turn-level policy that is not a layer: what a turn inherits and the
@@ -96,12 +96,13 @@ pub struct HarnessConfig {
     /// A turn merges its own over these per field, so a value set here is the
     /// baseline the turn may override, never a value it cannot change.
     pub params: GenerationParams,
-    /// The bounds on buffered observer events and on one stream's size.
-    ///
-    /// A slow observer never stalls a turn: the observer set drops what does not
-    /// fit and counts it. [`StreamLimits::default`] sizes the buffer for
-    /// ordinary use.
+    /// Bounds on one unfinished model stream part.
     pub limits: StreamLimits,
+    /// Capacity of each turn's bounded event stream.
+    ///
+    /// A consumer that stops reading applies backpressure to that turn. The
+    /// default of 256 keeps the stream bounded while allowing normal output.
+    pub event_buffer_capacity: usize,
     /// Media above this many bytes is moved to the blob store instead of
     /// travelling inline in the history. 64 KiB by default.
     pub inline_threshold: usize,
@@ -128,6 +129,7 @@ impl Default for HarnessConfig {
             reasoning: ReasoningRequest::default(),
             params: GenerationParams::default(),
             limits: StreamLimits::default(),
+            event_buffer_capacity: 256,
             inline_threshold: 64 * 1024,
             max_iterations: 16,
             tool_metadata: None,
@@ -362,7 +364,7 @@ impl Harness {
                 Ok(session)
             }
             Err(
-                error @ Error::StoreConflict {
+                error @ StoreError::Conflict {
                     expected, actual, ..
                 },
             ) => {
@@ -375,9 +377,9 @@ impl Harness {
                     },
                 )
                 .await;
-                Err(error)
+                Err(error.into())
             }
-            Err(error) => Err(error),
+            Err(error) => Err(error.into()),
         }
     }
 

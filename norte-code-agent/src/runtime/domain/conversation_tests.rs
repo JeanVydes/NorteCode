@@ -69,7 +69,7 @@ fn an_unknown_schema_version_is_rejected() {
     .to_string();
     assert!(matches!(
         Conversation::from_json(&json),
-        Err(norte::error::Error::SchemaVersion { .. })
+        Err(norte::error::Error::InvalidInput(_))
     ));
 }
 

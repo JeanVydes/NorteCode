@@ -78,10 +78,10 @@ impl Conversation {
     pub fn from_json(json: &str) -> Result<Self> {
         let conversation: Self = serde_json::from_str(json)?;
         if conversation.schema_version != CONVERSATION_SCHEMA_VERSION {
-            return Err(norte::error::Error::SchemaVersion {
-                kind: "conversation".to_owned(),
-                found: conversation.schema_version,
-            });
+            return Err(norte::error::Error::InvalidInput(format!(
+                "unsupported conversation schema version {}",
+                conversation.schema_version
+            )));
         }
         Ok(conversation)
     }

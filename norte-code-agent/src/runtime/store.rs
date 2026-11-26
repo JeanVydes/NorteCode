@@ -12,7 +12,7 @@ use norte::id::{BlobId, NodeId, SessionId};
 #[async_trait::async_trait]
 pub trait Store: Send + Sync {
     /// Applies one commit. Returns the new session state on success and
-    /// [`norte::Error::StoreConflict`] when the version does not match.
+    /// [`crate::runtime::StoreError::Conflict`] when the version does not match.
     async fn commit(&self, commit: Commit) -> Result<Session>;
 
     /// Loads a session, including its head and phase.

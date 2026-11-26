@@ -125,26 +125,25 @@ impl Harness {
     ) -> ToolResultPart {
         // A name the registry would reject never ran either, and there is no
         // tool name to report: the result is all the model gets.
-        if let Ok(tool) = ToolName::new(call.name.clone()) {
-            let started = EngineEvent::ToolCallStarted {
-                session: session.id,
-                turn: session.turn,
-                call_id: call.call_id,
-                tool: tool.clone(),
-            };
-            self.observers.emit(&started);
-            let _ = sender.send(started).await;
-            let finished = EngineEvent::ToolCallFinished {
-                session: session.id,
-                turn: session.turn,
-                call_id: call.call_id,
-                tool,
-                is_error: true,
-                duration_ms: 0,
-            };
-            self.observers.emit(&finished);
-            let _ = sender.send(finished).await;
-        }
+        let tool = call.name.clone();
+        let started = EngineEvent::ToolCallStarted {
+            session: session.id,
+            turn: session.turn,
+            call_id: call.call_id,
+            tool: tool.clone(),
+        };
+        self.observers.emit(&started);
+        let _ = sender.send(started).await;
+        let finished = EngineEvent::ToolCallFinished {
+            session: session.id,
+            turn: session.turn,
+            call_id: call.call_id,
+            tool,
+            is_error: true,
+            duration_ms: 0,
+        };
+        self.observers.emit(&finished);
+        let _ = sender.send(finished).await;
         ToolResultPart::error(call.call_id, reason)
     }
 
@@ -179,13 +178,7 @@ impl Harness {
         results: &mut Vec<ToolResultPart>,
         cancellation: &CancellationToken,
     ) -> Result<()> {
-        let Ok(tool_name) = ToolName::new(call.name.clone()) else {
-            results.push(ToolResultPart::error(
-                call.call_id,
-                format!("invalid tool name: {}", call.name),
-            ));
-            return Ok(());
-        };
+        let tool_name = call.name.clone();
 
         let metadata = self.call_metadata(turn.session, call, &tool_name, &call.arguments);
         let result = execute_call(

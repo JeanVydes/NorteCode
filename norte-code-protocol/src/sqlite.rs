@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::costs::CostRecord;
-use crate::store::{Commit, Node, Session, Store};
+use crate::store::{Commit, Node, Session, Store, StoreError, StoreResult};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use norte::{BlobId, BlobStore, CallId, Error, NodeId, Result, SessionId};
@@ -772,6 +772,34 @@ impl SqliteStore {
         })
         .await
     }
+
+    async fn run_store<T, F>(&self, work: F) -> StoreResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> std::result::Result<T, Fault> + Send + 'static,
+    {
+        let connection = Arc::clone(&self.connection);
+        tokio::task::spawn_blocking(move || {
+            let guard = connection.lock().unwrap_or_else(PoisonError::into_inner);
+            work(&guard).map_err(StoreError::from)
+        })
+        .await
+        .map_err(|error| StoreError::Failure(format!("the database task failed: {error}")))?
+    }
+
+    async fn transact_store<T, F>(&self, work: F) -> StoreResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&rusqlite::Transaction<'_>) -> std::result::Result<T, Fault> + Send + 'static,
+    {
+        self.run_store(move |connection| {
+            let transaction = connection.unchecked_transaction().map_err(Fault::from)?;
+            let value = work(&transaction)?;
+            transaction.commit().map_err(Fault::from)?;
+            Ok(value)
+        })
+        .await
+    }
 }
 
 /// Adds a column to a table created by an older schema.
@@ -964,15 +992,35 @@ impl From<Fault> for Error {
                 session,
                 expected,
                 actual,
-            } => Error::StoreConflict {
+            } => Error::Other(format!(
+                "store conflict on session {session}: expected version {expected:?}, found {actual}"
+            )),
+            Fault::SessionNotFound(session) => {
+                Error::Other(format!("session not found: {session}"))
+            }
+            Fault::NodeNotFound(node) => Error::Other(format!("node not found: {node}")),
+            Fault::InvalidInput(message) => Error::InvalidInput(message),
+            Fault::Corrupt { what, reason } => Error::Other(format!("{what} is corrupt: {reason}")),
+        }
+    }
+}
+
+impl From<Fault> for StoreError {
+    fn from(fault: Fault) -> Self {
+        match fault {
+            Fault::Conflict {
+                session,
+                expected,
+                actual,
+            } => Self::Conflict {
                 session,
                 expected,
                 actual,
             },
-            Fault::SessionNotFound(session) => Error::SessionNotFound(session),
-            Fault::NodeNotFound(node) => Error::NodeNotFound(node),
-            Fault::InvalidInput(message) => Error::InvalidInput(message),
-            Fault::Corrupt { what, reason } => Error::Other(format!("{what} is corrupt: {reason}")),
+            Fault::SessionNotFound(session) => Self::SessionNotFound(session),
+            Fault::NodeNotFound(node) => Self::NodeNotFound(node),
+            Fault::InvalidInput(message) => Self::InvalidInput(message),
+            fault => Self::Failure(fault.to_string()),
         }
     }
 }
@@ -1012,10 +1060,10 @@ fn decode_session(text: &str) -> std::result::Result<Session, Fault> {
 
 #[async_trait]
 impl Store for SqliteStore {
-    async fn commit(&self, commit: Commit) -> Result<Session> {
-        commit.validate()?;
+    async fn commit(&self, commit: Commit) -> StoreResult<Session> {
+        commit.validate().map_err(StoreError::from)?;
         let session_id = commit.session_id;
-        self.transact(move |transaction| {
+        self.transact_store(move |transaction| {
             let existing: Option<(i64, String)> = transaction
                 .query_row(
                     "SELECT version, data FROM sessions WHERE id = ?1",
@@ -1092,9 +1140,9 @@ impl Store for SqliteStore {
         .await
     }
 
-    async fn load(&self, session: SessionId) -> Result<Session> {
+    async fn load(&self, session: SessionId) -> StoreResult<Session> {
         let data: Option<String> = self
-            .run(move |connection| {
+            .run_store(move |connection| {
                 connection
                     .query_row(
                         "SELECT data FROM sessions WHERE id = ?1",
@@ -1106,14 +1154,14 @@ impl Store for SqliteStore {
             })
             .await?;
         data.map_or_else(
-            || Err(Error::SessionNotFound(session)),
-            |data| decode_session(&data).map_err(Error::from),
+            || Err(StoreError::SessionNotFound(session)),
+            |data| decode_session(&data).map_err(StoreError::from),
         )
     }
 
-    async fn node(&self, id: NodeId) -> Result<Node> {
+    async fn node(&self, id: NodeId) -> StoreResult<Node> {
         let data: Option<String> = self
-            .run(move |connection| {
+            .run_store(move |connection| {
                 connection
                     .query_row(
                         "SELECT length(data), data FROM nodes WHERE id = ?1",
@@ -1131,14 +1179,14 @@ impl Store for SqliteStore {
             })
             .await?;
         data.map_or_else(
-            || Err(Error::NodeNotFound(id)),
-            |data| decode(&data, "node").map_err(Error::from),
+            || Err(StoreError::NodeNotFound(id)),
+            |data| decode(&data, "node").map_err(StoreError::from),
         )
     }
 
-    async fn ancestors(&self, id: NodeId) -> Result<Vec<NodeId>> {
+    async fn ancestors(&self, id: NodeId) -> StoreResult<Vec<NodeId>> {
         let ids: Vec<String> = self
-            .run(move |connection| {
+            .run_store(move |connection| {
                 let mut cursor = Some(id.to_string());
                 let mut chain = Vec::new();
                 while let Some(current) = cursor {
@@ -1163,13 +1211,13 @@ impl Store for SqliteStore {
             })
             .await?;
         ids.into_iter()
-            .map(|value| value.parse().map_err(|error: Error| error))
+            .map(|value| value.parse().map_err(StoreError::from))
             .collect()
     }
 
-    async fn children(&self, id: NodeId) -> Result<Vec<NodeId>> {
+    async fn children(&self, id: NodeId) -> StoreResult<Vec<NodeId>> {
         let ids: Vec<String> = self
-            .run(move |connection| {
+            .run_store(move |connection| {
                 let mut statement = connection
                     .prepare("SELECT id FROM nodes WHERE parent = ?1 ORDER BY seq")
                     .map_err(Fault::from)?;
@@ -1182,7 +1230,7 @@ impl Store for SqliteStore {
             })
             .await?;
         ids.into_iter()
-            .map(|value| value.parse().map_err(|error: Error| error))
+            .map(|value| value.parse().map_err(StoreError::from))
             .collect()
     }
 }

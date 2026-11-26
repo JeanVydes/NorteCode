@@ -12,7 +12,53 @@ use chrono::{DateTime, Utc};
 use norte::{Error, Message, NodeId, Result, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error as ThisError;
 use tokio::sync::RwLock;
+
+/// Result returned by the conversation store.
+pub type StoreResult<T> = std::result::Result<T, StoreError>;
+
+/// A typed failure while reading or committing conversation state.
+#[derive(Clone, Debug, ThisError, PartialEq, Eq)]
+pub enum StoreError {
+    /// A compare-and-swap commit lost a race.
+    #[error("store conflict on session {session}: expected version {expected:?}, found {actual}")]
+    Conflict {
+        /// Session being committed.
+        session: SessionId,
+        /// Version the commit expected, or `None` for a new session.
+        expected: Option<u64>,
+        /// Version currently stored.
+        actual: u64,
+    },
+    /// The requested session does not exist.
+    #[error("session not found: {0}")]
+    SessionNotFound(SessionId),
+    /// The requested conversation node does not exist.
+    #[error("node not found: {0}")]
+    NodeNotFound(NodeId),
+    /// A commit contains invalid data.
+    #[error("invalid store input: {0}")]
+    InvalidInput(String),
+    /// Storage failed for another reason.
+    #[error("store operation failed: {0}")]
+    Failure(String),
+}
+
+impl From<norte::Error> for StoreError {
+    fn from(error: norte::Error) -> Self {
+        match error {
+            norte::Error::InvalidInput(message) => Self::InvalidInput(message),
+            error => Self::Failure(error.to_string()),
+        }
+    }
+}
+
+impl From<StoreError> for norte::Error {
+    fn from(error: StoreError) -> Self {
+        Self::Other(error.to_string())
+    }
+}
 
 /// An immutable node in the conversation graph.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,12 +203,12 @@ impl Commit {
 /// Persistence port.
 #[async_trait]
 pub trait Store: Send + Sync {
-    async fn commit(&self, commit: Commit) -> Result<Session>;
-    async fn load(&self, session: SessionId) -> Result<Session>;
-    async fn node(&self, id: NodeId) -> Result<Node>;
-    async fn ancestors(&self, id: NodeId) -> Result<Vec<NodeId>>;
-    async fn children(&self, id: NodeId) -> Result<Vec<NodeId>>;
-    async fn history(&self, head: Option<NodeId>) -> Result<Vec<norte::Message>> {
+    async fn commit(&self, commit: Commit) -> StoreResult<Session>;
+    async fn load(&self, session: SessionId) -> StoreResult<Session>;
+    async fn node(&self, id: NodeId) -> StoreResult<Node>;
+    async fn ancestors(&self, id: NodeId) -> StoreResult<Vec<NodeId>>;
+    async fn children(&self, id: NodeId) -> StoreResult<Vec<NodeId>>;
+    async fn history(&self, head: Option<NodeId>) -> StoreResult<Vec<norte::Message>> {
         let Some(head) = head else {
             return Ok(Vec::new());
         };
@@ -200,15 +246,15 @@ impl InMemoryStore {
 
 #[async_trait]
 impl Store for InMemoryStore {
-    async fn commit(&self, commit: Commit) -> Result<Session> {
-        commit.validate()?;
+    async fn commit(&self, commit: Commit) -> StoreResult<Session> {
+        commit.validate().map_err(StoreError::from)?;
         let session_id = commit.session_id;
         let mut tables = self.tables.write().await;
 
         let mut session = match commit.expected_version {
             None => {
                 if let Some(existing) = tables.sessions.get(&session_id) {
-                    return Err(Error::StoreConflict {
+                    return Err(StoreError::Conflict {
                         session: session_id,
                         expected: None,
                         actual: existing.version,
@@ -223,9 +269,9 @@ impl Store for InMemoryStore {
                     .sessions
                     .get(&session_id)
                     .cloned()
-                    .ok_or(Error::SessionNotFound(session_id))?;
+                    .ok_or(StoreError::SessionNotFound(session_id))?;
                 if existing.version != expected {
-                    return Err(Error::StoreConflict {
+                    return Err(StoreError::Conflict {
                         session: session_id,
                         expected: Some(expected),
                         actual: existing.version,
@@ -237,7 +283,7 @@ impl Store for InMemoryStore {
 
         for node in &commit.nodes {
             if tables.nodes.contains_key(&node.id) {
-                return Err(Error::InvalidInput(format!(
+                return Err(StoreError::InvalidInput(format!(
                     "node {} already exists",
                     node.id
                 )));
@@ -258,30 +304,30 @@ impl Store for InMemoryStore {
         Ok(session)
     }
 
-    async fn load(&self, session: SessionId) -> Result<Session> {
+    async fn load(&self, session: SessionId) -> StoreResult<Session> {
         self.tables
             .read()
             .await
             .sessions
             .get(&session)
             .cloned()
-            .ok_or(Error::SessionNotFound(session))
+            .ok_or(StoreError::SessionNotFound(session))
     }
 
-    async fn node(&self, id: NodeId) -> Result<Node> {
+    async fn node(&self, id: NodeId) -> StoreResult<Node> {
         self.tables
             .read()
             .await
             .nodes
             .get(&id)
             .cloned()
-            .ok_or(Error::NodeNotFound(id))
+            .ok_or(StoreError::NodeNotFound(id))
     }
 
-    async fn ancestors(&self, id: NodeId) -> Result<Vec<NodeId>> {
+    async fn ancestors(&self, id: NodeId) -> StoreResult<Vec<NodeId>> {
         let tables = self.tables.read().await;
         if !tables.nodes.contains_key(&id) {
-            return Err(Error::NodeNotFound(id));
+            return Err(StoreError::NodeNotFound(id));
         }
         let mut chain = Vec::new();
         let mut cursor = Some(id);
@@ -293,7 +339,7 @@ impl Store for InMemoryStore {
         Ok(chain)
     }
 
-    async fn children(&self, id: NodeId) -> Result<Vec<NodeId>> {
+    async fn children(&self, id: NodeId) -> StoreResult<Vec<NodeId>> {
         Ok(self
             .tables
             .read()
