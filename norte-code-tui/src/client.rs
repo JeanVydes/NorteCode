@@ -72,6 +72,11 @@ pub(crate) enum ClientEvent {
     PluginListLoaded(Vec<norte_code_client::PluginSummary>),
     /// The requested plugin list could not be loaded.
     PluginListFailed(ClientError),
+    /// The inventory returned for a specific session.
+    Artifacts(
+        SessionKey,
+        Result<Vec<norte_code_wire::SessionArtifact>, String>,
+    ),
     PluginWidgets(
         crate::plugin_widgets::Scope,
         Vec<norte_code_wire::plugin_widgets::WidgetUpdate>,
@@ -207,6 +212,8 @@ pub(crate) enum UiCommand {
     RefreshViews,
     /// Fetch installed plugins for the plugin list overlay.
     RefreshPlugins,
+    /// Loads a session inventory.
+    FetchArtifacts(SessionKey),
     /// Refetch only the plans and jobs shown in the rail.
     RefreshRail,
     WatchPluginWidgets(Option<crate::plugin_widgets::Scope>),
@@ -354,6 +361,8 @@ enum BackgroundOp {
     Plugin(PluginOp),
     /// Fetch the current installed plugin list.
     RefreshPlugins,
+    /// Loads a session inventory.
+    FetchArtifacts(SessionKey),
     /// Run a plugin command away from the stream loop.
     Command {
         session: SessionKey,
@@ -380,6 +389,13 @@ fn spawn_host_op(kind: BackgroundOp, api: Arc<RestClient>, events: Sender<Client
         match kind {
             BackgroundOp::Plugin(op) => run_plugin_op(&api, op, &events).await,
             BackgroundOp::RefreshPlugins => refresh_plugins(&api, &events).await,
+            BackgroundOp::FetchArtifacts(session) => {
+                let result = api
+                    .session_artifacts(session.as_str())
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = events.send(ClientEvent::Artifacts(session, result)).await;
+            }
             BackgroundOp::Command {
                 session,
                 command,
@@ -907,8 +923,19 @@ async fn upload_attachment(
             .await;
         return None;
     }
+    let name = match &attachment.source {
+        AttachmentSource::Image(_) => Some("Clipboard image.png".to_owned()),
+        AttachmentSource::File(path) => path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+    };
     match api
-        .upload(target.as_str(), attachment.mime.as_str(), bytes)
+        .upload_with_options(
+            target.as_str(),
+            attachment.mime.as_str(),
+            bytes,
+            &norte_code_wire::UploadOptions { name },
+        )
         .await
     {
         Ok(receipt) => {
@@ -1437,6 +1464,13 @@ async fn apply_command(
             } else {
                 Box::pin(fetch_global_views(api, events)).await;
             }
+        }
+        UiCommand::FetchArtifacts(session) => {
+            spawn_host_op(
+                BackgroundOp::FetchArtifacts(session),
+                Arc::clone(api),
+                events.clone(),
+            );
         }
         UiCommand::RefreshPlugins => {
             spawn_host_op(

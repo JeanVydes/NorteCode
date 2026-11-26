@@ -1,6 +1,7 @@
 //! The view tree: header, rail, stream, composer, status strip, pages.
 
 mod app_frame;
+mod artifacts_overlay;
 #[path = "chart_renderer.rs"]
 mod chart_renderer;
 #[cfg(test)]
@@ -80,6 +81,7 @@ mod welcome;
 use norte_code_client::config::RetentionConfig;
 use terminalui::{Pane, Spacer};
 
+pub(crate) use artifacts_overlay::ArtifactsOverlay;
 pub(crate) use chat_layout::ChatLayout;
 pub(crate) use clear_data_overlay::{ClearAction, ClearDataOverlay};
 pub(crate) use command_dock::CommandDock;
@@ -189,17 +191,7 @@ pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionCon
         ),
     );
 
-    let root = node(
-        "root",
-        modal_pane::ModalPane::new(vec![
-            frame,
-            node("key_prompt", key_prompt::KeyPrompt::new()),
-            node("question_prompt", question_prompt::QuestionPrompt::new()),
-            node("plan_overlay", plan_overlay::PlanOverlay::default()),
-            node("host_overlay", host_overlay::HostOverlay::default()),
-            node("plugin_list_overlay", PluginListOverlay::default()),
-        ]),
-    );
+    let root = modal_root(frame);
 
     let screen = node(
         "screen",
@@ -290,7 +282,15 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     {
         overlay.sync_plugins(&model.plugins);
     }
-    let visible = if plugin_list_open {
+    let artifacts_open = tree
+        .find_mut::<ArtifactsOverlay>("artifacts_overlay")
+        .is_some_and(|overlay| {
+            overlay.sync_session(model.active.as_ref());
+            overlay.is_open()
+        });
+    let visible = if artifacts_open {
+        6
+    } else if plugin_list_open {
         5
     } else if plan_open {
         3
@@ -322,6 +322,7 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     }
     if overlay_changed {
         let focus = match visible {
+            6 => "artifacts_overlay",
             5 => "plugin_list_overlay",
             4 => "host_overlay",
             3 => "plan_overlay",
@@ -452,4 +453,19 @@ pub(crate) fn refresh_views(tree: &mut Tree, model: &UiModel) {
         page.set_sessions(model.sessions.clone());
     }
     update_config(tree, model);
+}
+
+fn modal_root(frame: terminalui::Node) -> terminalui::Node {
+    node(
+        "root",
+        modal_pane::ModalPane::new(vec![
+            frame,
+            node("key_prompt", key_prompt::KeyPrompt::new()),
+            node("question_prompt", question_prompt::QuestionPrompt::new()),
+            node("plan_overlay", plan_overlay::PlanOverlay::default()),
+            node("host_overlay", host_overlay::HostOverlay::default()),
+            node("plugin_list_overlay", PluginListOverlay::default()),
+            node("artifacts_overlay", ArtifactsOverlay::default()),
+        ]),
+    )
 }

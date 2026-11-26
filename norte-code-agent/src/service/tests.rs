@@ -8685,8 +8685,13 @@ impl norte::ToolMetadata for PluginMessageEcho {
 impl FnExecutor<PluginEchoArgs, norte::ToolOutput> for PluginMessageEcho {
     async fn call(&self, _args: PluginEchoArgs) -> norte::Result<norte::ToolOutput> {
         let draft = norte_code_plugin_api::UserMessageDraft::text("from plugin")?;
-        norte_code_plugin_api::HostEffects::user_message(draft)
-            .attach(norte::ToolOutput::json(serde_json::json!({"ok": true})))
+        let mut effects = norte_code_plugin_api::HostEffects::user_message(draft);
+        effects.artifacts.push(norte::MediaPart::new(
+            norte::MediaKind::Image,
+            norte::MediaSource::Inline(b"browser capture fixture".to_vec()),
+            norte::MimeType::new("image/png")?,
+        ));
+        effects.attach(norte::ToolOutput::json(serde_json::json!({"ok": true})))
     }
 }
 
@@ -8813,6 +8818,25 @@ async fn a_plugin_tool_effect_reaches_the_next_model_request() {
         .iter()
         .find_map(|event| event.session.clone())
         .expect("session");
+    let inventory = service.session_artifacts(&key).await.expect("artifacts");
+    assert_eq!(inventory.len(), 1);
+    let item = &inventory[0];
+    assert!(
+        matches!(&item.origin, norte_code_wire::ArtifactOrigin::Plugin { plugin_id, .. } if plugin_id.as_str() == "browser")
+    );
+    let (bytes, mime) = service
+        .session_artifact_bytes(&key, item.id.as_str())
+        .await
+        .expect("read artifact")
+        .expect("artifact");
+    assert_eq!(bytes, b"browser capture fixture");
+    assert_eq!(mime, "image/png");
+    assert!(
+        !serde_json::to_string(&requests[1].messages)
+            .expect("request JSON")
+            .contains("norte-code/plugin-artifact")
+    );
+
     let history = service
         .session_history_with_provenance(&key)
         .await

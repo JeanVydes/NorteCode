@@ -254,13 +254,13 @@ impl Service {
 
     /// Forgets the session and its row.
     pub(super) async fn delete(&self, key: &SessionKey) -> Result<(), ServiceError> {
+        let (id, _, _) = self.require_record(key)?;
         let parent = self
             .lock_sessions()
             .get(key)
             .and_then(|record| record.parent_client.clone());
-        if !self.lock_sessions().contains_key(key) {
-            return Err(ServiceError::UnknownSession(key.to_string()));
-        }
+        self.cancel_turn(key);
+        self.jobs.cancel_session(id);
         self.plans
             .remove_session_folder(key)
             .await

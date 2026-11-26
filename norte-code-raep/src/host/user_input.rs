@@ -549,6 +549,12 @@ impl NorteCodeRaepHost {
                         .name
                         .as_deref()
                         .or(part.alt.as_deref())
+                        .or_else(|| {
+                            upload
+                                .details
+                                .as_ref()
+                                .and_then(|details| details.name.as_deref())
+                        })
                         .unwrap_or(asset_id)
                         .to_owned();
                     if let Some(alt) = &part.alt {

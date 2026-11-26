@@ -27,11 +27,14 @@ impl PluginMessageProvenance {
     }
 
     pub(super) fn from_message(message: &Message) -> Option<Value> {
-        message.parts.iter().find_map(|part| match part {
+        Self::from_parts(&message.parts)
+            .and_then(|provenance| serde_json::to_value(provenance).ok())
+    }
+
+    pub(super) fn from_parts(parts: &[Part]) -> Option<Self> {
+        parts.iter().find_map(|part| match part {
             Part::Extension(extension) if extension.namespace == NAMESPACE => {
-                serde_json::from_value::<Self>(extension.data.clone())
-                    .ok()
-                    .and_then(|provenance| serde_json::to_value(provenance).ok())
+                serde_json::from_value(extension.data.clone()).ok()
             }
             _ => None,
         })

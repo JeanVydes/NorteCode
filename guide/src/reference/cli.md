@@ -148,6 +148,7 @@ as soon as it starts with `/`; anything else is a message.
 | `/telemetry` | Request ledger: this session, and every provider. |
 | `/menu`, `/back` | Every provider and its models, the session's own marked. |
 | `/plans` | List the session's saved plans. |
+| `/artifacts` | List the session's attachments, generated files, and plugin artifacts with their origin. |
 | `/plugins …` | Plugin commands, same as the subcommands above. |
 | `/delete` | Delete this session, with cost and telemetry, and leave. |
 | `/exit`, `/quit` | Leave the chat. |

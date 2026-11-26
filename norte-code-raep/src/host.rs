@@ -58,6 +58,7 @@ pub(crate) mod replay;
 mod replay_access;
 mod requests;
 mod service_events;
+mod session_artifacts;
 mod sessions;
 pub(crate) mod stores;
 mod turn_book;

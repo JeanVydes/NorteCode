@@ -1,4 +1,4 @@
-use norte::{Error, Result, ToolOutput};
+use norte::{Error, MediaPart, Result, ToolOutput};
 use serde_json::Value;
 
 use crate::user_message_draft::UserMessageDraft;
@@ -14,7 +14,11 @@ pub const HOST_EFFECTS_KEY: &str = "norte_code.host_effects";
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct HostEffects {
     /// User-role messages the plugin asks the host to add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_messages: Vec<UserMessageDraft>,
+    /// Files to publish in the current session. Each part carries inline bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<MediaPart>,
 }
 
 impl HostEffects {
@@ -23,13 +27,26 @@ impl HostEffects {
     pub fn user_message(draft: UserMessageDraft) -> Self {
         Self {
             user_messages: vec![draft],
+            artifacts: Vec::new(),
         }
     }
 
     /// Builds an envelope carrying several user messages.
     #[must_use]
     pub fn user_messages(user_messages: Vec<UserMessageDraft>) -> Self {
-        Self { user_messages }
+        Self {
+            user_messages,
+            artifacts: Vec::new(),
+        }
+    }
+
+    /// Builds an effect that publishes files for the client.
+    #[must_use]
+    pub fn artifacts(artifacts: Vec<MediaPart>) -> Self {
+        Self {
+            user_messages: Vec::new(),
+            artifacts,
+        }
     }
 
     /// Attaches the envelope to a tool result.

@@ -174,6 +174,7 @@ pub(super) struct RecordingFunction {
     messages: Arc<PluginMessages>,
     plugin_id: PluginId,
     policy: PluginMessagePolicy,
+    blobs: Arc<dyn norte::BlobStore>,
 }
 
 impl RecordingFunction {
@@ -183,6 +184,7 @@ impl RecordingFunction {
         messages: Arc<PluginMessages>,
         plugin_id: PluginId,
         policy: PluginMessagePolicy,
+        blobs: Arc<dyn norte::BlobStore>,
     ) -> Self {
         Self {
             inner,
@@ -190,6 +192,7 @@ impl RecordingFunction {
             messages,
             plugin_id,
             policy,
+            blobs,
         }
     }
 }
@@ -249,15 +252,30 @@ impl AnyFunction for RecordingFunction {
             Err(_) => None,
         };
         if let (Some(session), Some(call_id)) = (context.session, context.call_id)
-            && let Some(effects) = effects
+            && let Some(mut effects) = effects
         {
-            self.messages.enqueue(
-                session,
-                &self.plugin_id,
-                call_id,
-                vec![effects],
-                &self.policy,
-            );
+            if let Ok(output) = &mut result
+                && let Err(error) = crate::plugin_artifact::PluginArtifact::publish(
+                    output,
+                    std::mem::take(&mut effects.artifacts),
+                    &self.plugin_id,
+                    call_id,
+                    self.policy.config.max_bytes,
+                    self.blobs.as_ref(),
+                )
+                .await
+            {
+                tracing::warn!(plugin_id = %self.plugin_id, %call_id, %error, "could not publish plugin artifacts");
+            }
+            if !effects.user_messages.is_empty() {
+                self.messages.enqueue(
+                    session,
+                    &self.plugin_id,
+                    call_id,
+                    vec![effects],
+                    &self.policy,
+                );
+            }
         }
         if let Some(call_id) = context.call_id {
             let output = match &result {

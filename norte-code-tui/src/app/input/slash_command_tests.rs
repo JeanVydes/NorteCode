@@ -253,3 +253,16 @@ fn open_suggestions_are_newest_first_and_resolve_only_known_sessions() {
         Err(SlashCommandError::UnknownSession)
     );
 }
+
+#[test]
+fn artifacts_completes_and_takes_no_arguments() {
+    assert_eq!(completions("/artif", None, &[]), vec!["/artifacts"]);
+    assert_eq!(
+        parse("/artifacts", None, &[], &[], &[]),
+        Ok(SlashCommand::Artifacts)
+    );
+    assert_eq!(
+        parse("/artifacts extra", None, &[], &[], &[]),
+        Err(SlashCommandError::InvalidArguments)
+    );
+}

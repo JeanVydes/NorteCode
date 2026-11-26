@@ -330,6 +330,10 @@ pub trait SessionDirectory: Send + Sync {
     ///
     /// Propagates a database failure.
     async fn delete_session(&self, key: &str) -> Result<()>;
+    /// Reads a blob's byte count without loading the payload, when supported.
+    async fn blob_size(&self, _id: BlobId) -> Result<Option<u64>> {
+        Ok(None)
+    }
     /// Removes all session data, telemetry, artifacts and pending interactions.
     /// Configuration stored in the settings table is preserved.
     async fn clear_data(&self) -> Result<()>;
@@ -654,6 +658,9 @@ impl SessionDirectory for InMemoryDirectory {
     }
 }
 
+#[path = "sqlite_assets.rs"]
+mod assets;
+
 /// A `SQLite` store: Norte's graph and blobs, plus host tables.
 pub struct SqliteStore {
     connection: Arc<Mutex<Connection>>,
@@ -677,7 +684,9 @@ impl SqliteStore {
         {
             std::fs::create_dir_all(parent)?;
         }
-        Self::from_connection(Connection::open(path)?)
+        let store = Self::from_connection(Connection::open(path.as_ref())?)?;
+        assets::migrate(&store.lock(), &path.as_ref().with_extension("uploads.db"))?;
+        Ok(store)
     }
 
     /// An in-memory database, for tests and one-shot runs.
@@ -697,6 +706,8 @@ impl SqliteStore {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.execute_batch(SCHEMA)?;
+        connection.execute_batch(assets::SCHEMA)?;
+        connection.execute_batch(assets::MEDIA_VIEW)?;
         ensure_column(
             &connection,
             "questions",
@@ -1122,6 +1133,10 @@ impl Store for SqliteStore {
                         ],
                     )
                     .map_err(Fault::from)?;
+                transaction.execute(
+                    "INSERT INTO session_node_owners (session_id, node_id) VALUES (?1, ?2)",
+                    params![session_id.to_string(), node.id.to_string()],
+                ).map_err(Fault::from)?;
             }
             commit.apply(&mut session);
             transaction
@@ -1370,7 +1385,13 @@ impl SessionDirectory for SqliteStore {
 
     async fn save_session(&self, session: &StoredSession) -> Result<()> {
         let session = session.clone();
-        self.run(move |connection| {
+        self.transact(move |connection| {
+            if let Some(old) = session.compacted_from {
+                connection.execute(
+                    "INSERT OR IGNORE INTO session_compactions (session_id, previous_session_id) VALUES (?1, ?2)",
+                    params![session.north.to_string(), old.to_string()],
+                )?;
+            }
             let stats = encode(&session.stats, "session stats")?;
             let data = encode(&session, "stored session")?;
             connection
@@ -1401,77 +1422,28 @@ impl SessionDirectory for SqliteStore {
 
     async fn delete_session(&self, key: &str) -> Result<()> {
         let key = key.to_owned();
-        self.transact(move |transaction| {
-            // The row that names the Norte session: the key alone does not say
-            // which one it is, and everything else here is keyed by that id.
-            let north: Option<String> = transaction
+        self.run(move |connection| {
+            let transaction = rusqlite::Transaction::new_unchecked(
+                connection,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            assets::delete_session(&transaction, &key)?;
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn blob_size(&self, id: BlobId) -> Result<Option<u64>> {
+        self.run(move |connection| {
+            connection
                 .query_row(
-                    "SELECT north FROM logical_sessions WHERE key = ?1",
-                    params![key],
+                    "SELECT length(bytes) FROM blobs WHERE id = ?1",
+                    [id.to_string()],
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(Fault::from)?;
-            transaction
-                .execute("DELETE FROM logical_sessions WHERE key = ?1", params![key])
-                .map_err(Fault::from)?;
-            if let Some(north) = north {
-                // The conversation is the ancestor chain of the session's head,
-                // which is the only way the node tree is reachable: nodes carry
-                // no session of their own, a parent is the message before them.
-                // A session that was compacted has all of its nodes under the
-                // current head, so walking back from it takes the whole tree.
-                let head: Option<String> = transaction
-                    .query_row(
-                        "SELECT data FROM sessions WHERE id = ?1",
-                        params![north],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(Fault::from)?
-                    .and_then(|data| {
-                        decode::<serde_json::Value>(&data, "session")
-                            .ok()
-                            .and_then(|value| {
-                                value
-                                    .get("head")
-                                    .or_else(|| value.get("session").and_then(|s| s.get("head")))
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_owned)
-                            })
-                    });
-                if let Some(head) = head {
-                    transaction
-                        .execute(
-                            "WITH RECURSIVE chain(id, parent) AS (
-                                 SELECT id, parent FROM nodes WHERE id = ?1
-                                 UNION
-                                 SELECT n.id, n.parent FROM nodes n JOIN chain c ON n.id = c.parent
-                             )
-                             DELETE FROM nodes WHERE id IN (SELECT id FROM chain)",
-                            params![head],
-                        )
-                        .map_err(Fault::from)?;
-                }
-                // Every table that outlives a session keeps its own row, and a
-                // session deleted from one alone is a key that names nothing: a
-                // cost ledger, a telemetry row or an effect still pointing at a
-                // session the list no longer has is what made a delete look
-                // partial. `session` holds the id in some tables and the key in
-                // others, so both spellings are cleared for the same session.
-                for table in ["costs", "requests", "effects", "questions"] {
-                    transaction
-                        .execute(
-                            &format!("DELETE FROM {table} WHERE session IN (?1, ?2)"),
-                            params![key, north],
-                        )
-                        .map_err(Fault::from)?;
-                }
-                transaction
-                    .execute("DELETE FROM sessions WHERE id = ?1", params![north])
-                    .map_err(Fault::from)?;
-            }
-            Ok(())
+                .map_err(Fault::from)
         })
         .await
     }
@@ -1486,7 +1458,11 @@ impl SessionDirectory for SqliteStore {
                      DELETE FROM requests;
                      DELETE FROM logical_sessions;
                      DELETE FROM sessions;
+                     DELETE FROM session_compactions;
+                     DELETE FROM raep_session_owners;
                      DELETE FROM nodes;
+                     DELETE FROM raep_uploads;
+                     DELETE FROM raep_global_artifacts;
                      DELETE FROM blobs;",
                 )
                 .map_err(Fault::from)?;

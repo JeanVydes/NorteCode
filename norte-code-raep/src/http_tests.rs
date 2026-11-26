@@ -504,6 +504,8 @@ async fn session_uploads_are_authenticated_and_scoped() {
     assert_eq!(receipt["mime_type"], "audio/wav");
     assert_eq!(receipt["bytes"], 11);
 
+    assert_upload_inventory(&app, session_id).await;
+
     let wrong_owner = app
         .clone()
         .oneshot(
@@ -532,6 +534,58 @@ async fn session_uploads_are_authenticated_and_scoped() {
         .await
         .expect("upload response");
     assert_eq!(missing_session.status(), StatusCode::NOT_FOUND);
+}
+
+async fn assert_upload_inventory(app: &axum::Router, session_id: &str) {
+    let inventory = format!("/raep/v1/sessions/{session_id}/artifacts");
+    let fetch = |path: String, token: &str| {
+        app.clone().oneshot(
+            Request::builder()
+                .uri(path)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+    };
+    let list = fetch(inventory.clone(), "token-a")
+        .await
+        .expect("inventory response");
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list.into_body(), 4096)
+        .await
+        .expect("inventory body");
+    let artifacts: Vec<norte_code_wire::SessionArtifact> =
+        serde_json::from_slice(&body).expect("inventory");
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(
+        artifacts[0].origin,
+        norte_code_wire::ArtifactOrigin::UserUpload
+    );
+    let download = format!("{inventory}/{}", artifacts[0].id.as_str());
+    let bytes = fetch(download.clone(), "token-a")
+        .await
+        .expect("download response");
+    assert_eq!(bytes.status(), StatusCode::OK);
+    assert_eq!(
+        &axum::body::to_bytes(bytes.into_body(), 1024)
+            .await
+            .expect("download body")[..],
+        b"audio bytes"
+    );
+    assert_eq!(
+        fetch(inventory, "token-b")
+            .await
+            .expect("foreign inventory")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fetch(download, "token-b")
+            .await
+            .expect("foreign download")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]

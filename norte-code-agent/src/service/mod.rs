@@ -39,6 +39,7 @@ mod plugin_messages;
 mod prompt;
 mod questions;
 mod sandbox;
+mod session_artifacts;
 mod session_children;
 mod session_export;
 mod session_lifecycle;

@@ -125,6 +125,18 @@ pub enum Endpoint<'a> {
         /// The session id.
         id: &'a str,
     },
+    /// Lists the files associated with a session.
+    SessionArtifacts {
+        /// The session id.
+        id: &'a str,
+    },
+    /// Downloads one of a session's files.
+    SessionArtifact {
+        /// The session id.
+        session: &'a str,
+        /// The artifact id.
+        id: &'a norte_code_wire::ArtifactId,
+    },
     /// Uploads one artifact without a session.
     Artifacts,
     /// Downloads an artifact.
@@ -179,6 +191,8 @@ impl Endpoint<'_> {
             | Self::Session { .. }
             | Self::ChildSessions { .. }
             | Self::SessionEvents(_)
+            | Self::SessionArtifacts { .. }
+            | Self::SessionArtifact { .. }
             | Self::Artifact { .. }
             | Self::Export { .. } => Method::GET,
         }
@@ -225,6 +239,12 @@ impl Endpoint<'_> {
             Self::SessionUpload { id } => {
                 format!("/raep/v1/sessions/{}/uploads", encode(id))
             }
+            Self::SessionArtifacts { id } => format!("/raep/v1/sessions/{}/artifacts", encode(id)),
+            Self::SessionArtifact { session, id } => format!(
+                "/raep/v1/sessions/{}/artifacts/{}",
+                encode(session),
+                encode(id.as_str())
+            ),
             Self::Artifacts => "/raep/v1/artifacts".to_owned(),
             Self::Artifact { id } => format!("/raep/v1/artifacts/{}", encode(id)),
             Self::Export { id } => format!("/raep/v1/exports/{}", encode(id)),

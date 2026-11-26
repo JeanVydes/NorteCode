@@ -201,6 +201,7 @@ async fn upload_index_keeps_session_and_owner_boundaries() {
         sha256: "abc".to_owned(),
         expires_at: now_millis() + 60_000,
         referenced: false,
+        details: None,
     };
     index.insert(record.clone()).await.expect("insert");
     assert_eq!(index.get("upl_test").await.expect("get"), Some(record));
@@ -244,12 +245,10 @@ async fn generated_audio_output_is_durable_and_owner_scoped() {
             Arc::clone(&blobs) as Arc<dyn BlobStore>
         )))
         .with_upload_index(Arc::new(MemoryUploadIndex::default()));
-    host.state
-        .lock()
+    let session = host
+        .create_session("", None, None, "alice")
         .await
-        .session_owners
-        .insert("session-a".to_owned(), "alice".to_owned());
-
+        .expect("session");
     let media = norte_code_wire::MediaPart {
         kind: norte_code_wire::MediaKind::Audio,
         source: norte_code_wire::MediaSource::Inline(b"generated audio".to_vec()),
@@ -257,7 +256,7 @@ async fn generated_audio_output_is_durable_and_owner_scoped() {
         metadata: norte_code_wire::MediaMetadata::default(),
     };
     let events = host
-        .emit_media_output("session-a", 7, 0, &media)
+        .emit_media_output(&session, 7, 0, &media)
         .await
         .expect("emit media output");
 
@@ -274,13 +273,13 @@ async fn generated_audio_output_is_durable_and_owner_scoped() {
         .as_str()
         .expect("output id");
     let (bytes, mime_type) = host
-        .get_session_output_as("session-a", output_id, Some("alice"))
+        .get_session_output_as(&session, output_id, Some("alice"))
         .await
         .expect("fetch output");
     assert_eq!(bytes, b"generated audio");
     assert_eq!(mime_type, "audio/wav");
     assert!(
-        host.get_session_output_as("session-a", output_id, Some("bob"))
+        host.get_session_output_as(&session, output_id, Some("bob"))
             .await
             .is_err()
     );
@@ -318,11 +317,10 @@ async fn generated_output_http_download_supports_ranges_and_auth() {
         )))
         .with_upload_index(Arc::new(MemoryUploadIndex::default())),
     );
-    host.state
-        .lock()
+    let session = host
+        .create_session("", None, None, "alice")
         .await
-        .session_owners
-        .insert("session-a".to_owned(), "alice".to_owned());
+        .expect("session");
     let media = norte_code_wire::MediaPart {
         kind: norte_code_wire::MediaKind::Audio,
         source: norte_code_wire::MediaSource::Inline(b"generated audio".to_vec()),
@@ -330,7 +328,7 @@ async fn generated_output_http_download_supports_ranges_and_auth() {
         metadata: norte_code_wire::MediaMetadata::default(),
     };
     let events = host
-        .emit_media_output("session-a", 7, 0, &media)
+        .emit_media_output(&session, 7, 0, &media)
         .await
         .expect("emit media output");
     let output_id = events[1].payload["source"]["output_id"]
@@ -341,7 +339,7 @@ async fn generated_output_http_download_supports_ranges_and_auth() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/raep/v1/sessions/session-a/outputs/{output_id}"))
+                .uri(format!("/raep/v1/sessions/{session}/outputs/{output_id}"))
                 .header("authorization", "Bearer token-a")
                 .header("range", "bytes=0-7")
                 .body(Body::empty())
@@ -365,7 +363,7 @@ async fn generated_output_http_download_supports_ranges_and_auth() {
     let denied = app
         .oneshot(
             Request::builder()
-                .uri(format!("/raep/v1/sessions/session-a/outputs/{output_id}"))
+                .uri(format!("/raep/v1/sessions/{session}/outputs/{output_id}"))
                 .header("authorization", "Bearer token-b")
                 .body(Body::empty())
                 .expect("request"),

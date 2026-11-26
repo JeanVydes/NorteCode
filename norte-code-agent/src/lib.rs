@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+mod plugin_artifact;
 pub mod provider;
 pub mod runtime;
 pub mod service;

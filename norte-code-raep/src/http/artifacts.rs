@@ -46,6 +46,7 @@ pub(super) async fn upload_session_upload(
     State(host): State<Arc<NorteCodeRaepHost>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
+    axum::extract::Query(options): axum::extract::Query<norte_code_wire::UploadOptions>,
     body: Bytes,
 ) -> Response {
     let principal = match principal(&host, &headers) {
@@ -79,8 +80,9 @@ pub(super) async fn upload_session_upload(
         )
             .into_response();
     }
+    let name = options.name.filter(|name| valid_artifact_name(name));
     match host
-        .put_session_upload_as(&session_id, mime_type, &body, Some(&principal))
+        .put_named_session_upload(&session_id, mime_type, &body, Some(&principal), name)
         .await
     {
         Ok(receipt) => (StatusCode::CREATED, Json(receipt)).into_response(),
@@ -97,6 +99,14 @@ pub(super) async fn upload_session_upload(
         )
             .into_response(),
     }
+}
+
+fn valid_artifact_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= 255
+        && !name
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
 }
 
 pub(super) async fn download_session_output(
@@ -329,4 +339,50 @@ pub(crate) fn parse_byte_range(value: &str, total: usize) -> Result<Option<(usiz
         return Err(());
     }
     Ok(Some((start, end)))
+}
+
+pub(super) async fn list_session_artifacts(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(session): Path<String>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    match host.session_artifacts(&session, &principal).await {
+        Ok(Some(artifacts)) => Json(artifacts).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::warn!(%error, %session, "could not list session artifacts");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub(super) async fn download_session_artifact(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path((session, id)): Path<(String, String)>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    match host.session_artifact_bytes(&session, &id, &principal).await {
+        Ok(Some((bytes, mime))) => (
+            [
+                (axum::http::header::CONTENT_TYPE, mime.as_str()),
+                (axum::http::header::CONTENT_DISPOSITION, "attachment"),
+                (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::warn!(%error, %session, "could not read session artifact");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }

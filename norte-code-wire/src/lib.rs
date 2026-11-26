@@ -10,6 +10,7 @@
 //! sets the protocol is made of. The server's own machinery (store, config,
 //! catalog files) stays in `norte-code-protocol`.
 
+pub mod artifact;
 pub mod catalog;
 pub mod event;
 pub mod payload;
@@ -17,6 +18,7 @@ pub mod resource;
 pub mod types;
 pub mod wire;
 
+pub use artifact::*;
 pub use event::*;
 pub use payload::*;
 pub use resource::*;

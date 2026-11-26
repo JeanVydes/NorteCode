@@ -80,7 +80,7 @@ pub(super) struct HostState {
     pub(super) idempotency: HashMap<(String, FrameId), CachedRequest>,
     pub(super) idempotency_order: VecDeque<(String, FrameId)>,
     pub(super) session_owners: HashMap<String, String>,
-    pub(super) artifact_owners: HashMap<String, String>,
+    pub(super) artifact_owners: HashSet<(String, String)>,
     pub(super) exports: HashMap<String, StoredExport>,
     pub(super) imports: HashMap<String, StoredImport>,
     pub(super) session_agents: super::bounded_map::BoundedMap<String, String>,

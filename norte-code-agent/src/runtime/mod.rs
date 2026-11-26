@@ -349,6 +349,11 @@ impl Harness {
             .collect())
     }
 
+    pub(crate) fn with_store(mut self, store: Arc<dyn Store>) -> Self {
+        self.store = store;
+        self
+    }
+
     async fn commit(&self, commit: Commit, sender: &mpsc::Sender<EngineEvent>) -> Result<Session> {
         let session_id = commit.session_id;
         match self.store.commit(commit).await {

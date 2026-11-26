@@ -321,6 +321,15 @@ pub(in crate::app) fn drain_server_events(
                 }
                 changed = true;
             }
+            Ok(ClientEvent::Artifacts(session, result)) => {
+                if model.active.as_ref() == Some(&session)
+                    && let Some(overlay) =
+                        tree.find_mut::<ui::ArtifactsOverlay>("artifacts_overlay")
+                {
+                    overlay.finish(&session, result);
+                    changed = true;
+                }
+            }
             Ok(ClientEvent::PluginListLoaded(plugins)) => {
                 model.plugins.clone_from(&plugins);
                 if let Some(overlay) = tree.find_mut::<ui::PluginListOverlay>("plugin_list_overlay")

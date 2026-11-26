@@ -319,8 +319,9 @@ impl Service {
         }
         let summary_spec = Self::summary_spec(&spec);
         let book = self.budget_book(key).await?;
-        let summary_engine =
-            self.engine_with_budget(&summary_spec, Some(key), Some(book), None, None)?;
+        let summary_engine = self
+            .engine_with_budget(&summary_spec, Some(key), Some(book), None, None)?
+            .with_store(Arc::new(norte_code_protocol::store::InMemoryStore::new()));
         let scratch = summary_engine.create().await?;
         let mut request_messages = history.clone();
         request_messages.push(Message::user(SUMMARY_PROMPT));

@@ -214,9 +214,31 @@ impl RestClient {
         mime_type: &str,
         bytes: Vec<u8>,
     ) -> Result<norte_code_wire::UploadReceipt, ApiError> {
+        self.upload_with_options(
+            session,
+            mime_type,
+            bytes,
+            &norte_code_wire::UploadOptions::default(),
+        )
+        .await
+    }
+
+    /// Uploads one attachment with its display metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or a non-success status.
+    pub async fn upload_with_options(
+        &self,
+        session: &str,
+        mime_type: &str,
+        bytes: Vec<u8>,
+        options: &norte_code_wire::UploadOptions,
+    ) -> Result<norte_code_wire::UploadReceipt, ApiError> {
         let request = self
             .http
             .post(self.url(&Endpoint::SessionUpload { id: session }))
+            .query(options)
             .header(reqwest::header::CONTENT_TYPE, mime_type)
             .body(bytes);
         let response = self
@@ -225,6 +247,42 @@ impl RestClient {
             .await
             .map_err(|error| request_error(&error))?;
         decode(response).await
+    }
+
+    /// Lists the artifacts attached to a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or a non-success status.
+    pub async fn session_artifacts(
+        &self,
+        session: &str,
+    ) -> Result<Vec<norte_code_wire::SessionArtifact>, ApiError> {
+        self.execute(Endpoint::SessionArtifacts { id: session })
+            .await
+    }
+
+    /// Downloads the stored bytes of an artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or a non-success status.
+    pub async fn download_session_artifact(
+        &self,
+        session: &str,
+        id: &norte_code_wire::ArtifactId,
+    ) -> Result<Vec<u8>, ApiError> {
+        let response = self
+            .send(&Endpoint::SessionArtifact { session, id }, None)
+            .await?;
+        if !response.status().is_success() {
+            return Err(status_error(response).await);
+        }
+        response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| request_error(&error))
     }
 
     /// The absolute URL of a session's event stream.

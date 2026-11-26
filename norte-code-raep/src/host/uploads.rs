@@ -1,9 +1,9 @@
 //! Upload indexing: what the host keeps about an uploaded file.
 
 use async_trait::async_trait;
+use norte_code_wire::{ArtifactId, ArtifactOrigin, SessionArtifact};
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
@@ -44,12 +44,100 @@ pub struct UploadRecord {
     pub expires_at: i64,
     /// Whether a turn has referenced this upload.
     pub referenced: bool,
+    /// Producer information for the session inventory.
+    pub details: Option<ArtifactDetails>,
+}
+/// Descriptive information kept with an indexed artifact.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ArtifactDetails {
+    /// Where this reference came from.
+    pub origin: ArtifactOrigin,
+    /// The producer-supplied name.
+    pub name: Option<String>,
+    /// When the host accepted the bytes.
+    pub created_at: i64,
+}
+
+impl UploadRecord {
+    pub(super) fn summary(&self) -> SessionArtifact {
+        SessionArtifact {
+            id: ArtifactId::new(self.id.clone()),
+            origin: self.details.as_ref().map_or_else(
+                || {
+                    if self.id.starts_with("out_") {
+                        ArtifactOrigin::AssistantOutput {
+                            turn: None,
+                            part_index: None,
+                        }
+                    } else {
+                        ArtifactOrigin::UserUpload
+                    }
+                },
+                |details| details.origin.clone(),
+            ),
+            name: self
+                .details
+                .as_ref()
+                .and_then(|details| details.name.clone()),
+            created_at: self.details.as_ref().map(|details| details.created_at),
+            blob_id: self.blob_id.clone(),
+            mime_type: self.mime_type.clone(),
+            bytes: self.bytes,
+        }
+    }
+
+    pub(super) fn visible(&self, session: &str, owner: Option<&str>) -> bool {
+        self.session_id == session
+            && self.owner.as_deref() == owner
+            && (self.referenced || self.expires_at > now_millis())
+    }
 }
 /// Durable or in-memory index for session-scoped upload metadata.
 #[async_trait]
 pub trait UploadIndex: Send + Sync {
     /// Inserts a new upload record.
     async fn insert(&self, record: UploadRecord) -> Result<(), HostError>;
+
+    /// Writes the blob and its index entry.
+    async fn store(
+        &self,
+        artifact_store: &dyn ArtifactStore,
+        mut record: UploadRecord,
+        bytes: &[u8],
+    ) -> Result<(), HostError> {
+        record.blob_id = artifact_store.put(&record.mime_type, bytes).await?.id;
+        self.insert(record).await
+    }
+
+    /// Persists the principal bound to a session.
+    async fn claim_session(&self, _session: &str, _owner: &str) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    /// Atomically stores a public endpoint's blob and its authenticated owner when supported.
+    async fn store_global(
+        &self,
+        _mime: &str,
+        _bytes: &[u8],
+        _owner: &str,
+    ) -> Result<Option<ArtifactRef>, HostError> {
+        Ok(None)
+    }
+
+    /// Checks a durable ownership claim, when available.
+    async fn owns_global(&self, _id: &str, _owner: &str) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
+    /// Reads the accessible entries for a session.
+    async fn for_session(
+        &self,
+        session: &str,
+        owner: Option<&str>,
+    ) -> Result<Vec<UploadRecord>, HostError>;
+
+    /// Removes a session's entries from an index managed independently of its graph.
+    async fn delete_session(&self, session: &str) -> Result<(), HostError>;
 
     /// Looks up an upload by its opaque identifier.
     async fn get(&self, id: &str) -> Result<Option<UploadRecord>, HostError>;
@@ -74,6 +162,29 @@ pub struct MemoryUploadIndex {
 impl UploadIndex for MemoryUploadIndex {
     async fn insert(&self, record: UploadRecord) -> Result<(), HostError> {
         self.uploads.lock().await.insert(record.id.clone(), record);
+        Ok(())
+    }
+
+    async fn for_session(
+        &self,
+        session: &str,
+        owner: Option<&str>,
+    ) -> Result<Vec<UploadRecord>, HostError> {
+        Ok(self
+            .uploads
+            .lock()
+            .await
+            .values()
+            .filter(|record| record.visible(session, owner))
+            .cloned()
+            .collect())
+    }
+
+    async fn delete_session(&self, session: &str) -> Result<(), HostError> {
+        self.uploads
+            .lock()
+            .await
+            .retain(|_, record| record.session_id != session);
         Ok(())
     }
 
@@ -105,183 +216,6 @@ impl UploadIndex for MemoryUploadIndex {
         Ok(())
     }
 }
-/// SQLite-backed upload metadata that survives server restarts.
-pub struct SqliteUploadIndex {
-    path: PathBuf,
-}
-impl SqliteUploadIndex {
-    /// Opens or creates the upload metadata table.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when SQLite cannot open the database or create its
-    /// schema.
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self, HostError> {
-        let path = path.into();
-        let connection = rusqlite::Connection::open(&path)
-            .map_err(|error| HostError::Artifact(error.to_string()))?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|error| HostError::Artifact(error.to_string()))?;
-        connection
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS raep_uploads (
-                    upload_id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    owner TEXT,
-                    blob_id TEXT NOT NULL,
-                    mime_type TEXT NOT NULL,
-                    bytes INTEGER NOT NULL,
-                    sha256 TEXT NOT NULL,
-                    expires_at INTEGER NOT NULL,
-                    referenced INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX IF NOT EXISTS idx_raep_uploads_session
-                    ON raep_uploads(session_id, upload_id);",
-            )
-            .map_err(|error| HostError::Artifact(error.to_string()))?;
-        Ok(Self { path })
-    }
-}
-#[async_trait]
-impl UploadIndex for SqliteUploadIndex {
-    async fn insert(&self, record: UploadRecord) -> Result<(), HostError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let connection = rusqlite::Connection::open(path)
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            connection
-                .execute(
-                    "DELETE FROM raep_uploads WHERE referenced = 0 AND expires_at <= ?1",
-                    rusqlite::params![now_millis()],
-                )
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            connection
-                .execute(
-                    "INSERT INTO raep_uploads
-                     (upload_id, session_id, owner, blob_id, mime_type, bytes, sha256, expires_at, referenced)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    rusqlite::params![
-                        record.id,
-                        record.session_id,
-                        record.owner,
-                        record.blob_id,
-                        record.mime_type,
-                        i64::try_from(record.bytes)
-                            .map_err(|_| HostError::Artifact("upload is too large".to_owned()))?,
-                        record.sha256,
-                        record.expires_at,
-                        record.referenced,
-                    ],
-                )
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            Ok(())
-        })
-        .await
-        .map_err(|error| HostError::Artifact(error.to_string()))?
-    }
-
-    async fn get(&self, id: &str) -> Result<Option<UploadRecord>, HostError> {
-        let path = self.path.clone();
-        let id = id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            use rusqlite::OptionalExtension;
-            let connection = rusqlite::Connection::open(path)
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            connection
-                .query_row(
-                    "SELECT upload_id, session_id, owner, blob_id, mime_type, bytes, sha256, expires_at, referenced
-                     FROM raep_uploads WHERE upload_id = ?1",
-                    rusqlite::params![id],
-                    |row| {
-                        let bytes: i64 = row.get(5)?;
-                        let bytes = u64::try_from(bytes).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                5,
-                                rusqlite::types::Type::Integer,
-                                Box::new(error),
-                            )
-                        })?;
-                        Ok(UploadRecord {
-                            id: row.get(0)?,
-                            session_id: row.get(1)?,
-                            owner: row.get(2)?,
-                            blob_id: row.get(3)?,
-                            mime_type: row.get(4)?,
-                            bytes,
-                            sha256: row.get(6)?,
-                            expires_at: row.get(7)?,
-                            referenced: row.get(8)?,
-                        })
-                    },
-                )
-                .optional()
-                .map_err(|error| HostError::Artifact(error.to_string()))
-        })
-        .await
-        .map_err(|error| HostError::Artifact(error.to_string()))?
-    }
-
-    async fn mark_referenced(
-        &self,
-        session_id: &str,
-        owner: Option<&str>,
-        ids: &[String],
-    ) -> Result<(), HostError> {
-        let path = self.path.clone();
-        let session_id = session_id.to_owned();
-        let owner = owner.map(str::to_owned);
-        let ids = ids.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let mut connection = rusqlite::Connection::open(path)
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            let transaction = connection
-                .transaction()
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            for id in ids {
-                let updated = transaction
-                    .execute(
-                        "UPDATE raep_uploads SET referenced = 1
-                         WHERE upload_id = ?1 AND session_id = ?2 AND owner IS ?3
-                           AND (referenced = 1 OR expires_at > ?4)",
-                        rusqlite::params![id, session_id, owner, now_millis()],
-                    )
-                    .map_err(|error| HostError::Artifact(error.to_string()))?;
-                if updated != 1 {
-                    return Err(HostError::Artifact("upload not found".to_owned()));
-                }
-            }
-            transaction
-                .commit()
-                .map_err(|error| HostError::Artifact(error.to_string()))
-        })
-        .await
-        .map_err(|error| HostError::Artifact(error.to_string()))?
-    }
-
-    async fn clear(&self) -> Result<(), HostError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let connection = rusqlite::Connection::open(path)
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            connection
-                .execute("DELETE FROM raep_uploads", [])
-                .map_err(|error| HostError::Artifact(error.to_string()))?;
-            Ok(())
-        })
-        .await
-        .map_err(|error| HostError::Artifact(error.to_string()))?
-    }
-}
+#[path = "uploads_sqlite.rs"]
+mod sqlite;
+pub use sqlite::SqliteUploadIndex;

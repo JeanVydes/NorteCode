@@ -409,11 +409,15 @@ impl NorteCodeRaepHost {
         self.collect_service_events(session_id, events).await?;
         {
             let mut state = self.state.lock().await;
+            state.session_owners.remove(session_id);
             state.attached.remove(session_id);
             state.attachment_ids.remove(session_id);
             state.attachment_modes.remove(session_id);
         }
         self.remove_replay(session_id).await?;
+        if let Some(index) = &self.upload_index {
+            index.delete_session(session_id).await?;
+        }
         Ok(true)
     }
     /// Returns the session a previous `Idempotency-Key` created.
@@ -442,6 +446,12 @@ impl NorteCodeRaepHost {
             }
         }
     }
+    pub(crate) async fn restore_session_owners(
+        &self,
+        owners: std::collections::HashMap<String, String>,
+    ) {
+        self.state.lock().await.session_owners = owners;
+    }
     pub(crate) async fn claim_session(
         &self,
         session_id: &str,
@@ -454,6 +464,9 @@ impl NorteCodeRaepHost {
             )),
             Some(_) => Ok(()),
             None => {
+                if let Some(index) = &self.upload_index {
+                    index.claim_session(session_id, principal).await?;
+                }
                 state
                     .session_owners
                     .insert(session_id.to_owned(), principal.to_owned());

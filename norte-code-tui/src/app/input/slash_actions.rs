@@ -72,6 +72,7 @@ pub(super) fn execute_slash_command(
         }
         SlashCommand::SetQueueMode(_)
         | SlashCommand::ToggleDebug
+        | SlashCommand::Artifacts
         | SlashCommand::Plans
         | SlashCommand::ListPlugins
         | SlashCommand::Host
@@ -179,6 +180,12 @@ fn execute_local_slash_command(
         clear_command_draft(tree, input);
         return true;
     }
+    if matches!(command, SlashCommand::Artifacts) {
+        open_artifacts(tree, commands, model);
+        clear_command_draft(tree, input);
+        ui::sync_views(tree, model);
+        return true;
+    }
     if matches!(command, SlashCommand::Plans) {
         if let Some(overlay) = tree.find_mut::<ui::PlanOverlay>("plan_overlay") {
             overlay.open_list(model.plans.clone());
@@ -233,6 +240,29 @@ fn execute_local_slash_command(
     }
     clear_command_draft(tree, input);
     true
+}
+
+fn open_artifacts(
+    tree: &mut terminalui::Tree,
+    commands: Option<&tokio::sync::mpsc::Sender<UiCommand>>,
+    model: &UiModel,
+) {
+    let Some(overlay) = tree.find_mut::<ui::ArtifactsOverlay>("artifacts_overlay") else {
+        return;
+    };
+    overlay.open(model.active.clone());
+    if let Some(session) = &model.active {
+        let result = commands
+            .ok_or_else(|| "The service is disconnected.".to_owned())
+            .and_then(|commands| {
+                commands
+                    .try_send(UiCommand::FetchArtifacts(session.clone()))
+                    .map_err(|error| format!("Could not load artifacts: {error}"))
+            });
+        if let Err(error) = result {
+            overlay.finish(session, Err(error));
+        }
+    }
 }
 
 fn preference_feedback(

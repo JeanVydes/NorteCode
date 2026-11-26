@@ -415,6 +415,7 @@ impl Service {
                 Arc::clone(&self.plugin_messages),
                 plugin_id,
                 policy.clone(),
+                Arc::clone(&self.blobs),
             )))?;
         }
         Ok(tools)

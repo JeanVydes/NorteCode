@@ -77,6 +77,10 @@ impl Harness {
         sender: &mpsc::Sender<EngineEvent>,
         cancellation: &CancellationToken,
     ) -> Result<(Message, bool)> {
+        let mut history = history;
+        for message in &mut history {
+            crate::plugin_artifact::PluginArtifact::omit_from_request(message);
+        }
         let model_ref = self.model.reference().clone();
         let capabilities = self.model.capabilities();
         let prepared = tokio::select! {

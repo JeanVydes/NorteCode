@@ -21,7 +21,7 @@ pub use commands::AgentCommand;
 pub use host::replay::ReplayLog;
 pub use host::stores::{ArtifactRef, ArtifactStore, BlobArtifactStore};
 pub use host::uploads::{
-    MemoryUploadIndex, SqliteUploadIndex, UploadIndex, UploadReceipt, UploadRecord,
+    ArtifactDetails, MemoryUploadIndex, SqliteUploadIndex, UploadIndex, UploadReceipt, UploadRecord,
 };
 pub use host::{HostConfig, HostError, NorteCodeRaepHost};
 pub use http::router;
@@ -386,9 +386,8 @@ async fn prepare_router() -> Result<axum::Router, Box<dyn std::error::Error>> {
     host_config.replay_dir = database.with_extension("replay");
     host_config.legacy_pins_dir = Some(database.with_file_name("pins"));
     let replay_log = ReplayLog::new(host_config.replay_dir.clone(), host_config.replay_bytes);
-    let upload_index = Arc::new(SqliteUploadIndex::open(
-        database.with_extension("uploads.db"),
-    )?);
+    let upload_index = Arc::new(SqliteUploadIndex::open(&database));
+    let session_owners = upload_index.session_owners().await?;
     let artifact_store = Arc::new(BlobArtifactStore::new(blobs));
     let host = Arc::new(
         NorteCodeRaepHost::with_agents(services, host_config)?
@@ -397,6 +396,7 @@ async fn prepare_router() -> Result<axum::Router, Box<dyn std::error::Error>> {
             .with_artifact_store(artifact_store)
             .with_upload_index(upload_index),
     );
+    host.restore_session_owners(session_owners).await;
     // The service's delegation events are emitted on their own broadcast;
     // this drain is what turns them into the standard RAEP frames on the
     // parent's stream (RFC 8.2.10).

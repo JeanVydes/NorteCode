@@ -5,7 +5,7 @@ use norte_code_wire::{Reasoning, ReasoningInfo};
 
 use crate::ui_model::SendMode;
 
-pub(super) const COMMANDS: [CommandDefinition; 19] = [
+pub(super) const COMMANDS: [CommandDefinition; 20] = [
     CommandDefinition {
         name: CommandName::PluginManager,
         usage: "/plugin",
@@ -55,6 +55,10 @@ pub(super) const COMMANDS: [CommandDefinition; 19] = [
         usage: "/charts-dot-size",
     },
     CommandDefinition {
+        name: CommandName::Artifacts,
+        usage: "/artifacts",
+    },
+    CommandDefinition {
         name: CommandName::Plans,
         usage: "/plans",
     },
@@ -100,6 +104,7 @@ pub(super) enum CommandName {
     ChartDotSize,
 
     Plans,
+    Artifacts,
     Compact,
     New,
     Open,
@@ -124,6 +129,7 @@ impl CommandName {
             Self::ChartContrast => "/charts-contrast",
             Self::ChartDotSize => "/charts-dot-size",
             Self::Plans => "/plans",
+            Self::Artifacts => "/artifacts",
             Self::Compact => "/compact",
             Self::New => "/new",
             Self::Open => "/open",
@@ -190,6 +196,7 @@ pub(super) enum SlashCommand {
     ClearData,
     Preference(super::preferences::PreferenceCommand),
     Plans,
+    Artifacts,
     Compact,
     New(Option<crate::client::NewSessionModel>),
     Open(Box<norte_code_wire::SessionSummary>),
@@ -259,18 +266,20 @@ pub(super) fn parse(
             .map_err(|()| SlashCommandError::InvalidArguments),
         Some(CommandName::Host) if args.is_empty() => Ok(SlashCommand::Host),
         Some(CommandName::ClearData) if args.is_empty() => Ok(SlashCommand::ClearData),
+        Some(CommandName::Artifacts) if args.is_empty() => Ok(SlashCommand::Artifacts),
         Some(CommandName::Plans) if args.is_empty() => Ok(SlashCommand::Plans),
         Some(CommandName::Compact) if args.is_empty() => Ok(SlashCommand::Compact),
         Some(CommandName::Debug) if args.is_empty() => Ok(SlashCommand::ToggleDebug),
-        Some(CommandName::Compact | CommandName::Debug | CommandName::Plans) => {
-            Err(SlashCommandError::InvalidArguments)
-        }
         Some(CommandName::New) => parse_new(&args, models),
         Some(CommandName::Open) => parse_open(&args, sessions),
         Some(CommandName::Reasoning) => parse_reasoning(&args, reasoning),
         Some(CommandName::Queue) => parse_queue_mode(&args),
         Some(
             CommandName::Host
+            | CommandName::Compact
+            | CommandName::Debug
+            | CommandName::Plans
+            | CommandName::Artifacts
             | CommandName::ClearData
             | CommandName::Theme
             | CommandName::Diff

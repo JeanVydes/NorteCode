@@ -76,6 +76,12 @@ impl NorteCodeRaepHost {
                 self.config.max_artifact_bytes
             )));
         }
+        if let Some(principal) = principal
+            && let Some(index) = &self.upload_index
+            && let Some(reference) = index.store_global(mime_type, bytes, principal).await?
+        {
+            return Ok(reference);
+        }
         let reference = self
             .artifact_store
             .as_ref()
@@ -87,7 +93,7 @@ impl NorteCodeRaepHost {
                 .lock()
                 .await
                 .artifact_owners
-                .insert(reference.id.clone(), principal.to_owned());
+                .insert((reference.id.clone(), principal.to_owned()));
         }
         Ok(reference)
     }
@@ -103,6 +109,18 @@ impl NorteCodeRaepHost {
         mime_type: &str,
         bytes: &[u8],
         owner: Option<&str>,
+    ) -> Result<UploadReceipt, HostError> {
+        self.put_named_session_upload(session_id, mime_type, bytes, owner, None)
+            .await
+    }
+
+    pub(crate) async fn put_named_session_upload(
+        &self,
+        session_id: &str,
+        mime_type: &str,
+        bytes: &[u8],
+        owner: Option<&str>,
+        name: Option<String>,
     ) -> Result<UploadReceipt, HostError> {
         if self
             .session_summary(session_id, owner.unwrap_or_default())
@@ -138,22 +156,30 @@ impl NorteCodeRaepHost {
             .upload_index
             .as_ref()
             .ok_or_else(|| HostError::Artifact("upload metadata storage is disabled".to_owned()))?;
-        let artifact = artifact_store.put(mime_type, bytes).await?;
         let upload_id = format!("upl_{}", uuid::Uuid::new_v4());
         let expires_at = now_millis().saturating_add(60 * 60 * 1000);
         let sha256 = crate::bundle::sha256(bytes);
         upload_index
-            .insert(UploadRecord {
-                id: upload_id.clone(),
-                session_id: session_id.to_owned(),
-                owner: owner.map(str::to_owned),
-                blob_id: artifact.id,
-                mime_type: mime_type.to_owned(),
-                bytes: bytes.len() as u64,
-                sha256: sha256.clone(),
-                expires_at,
-                referenced: false,
-            })
+            .store(
+                artifact_store.as_ref(),
+                UploadRecord {
+                    id: upload_id.clone(),
+                    session_id: session_id.to_owned(),
+                    owner: owner.map(str::to_owned),
+                    blob_id: sha256.clone(),
+                    mime_type: mime_type.to_owned(),
+                    bytes: bytes.len() as u64,
+                    sha256: sha256.clone(),
+                    expires_at,
+                    referenced: false,
+                    details: Some(ArtifactDetails {
+                        origin: norte_code_wire::ArtifactOrigin::UserUpload,
+                        name,
+                        created_at: now_millis(),
+                    }),
+                },
+                bytes,
+            )
             .await?;
         Ok(UploadReceipt {
             upload_id,
@@ -200,6 +226,13 @@ impl NorteCodeRaepHost {
         output_id: &str,
         owner: Option<&str>,
     ) -> Result<(Vec<u8>, String), HostError> {
+        if self
+            .session_summary(session_id, owner.unwrap_or_default())
+            .await
+            .is_none()
+        {
+            return Err(HostError::Artifact("session not found".to_owned()));
+        }
         let record = self
             .resolve_session_asset(session_id, output_id, owner, true)
             .await?;
@@ -231,13 +264,20 @@ impl NorteCodeRaepHost {
         id: &str,
         principal: Option<&str>,
     ) -> Result<Vec<u8>, HostError> {
-        if let Some(principal) = principal
-            && let Some(owner) = self.state.lock().await.artifact_owners.get(id)
-            && owner != principal
-        {
-            return Err(HostError::Artifact(
-                "artifact belongs to another principal".to_owned(),
-            ));
+        if let Some(principal) = principal {
+            let in_memory = self
+                .state
+                .lock()
+                .await
+                .artifact_owners
+                .contains(&(id.to_owned(), principal.to_owned()));
+            let durable = match &self.upload_index {
+                Some(index) => index.owns_global(id, principal).await?,
+                None => false,
+            };
+            if !in_memory && !durable {
+                return Err(HostError::Artifact("artifact not found".to_owned()));
+            }
         }
         self.artifact_store
             .as_ref()
@@ -464,10 +504,8 @@ impl NorteCodeRaepHost {
             state
                 .session_agents
                 .insert(key.to_string(), mapped.to_owned());
-            state
-                .session_owners
-                .insert(key.to_string(), principal.to_owned());
         }
+        self.claim_session(key.as_str(), principal).await?;
         let id_map = BTreeMap::from([(source.session_id.clone(), key.to_string())]);
         Ok(payload(ImportCommittedPayload {
             session_id: key.as_str(),
@@ -551,7 +589,6 @@ impl NorteCodeRaepHost {
             .upload_index
             .as_ref()
             .ok_or_else(|| HostError::Artifact("output metadata storage is disabled".to_owned()))?;
-        let blob = artifact_store.put(&mime_type, &bytes).await?;
         let output_id = format!("out_{}", uuid::Uuid::new_v4());
         let sha256 = crate::bundle::sha256(&bytes);
         let owner = self
@@ -562,17 +599,34 @@ impl NorteCodeRaepHost {
             .get(session_id)
             .cloned();
         upload_index
-            .insert(UploadRecord {
-                id: output_id.clone(),
-                session_id: session_id.to_owned(),
-                owner,
-                blob_id: blob.id,
-                mime_type: mime_type.clone(),
-                bytes: bytes.len() as u64,
-                sha256: sha256.clone(),
-                expires_at: i64::MAX,
-                referenced: true,
-            })
+            .store(
+                artifact_store.as_ref(),
+                UploadRecord {
+                    id: output_id.clone(),
+                    session_id: session_id.to_owned(),
+                    owner,
+                    blob_id: sha256.clone(),
+                    mime_type: mime_type.clone(),
+                    bytes: bytes.len() as u64,
+                    sha256: sha256.clone(),
+                    expires_at: i64::MAX,
+                    referenced: true,
+                    details: Some(ArtifactDetails {
+                        origin: norte_code_wire::ArtifactOrigin::AssistantOutput {
+                            turn: Some(turn),
+                            part_index: Some(index),
+                        },
+                        name: media
+                            .metadata
+                            .extension
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        created_at: now_millis(),
+                    }),
+                },
+                &bytes,
+            )
             .await?;
         let name = media.metadata.extension.get("name").and_then(Value::as_str);
         let alt = media.metadata.extension.get("alt").and_then(Value::as_str);

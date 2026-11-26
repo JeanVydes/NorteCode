@@ -35,8 +35,9 @@ mod seen_frames;
 mod websocket;
 
 use artifacts::{
-    commit_import, delete_import, download_artifact, download_export, download_session_output,
-    import_bundle, upload_artifact, upload_session_upload,
+    commit_import, delete_import, download_artifact, download_export, download_session_artifact,
+    download_session_output, import_bundle, list_session_artifacts, upload_artifact,
+    upload_session_upload,
 };
 use resources::{
     agent_versions, clear_data, create_session, delete_session, list_agents, list_child_sessions,
@@ -131,6 +132,14 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
                 .layer(RequestBodyLimitLayer::new(limits.max_artifact_bytes)),
         )
         .route("/raep/v1/artifacts/{artifact_id}", get(download_artifact))
+        .route(
+            "/raep/v1/sessions/{session_id}/artifacts",
+            get(list_session_artifacts),
+        )
+        .route(
+            "/raep/v1/sessions/{session_id}/artifacts/{artifact_id}",
+            get(download_session_artifact),
+        )
         .route("/raep/v1/exports/{export_id}", get(download_export))
         .route(
             "/raep/v1/imports",

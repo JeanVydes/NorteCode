@@ -668,3 +668,84 @@ async fn a_session_stored_in_a_legacy_grant_envelope_still_loads() {
     assert_eq!(session.id, id);
     assert_eq!(session.version, 1);
 }
+
+#[tokio::test]
+async fn deleting_one_session_collects_its_exclusive_and_rewound_blobs() {
+    use norte::domain::part::Part;
+    use norte::{MediaKind, MediaPart, MediaSource, MimeType};
+
+    let store = SqliteStore::in_memory().expect("open");
+    let removed = SessionId::new();
+    let kept = SessionId::new();
+    let old = seed_conversation(&store, "removed", removed).await;
+    let live = seed_conversation(&store, "kept", kept).await;
+
+    let shared = store.put(b"shared").await.expect("store shared bytes");
+    let exclusive = store
+        .put(b"exclusive")
+        .await
+        .expect("store exclusive bytes");
+    let staged = store.put(b"staged").await.expect("store staged bytes");
+    for (session, parent, blobs) in [
+        (removed, old.last().copied(), vec![shared, exclusive]),
+        (kept, live.last().copied(), vec![shared]),
+    ] {
+        let message = Message::new(
+            norte::Role::User,
+            blobs
+                .into_iter()
+                .map(|blob| {
+                    Part::Media(MediaPart::new(
+                        MediaKind::Image,
+                        MediaSource::Blob(blob),
+                        MimeType::new("image/png").expect("mime"),
+                    ))
+                })
+                .collect(),
+        );
+        let node = Node::message(message, parent);
+        store
+            .commit(Commit {
+                session_id: session,
+                expected_version: Some(3),
+                head: Some(node.id),
+                nodes: vec![node],
+                phase: Phase::Idle,
+                turn: 3,
+                metadata: None,
+            })
+            .await
+            .expect("append media");
+    }
+    let rewound = Node::message(Message::user("rewound"), old.first().copied());
+    store
+        .commit(Commit {
+            session_id: removed,
+            expected_version: Some(4),
+            head: Some(rewound.id),
+            nodes: vec![rewound],
+            phase: Phase::Idle,
+            turn: 2,
+            metadata: None,
+        })
+        .await
+        .expect("rewind");
+    store.lock().execute(
+        "INSERT INTO raep_uploads (upload_id, session_id, blob_id, mime_type, bytes, sha256, expires_at)
+         VALUES ('upl_staged', 'removed', ?1, 'image/png', 6, ?1, 0)",
+        [staged.to_string()],
+    ).expect("save expired upload metadata");
+
+    store
+        .delete_session("removed")
+        .await
+        .expect("delete first session");
+    assert!(!store.contains(exclusive).await.expect("exclusive blob"));
+    assert!(!store.contains(staged).await.expect("staged blob"));
+    assert!(store.contains(shared).await.expect("shared blob"));
+    store
+        .delete_session("kept")
+        .await
+        .expect("delete second session");
+    assert!(!store.contains(shared).await.expect("unreferenced blob"));
+}

@@ -45,6 +45,10 @@ impl Service {
                 .map_err(|error| error.to_string())?
         };
         let mut part = MediaPart::new(kind_of_mime(&attachment.mime), MediaSource::Blob(id), mime);
+        part.metadata.extension.insert(
+            "name".to_owned(),
+            serde_json::Value::String(attachment.name.clone()),
+        );
         part.metadata.duration_ms = attachment.duration_ms;
         part.metadata.transcript.clone_from(&attachment.transcript);
         Ok(Some(part))
