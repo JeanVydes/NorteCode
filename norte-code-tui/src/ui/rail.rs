@@ -108,6 +108,10 @@ pub(crate) struct Rail {
     pub(crate) provider: Option<String>,
     /// The model id, when the host reported one.
     pub(crate) model: Option<String>,
+    /// The active reasoning mode shown for the model.
+    pub(crate) thinking: String,
+    /// What happens when a message is sent during a running turn.
+    pub(crate) queue_mode: String,
     /// The context the session last reported.
     context: ContextUsage,
     /// Plans of the attached session.
@@ -147,6 +151,8 @@ impl Rail {
             title: None,
             provider: None,
             model: None,
+            thinking: "auto".to_owned(),
+            queue_mode: "steer".to_owned(),
             context: ContextUsage::default(),
             plans: Vec::new(),
             todos: Vec::new(),
@@ -169,6 +175,11 @@ impl Rail {
     /// Replace the session shown; `None` clears the id line.
     pub(crate) fn set_session(&mut self, session: Option<String>) {
         self.session = session;
+    }
+
+    pub(crate) fn set_modes(&mut self, thinking: String, queue_mode: String) {
+        self.thinking = thinking;
+        self.queue_mode = queue_mode;
     }
 
     /// Replace the title shown; `None` falls back to the session id.
@@ -293,6 +304,7 @@ impl Rail {
                 Some(_) => 2,
                 None => 3,
             };
+            height += 3;
             height += 3;
             height += if matches!(self.attachment, SessionAttachmentState::Failed { .. }) {
                 4
@@ -609,6 +621,14 @@ impl View for Rail {
                 self.provider.as_deref(),
                 theme,
             );
+            y = paint_modes(
+                &mut scratch,
+                content,
+                y,
+                &self.thinking,
+                &self.queue_mode,
+                theme,
+            );
             y = paint_connection(&mut scratch, content, y, &self.attachment, cx, theme);
         }
         let viewport = RailViewport {
@@ -757,6 +777,36 @@ fn paint_model(
         buf.set_stringn(inner.x + 1, y, "—", 1, dim);
     }
     y + 2
+}
+
+fn paint_modes(
+    buf: &mut Buffer,
+    inner: Rect,
+    y: u16,
+    thinking: &str,
+    queue_mode: &str,
+    theme: &Theme,
+) -> u16 {
+    let usable = usize::from(inner.width.saturating_sub(2));
+    let muted = Style::default().fg(theme.muted).bg(theme.background);
+    let value = Style::default().fg(theme.accent).bg(theme.background);
+    for (offset, label, mode) in [(0, "thinking", thinking), (1, "queue", queue_mode)] {
+        let text = format!("{label}: {mode}");
+        let text: String = text.chars().take(usable).collect();
+        buf.set_stringn(inner.x + 1, y + offset, &text, text.chars().count(), muted);
+        if let Some(separator) = text.find(": ") {
+            let value_x = inner.x + 1 + u16::try_from(separator + 2).unwrap_or(u16::MAX);
+            let value_text = &text[separator + 2..];
+            buf.set_stringn(
+                value_x,
+                y + offset,
+                value_text,
+                value_text.chars().count(),
+                value,
+            );
+        }
+    }
+    y + 3
 }
 
 fn badge_row(inner: Rect, y: u16, label: &str) -> Rect {

@@ -286,14 +286,40 @@ fn allowed_origins() -> Vec<String> {
 ///
 /// Returns an error when the server cannot start.
 pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
+    let app = prepare_router().await?;
+    let bind = std::env::var("NORTE_CODE_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:8787".to_owned())
+        .parse::<SocketAddr>()?;
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let actual_bind = listener.local_addr()?;
+    if let Some(path) = std::env::var_os("NORTE_CODE_READY_FILE") {
+        std::fs::write(&path, actual_bind.to_string())?;
+    }
+    tracing::info!(address = %actual_bind, "RAEP server listening");
+    let server = axum::serve(listener, app);
+    tokio::select! {
+        result = server => result?,
+        () = shutdown_signal() => {}
+    }
+    Ok(())
+}
+
+async fn prepare_router() -> Result<axum::Router, Box<dyn std::error::Error>> {
     let workspace = std::env::current_dir()?;
+    tracing::info!(workspace = %workspace.display(), "starting RAEP service");
     let project = project_config_path(&workspace);
     ensure_user_service_config()?;
     let service_config = ServiceConfig::load(user_config_path().as_deref(), Some(&project))?;
     let agent = service_config.default_agent()?;
     let agent_id = agent.name.clone();
     let raep_limits = service_config.raep_limits;
+    tracing::info!(
+        default_agent = %agent_id,
+        agents = service_config.agents.len(),
+        "service configuration loaded"
+    );
     let (plugins, plugin_tools, plugin_host) = load_plugins_for_host();
+    tracing::info!(plugins = ?plugins.names(), "plugin loading complete");
     let offered = plugins.catalogue();
     let created = ensure_catalog_files()?;
     if created.providers || created.models {
@@ -301,13 +327,22 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
             "created the default server catalogue; edit providers.json and models.json if needed"
         );
     }
-    let mut catalog = load_catalog(offered.clone())?;
+    let mut catalog = load_catalog(offered.clone()).map_err(|error| {
+        tracing::error!(%error, "provider catalogue could not be loaded");
+        error
+    })?;
     for skipped in catalog.extend(offered.providers.clone(), offered.models.clone()) {
         eprintln!("warning: {skipped}");
     }
+    tracing::info!(
+        providers = catalog.providers().len(),
+        models = catalog.all_models().len(),
+        "provider catalogue loaded"
+    );
     let catalog = Arc::new(catalog);
     let database = database_path()?;
     let store = Arc::new(SqliteStore::open(&database)?);
+    tracing::info!(database = %database.display(), "session database opened");
     let session_store: Arc<dyn norte_code_protocol::Store> = store.clone();
     let blobs: Arc<dyn norte::BlobStore> = store.clone();
     let directory: Arc<dyn SessionDirectory> = store;
@@ -325,6 +360,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         raep_limits.max_queued_inputs,
     )
     .await?;
+    tracing::info!(agents = services.len(), "agent services initialized");
     plugin_host.install_plugins(Arc::new(plugins));
     migrate_pins_to_session_stats(&services, &database.with_file_name("pins")).await;
     plugin_host.install_services(services.clone(), agent_id.clone());
@@ -366,22 +402,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // this drain is what turns them into the standard RAEP frames on the
     // parent's stream (RFC 8.2.10).
     host.spawn_delegation_drain()?;
-    let app = router(host);
-    let bind = std::env::var("NORTE_CODE_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:8787".to_owned())
-        .parse::<SocketAddr>()?;
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    let actual_bind = listener.local_addr()?;
-    if let Some(path) = std::env::var_os("NORTE_CODE_READY_FILE") {
-        std::fs::write(&path, actual_bind.to_string())?;
-    }
-    eprintln!("norte-code RAEP server listening on {actual_bind}");
-    let server = axum::serve(listener, app);
-    tokio::select! {
-        result = server => result?,
-        () = shutdown_signal() => {}
-    }
-    Ok(())
+    Ok(router(host))
 }
 
 /// Stops the server when the process is asked to stop.

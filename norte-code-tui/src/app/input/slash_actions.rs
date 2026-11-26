@@ -12,7 +12,7 @@ use super::slash_command::{self, SlashCommand};
 pub(super) fn execute_slash_command(
     tree: &mut terminalui::Tree,
     commands: Option<&tokio::sync::mpsc::Sender<UiCommand>>,
-    model: &UiModel,
+    model: &mut UiModel,
     input: &str,
     parts: &[norte_code_wire::UserInputPart],
 ) {
@@ -34,12 +34,19 @@ pub(super) fn execute_slash_command(
             return;
         }
     };
-    if !parts.is_empty() || !model.pending_attachments.is_empty() {
+    if !parts.is_empty()
+        || tree
+            .find::<ui::Composer>("composer")
+            .is_some_and(|composer| !composer.pending_attachments().is_empty())
+    {
         notice(
             tree,
             "slash commands cannot include attachments; draft kept".into(),
             ui::Tone::Warn,
         );
+        return;
+    }
+    if execute_local_slash_command(tree, model, &command, input) {
         return;
     }
     let Some(commands) = commands else {
@@ -49,6 +56,10 @@ pub(super) fn execute_slash_command(
             ui::Tone::Warn,
         );
         return;
+    };
+    let reasoning_update = match &command {
+        SlashCommand::SetReasoning(reasoning) => Some(reasoning.clone()),
+        _ => None,
     };
     let queued = match command {
         SlashCommand::New(model) => commands.try_send(UiCommand::NewDraft { model }),
@@ -64,6 +75,9 @@ pub(super) fn execute_slash_command(
                 return;
             };
             commands.try_send(UiCommand::SetReasoning { session, reasoning })
+        }
+        SlashCommand::SetQueueMode(_) | SlashCommand::ToggleDebug => {
+            unreachable!("local slash commands are handled before a service command is queued")
         }
         SlashCommand::Plugin { command, arguments } => {
             let Some(session) = active_command_session(tree, model) else {
@@ -84,6 +98,44 @@ pub(super) fn execute_slash_command(
         );
         return;
     }
+    if reasoning_update.is_some() {
+        model.active_reasoning = reasoning_update;
+    }
+    clear_command_draft(tree, input);
+}
+
+fn execute_local_slash_command(
+    tree: &mut terminalui::Tree,
+    model: &mut UiModel,
+    command: &SlashCommand,
+    input: &str,
+) -> bool {
+    let message = match command {
+        SlashCommand::SetReasoning(reasoning) if model.active.is_none() => {
+            model.pending_new_session_reasoning = Some(reasoning.clone());
+            model.active_reasoning = None;
+            Some("reasoning set for the next session".to_owned())
+        }
+        SlashCommand::SetQueueMode(mode) => {
+            model.preferences.send_mode = *mode;
+            Some(format!("queue mode: {}", mode.label()))
+        }
+        SlashCommand::ToggleDebug => {
+            let mode = model.effective_debug_overlay().next();
+            model.debug_overlay_override = Some(mode);
+            Some(format!("debug overlay {}", mode.label()))
+        }
+        _ => None,
+    };
+    let Some(message) = message else {
+        return false;
+    };
+    notice(tree, message, ui::Tone::Neutral);
+    clear_command_draft(tree, input);
+    true
+}
+
+fn clear_command_draft(tree: &mut terminalui::Tree, input: &str) {
     if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
         composer.push_history(input);
         composer.clear();
@@ -141,47 +193,76 @@ pub(super) fn handle_slash_suggestion_key(
         return false;
     }
     sync_slash_suggestions(tree, model);
-    let navigates_choices = tree
-        .find::<ui::Composer>("composer")
-        .map(ui::Composer::expanded_text)
-        .is_some_and(|text| {
-            text == "/open" || text.starts_with("/open ") || text.starts_with("/new ")
-        });
-    let Some(suggestions) = tree.find_mut::<ui::CommandSuggestions>("command_suggestions") else {
-        return false;
-    };
-    if !suggestions.is_open() {
+    if !tree
+        .find::<ui::CommandSuggestions>("command_suggestions")
+        .is_some_and(ui::CommandSuggestions::is_open)
+    {
         return false;
     }
     match key.code {
-        KeyCode::Tab => {
-            let completion = suggestions.selected().map(str::to_owned);
-            if let Some(completion) = completion
-                && let Some(composer) = tree.find_mut::<ui::Composer>("composer")
-            {
+        KeyCode::Tab => complete_selected_suggestion(tree, model),
+        KeyCode::Enter => {
+            let current = tree
+                .find::<ui::Composer>("composer")
+                .map(ui::Composer::expanded_text)
+                .unwrap_or_default();
+            let completion = tree
+                .find::<ui::CommandSuggestions>("command_suggestions")
+                .and_then(ui::CommandSuggestions::selected)
+                .map(str::to_owned);
+            let Some(completion) = completion.filter(|completion| completion != &current) else {
+                return false;
+            };
+            if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
                 composer.complete_command(&completion);
             }
             sync_slash_suggestions(tree, model);
             true
         }
         KeyCode::Up => {
-            if !navigates_choices {
-                return false;
+            if let Some(suggestions) =
+                tree.find_mut::<ui::CommandSuggestions>("command_suggestions")
+            {
+                suggestions.move_selection(-1);
+                true
+            } else {
+                false
             }
-            suggestions.move_selection(-1);
-            true
         }
         KeyCode::Down => {
-            if !navigates_choices {
-                return false;
+            if let Some(suggestions) =
+                tree.find_mut::<ui::CommandSuggestions>("command_suggestions")
+            {
+                suggestions.move_selection(1);
+                true
+            } else {
+                false
             }
-            suggestions.move_selection(1);
-            true
         }
         KeyCode::Esc => {
-            suggestions.set(Vec::new());
-            true
+            if let Some(suggestions) =
+                tree.find_mut::<ui::CommandSuggestions>("command_suggestions")
+            {
+                suggestions.set(Vec::new());
+                true
+            } else {
+                false
+            }
         }
         _ => false,
     }
+}
+
+fn complete_selected_suggestion(tree: &mut terminalui::Tree, model: &UiModel) -> bool {
+    let completion = tree
+        .find::<ui::CommandSuggestions>("command_suggestions")
+        .and_then(ui::CommandSuggestions::selected)
+        .map(str::to_owned);
+    if let Some(completion) = completion
+        && let Some(composer) = tree.find_mut::<ui::Composer>("composer")
+    {
+        composer.complete_command(&completion);
+    }
+    sync_slash_suggestions(tree, model);
+    true
 }

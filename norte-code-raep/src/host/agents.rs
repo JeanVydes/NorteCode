@@ -29,22 +29,15 @@ impl NorteCodeRaepHost {
         ids.sort();
         ids.into_iter()
             .map(|id| {
-                let spec = self
-                    .services
-                    .get(&id)
-                    .and_then(|service| service.default_spec());
+                let service = &self.services[&id];
+                let (provider, model) = configured_agent_model_refs(service);
+                let spec = service.default_spec();
                 payload(norte_code_wire::AgentSummary {
                     id: id.clone(),
                     version: self.config.server_version.clone(),
                     capabilities: agent_capabilities(spec.as_ref(), self.uploads_enabled()),
-                    provider: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
-                        id: spec.provider.clone(),
-                        version: String::new(),
-                    }),
-                    model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
-                        id: spec.model.clone(),
-                        version: String::new(),
-                    }),
+                    provider,
+                    model,
                 })
             })
             .collect()
@@ -55,19 +48,14 @@ impl NorteCodeRaepHost {
     pub fn agent(&self, agent_id: &str) -> Option<Value> {
         let service = self.services.get(agent_id)?;
         let spec = service.default_spec();
+        let (provider, model) = configured_agent_model_refs(service);
         Some(payload(AgentDetail {
             agent: norte_code_wire::AgentSummary {
                 id: agent_id.to_owned(),
                 version: self.config.server_version.clone(),
                 capabilities: agent_capabilities(spec.as_ref(), self.uploads_enabled()),
-                provider: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
-                    id: spec.provider.clone(),
-                    version: String::new(),
-                }),
-                model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
-                    id: spec.model.clone(),
-                    version: String::new(),
-                }),
+                provider,
+                model,
             },
             latest_version: AgentVersion {
                 version: &self.config.server_version,

@@ -58,15 +58,14 @@ use norte_code_wire::{ContextUsage, SessionKey};
 /// against its own copy of this crate — so the version is a number both sides
 /// carry and the host refuses a plugin whose number is not its own.
 ///
-/// The number stays at 1 while the interface is unreleased. A change to
-/// [`Plugin`] still requires every plugin to be rebuilt against this host,
-/// even when the number does not move. Bump it once the interface is released
-/// and a layout change would make an old plugin unsafe to load.
+/// Every change to [`Plugin`] that can change its vtable requires every plugin
+/// to be rebuilt. The host rejects a different version before constructing the
+/// trait object, because calling an old vtable can crash the process.
 ///
 /// The check is an exact match on purpose: a plugin built against another
 /// version is a plugin whose method table this host cannot call safely, so it
 /// is refused with the two numbers named rather than loaded on a guess.
-pub const PLUGIN_ABI_VERSION: u32 = 1;
+pub const PLUGIN_ABI_VERSION: u32 = 2;
 
 /// The symbol a plugin exports to say which version it was built against.
 ///

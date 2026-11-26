@@ -53,4 +53,6 @@ pub(crate) enum ChipContent {
     Text(OriginalText),
     /// Bytes the host stored and that travel as a content part.
     Upload(UploadedArtifact),
+    #[serde(skip)]
+    Pending(crate::attachment::PreparedAttachment),
 }

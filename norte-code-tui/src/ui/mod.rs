@@ -7,6 +7,7 @@ mod chart_renderer;
 #[path = "chart_renderer_tests.rs"]
 mod chart_renderer_tests;
 mod chat_layout;
+pub(crate) mod chip_preview;
 mod command_palette;
 #[cfg(test)]
 #[path = "command_palette_tests.rs"]
@@ -50,7 +51,6 @@ mod rail;
 #[path = "rail_tests.rs"]
 mod rail_tests;
 mod scroll_drag;
-mod selector;
 mod session_detail;
 mod sessions_page;
 mod settings_layout;
@@ -86,7 +86,6 @@ pub(crate) use plan_overlay::{PLAN_REVIEW_PREFIX, PlanOverlay, PlanReviewAction}
 pub(crate) use plugins_page::PluginsAction;
 pub(crate) use question_prompt::QuestionPrompt;
 pub(crate) use rail::{Rail, RailPosition};
-pub(crate) use selector::Selector;
 pub(crate) use sessions_page::{SessionsAction, SessionsPage};
 pub(crate) use settings_page::SettingsPage;
 pub(crate) use telemetry_page::TelemetryPage;
@@ -101,7 +100,7 @@ use terminalui::components::statusbar::{StatusBar, StatusBarStyle};
 
 use self::copy::{READY, ShortcutHint};
 
-/// The chat-only bottom strip: queue, reasoning, hints and connection chip.
+/// The chat-only bottom strip: queue mode, hints and connection chip.
 fn status_bar_style(theme: &terminalui::Theme) -> StatusBarStyle {
     StatusBarStyle {
         background: Some(theme.secondary),
@@ -109,34 +108,10 @@ fn status_bar_style(theme: &terminalui::Theme) -> StatusBarStyle {
     }
 }
 
-fn status_bar(model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
+fn status_bar(_model: &UiModel, theme: &terminalui::Theme) -> terminalui::Node {
     node(
         "status",
         StatusBar::new()
-            .left(vec![
-                node(
-                    "queue",
-                    selector::Selector::new(
-                        "queue",
-                        crate::ui_model::SendMode::ALL
-                            .iter()
-                            .map(|mode| mode.label())
-                            .collect(),
-                        model.preferences.send_mode.index(),
-                    ),
-                ),
-                node(
-                    "reasoning",
-                    selector::Selector::new(
-                        "reasoning",
-                        crate::ui_model::ReasoningLevel::ALL
-                            .iter()
-                            .map(|level| level.label())
-                            .collect(),
-                        model.preferences.reasoning.index(),
-                    ),
-                ),
-            ])
             .right(vec![
                 node("hint", ShortcutHint::chat(theme)),
                 node(
@@ -340,12 +315,9 @@ fn update_models(tree: &mut Tree, model: &UiModel) {
             );
         }
     }
-    let active = model.active_model.as_ref().map(|agent| {
-        (
-            model.active_provider.clone().unwrap_or_default(),
-            agent.id.clone(),
-        )
-    });
+    let active = model
+        .effective_model_selection()
+        .map(|(provider, model)| (provider.to_owned(), model.to_owned()));
     if let Some(page) = tree.find_mut::<models_page::ModelsPage>("models") {
         page.set_data(ModelsData {
             models: model.models.clone(),

@@ -12,9 +12,11 @@ impl Service {
     /// left behind.
     pub(super) async fn load_sessions(&self) -> Result<(), ServiceError> {
         let stored = self.directory.sessions().await?;
+        let stored_count = stored.len();
         let catalog = self.catalog();
         let mut records = Vec::with_capacity(stored.len());
         let mut repaired = Vec::new();
+        let mut skipped_unavailable_models = 0usize;
         for entry in stored {
             let key = SessionKey::new(entry.key.clone());
             self.plans
@@ -34,7 +36,8 @@ impl Service {
                 ) {
                     Ok(spec) => spec,
                     Err(error) => {
-                        tracing::warn!(
+                        skipped_unavailable_models += 1;
+                        tracing::trace!(
                             session = %entry.key,
                             provider = %entry.provider,
                             model = %entry.model,
@@ -72,6 +75,13 @@ impl Service {
             for (key, record) in records {
                 sessions.insert(key, record);
             }
+        }
+        if skipped_unavailable_models > 0 {
+            tracing::warn!(
+                skipped = skipped_unavailable_models,
+                total = stored_count,
+                "stored sessions were skipped because their models are unavailable"
+            );
         }
         for key in &repaired {
             self.persist(key).await?;

@@ -20,6 +20,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 pub(crate) struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     active: bool,
+    pub(crate) graphics: Option<crate::ui::chip_preview::KittyPlacement>,
 }
 
 /// Set by the signal watcher; the run loop polls it to leave cleanly.
@@ -74,7 +75,12 @@ impl TerminalSession {
             let _ = disable_raw_mode();
             return Err(error);
         }
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            crossterm::event::EnableBracketedPaste
+        ) {
             restore_terminal();
             return Err(error);
         }
@@ -88,6 +94,10 @@ impl TerminalSession {
         Ok(Self {
             terminal,
             active: true,
+            graphics: (std::env::var("TERM").as_deref() == Ok("xterm-kitty")
+                && std::env::var_os("ZELLIJ").is_none()
+                && std::env::var_os("TMUX").is_none())
+            .then(Default::default),
         })
     }
 
@@ -124,6 +134,7 @@ pub(crate) fn restore_terminal() {
         out,
         crossterm::style::ResetColor,
         crossterm::cursor::Show,
+        crossterm::event::DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen,
         PopKeyboardEnhancementFlags,

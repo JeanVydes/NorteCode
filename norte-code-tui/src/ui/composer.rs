@@ -94,6 +94,8 @@ impl History {
 /// The composed composer box; the tree knows it as one node.
 #[derive(Serialize)]
 pub(crate) struct Composer {
+    #[serde(skip)]
+    pub(super) preview: super::chip_preview::Preview,
     input: Input,
     draft: Draft,
     history: History,
@@ -134,6 +136,7 @@ impl Composer {
     /// Creates a composer reading from the given theme and clipboard.
     pub(crate) fn new(theme: &Theme, clipboard: Arc<dyn Clipboard>) -> Self {
         Self {
+            preview: super::chip_preview::Preview::default(),
             input: Input::new()
                 .multiline(true)
                 .with_placeholder(crate::ui::copy::COMPOSER_PLACEHOLDER)
@@ -186,6 +189,17 @@ impl Composer {
         self.draft.wire_parts()
     }
 
+    pub(crate) fn pending_attachments(&self) -> Vec<PreparedAttachment> {
+        self.draft.pending_attachments()
+    }
+
+    pub(crate) fn insert_pending(&mut self, attachment: PreparedAttachment) {
+        let thumbnail = super::chip_preview::Thumbnail::from_attachment(&attachment);
+        let position = self.draft.insert_pending(attachment);
+        self.remember_thumbnail(position, thumbnail);
+        self.apply_draft(position, None);
+    }
+
     /// Requests the app has not handled yet.
     pub(crate) fn take_actions(&mut self) -> Vec<ComposerAction> {
         std::mem::take(&mut self.actions)
@@ -194,12 +208,33 @@ impl Composer {
     /// Add the chip for an upload the host confirmed.
     pub(crate) fn insert_upload(
         &mut self,
-        cursor: usize,
-        kind: AttachmentKind,
+        attachment: &PreparedAttachment,
         receipt: UploadReceipt,
     ) {
-        let position = self.draft.insert_upload(cursor, kind, receipt);
+        let position = self
+            .draft
+            .insert_upload(attachment.cursor, attachment.kind, receipt);
+        self.remember_thumbnail(
+            position,
+            super::chip_preview::Thumbnail::from_attachment(attachment),
+        );
         self.apply_draft(position, None);
+    }
+
+    fn remember_thumbnail(&mut self, end: usize, image: Option<super::chip_preview::Thumbnail>) {
+        if let Some(image) = image
+            && let Some(span) = self.draft.spans().iter().find(|span| span.end == end)
+        {
+            self.preview.images.insert(span.id, image);
+        }
+    }
+
+    pub(crate) fn take_native_preview(&mut self) -> Option<(ratatui::layout::Rect, Arc<Vec<u8>>)> {
+        self.preview.native.take()
+    }
+
+    pub(crate) fn hover(&mut self, x: u16, y: u16) {
+        self.preview.pointer = Some((x, y));
     }
 
     /// Replace the whole draft with recalled or restored text.
@@ -562,7 +597,7 @@ impl View for Composer {
 
 impl Composer {
     fn paint_chips(
-        &self,
+        &mut self,
         area: ratatui::layout::Rect,
         buf: &mut ratatui::buffer::Buffer,
         theme: &Theme,
@@ -571,6 +606,11 @@ impl Composer {
         use ratatui::style::{Color, Modifier};
         let width = usize::from(area.width.saturating_sub(4)).max(1);
         let height = usize::from(area.height.saturating_sub(2));
+        self.preview
+            .images
+            .retain(|id, _| self.draft.chip(*id).is_some());
+        self.preview.native = None;
+        let mut hovered = None;
         let mut row = 0usize;
         let mut col = 0usize;
         for (index, ch) in self.draft.text().chars().enumerate() {
@@ -585,7 +625,6 @@ impl Composer {
             }
             if row >= self.input.state.scroll
                 && row < self.input.state.scroll + height
-                && index != self.input.state.cursor
                 && !self
                     .input
                     .selection()
@@ -611,16 +650,27 @@ impl Composer {
                 let y = area.y.saturating_add(1).saturating_add(
                     u16::try_from(row - self.input.state.scroll).unwrap_or(u16::MAX),
                 );
-                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
+                if self.preview.pointer == Some((x, y)) {
+                    hovered = Some(span.id);
+                }
+                if index != self.input.state.cursor
+                    && let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y))
+                {
                     cell.set_style(
                         Style::default()
-                            .fg(color)
-                            .bg(theme.secondary)
+                            .fg(theme.background)
+                            .bg(color)
                             .add_modifier(Modifier::BOLD),
                     );
                 }
             }
             col += 1;
+        }
+        if let Some(id) = hovered
+            && let Some(chip) = self.draft.chip(id)
+        {
+            self.preview
+                .paint(id, &chip.expanded_text(), area, buf, theme);
         }
     }
 }

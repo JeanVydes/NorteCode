@@ -19,7 +19,7 @@ fn rail_text(usage: ContextUsage) -> String {
     let mut buf = Buffer::empty(area);
     tree.render(area, &mut buf, &theme);
     let mut out = String::new();
-    for y in 1..19 {
+    for y in 1..30 {
         for x in 0..28 {
             out.push_str(buf[(x, y)].symbol());
         }
@@ -63,6 +63,25 @@ fn the_rail_shows_the_session_title_instead_of_its_id() {
     let text = painted_text(&buf, area);
     assert!(text.contains("Login redirect fix"), "{text}");
     assert!(!text.contains("session-123"), "{text}");
+}
+
+#[test]
+fn the_rail_shows_the_active_thinking_and_queue_modes() {
+    let model = UiModel::detached();
+    let theme = model.preferences.catalog.theme(&model.preferences.theme);
+    let mut tree = build_tree(&model);
+    tree.find_mut::<Rail>("rail")
+        .expect("rail in tree")
+        .set_modes("xhigh".to_owned(), "interrupt".to_owned());
+    let area = Rect::new(0, 0, 100, 40);
+    let mut buf = Buffer::empty(area);
+    tree.render(area, &mut buf, &theme);
+
+    let text = painted_text(&buf, area);
+    assert!(text.contains("thinking"), "{text}");
+    assert!(text.contains("xhigh"), "{text}");
+    assert!(text.contains("queue"), "{text}");
+    assert!(text.contains("interrupt"), "{text}");
 }
 
 #[test]

@@ -31,6 +31,8 @@ pub(crate) enum ClientEvent {
     Attached {
         /// The session the interface is now attached to.
         session: norte_code_wire::SessionSummary,
+        /// Keep the optimistic first message while the new session attaches.
+        preserve_transcript: bool,
     },
     /// The service is reachable, but no session has been created yet.
     Ready,
@@ -160,6 +162,8 @@ pub(crate) enum UiCommand {
         queue_mode: String,
         /// Model to apply if this send creates the first session.
         new_session_model: Option<NewSessionModel>,
+        /// Reasoning to apply if this send creates the first session.
+        new_session_reasoning: Option<norte_code_wire::Reasoning>,
     },
     /// Store an attachment's bytes before it can be sent.
     Upload {
@@ -717,11 +721,11 @@ async fn connection(
         match outcome {
             StreamOutcome::Retry => break,
             StreamOutcome::Switch(summary) => {
-                active_session = Some(attach_shared(&client, &events, summary).await);
+                active_session = Some(attach_shared(&client, &events, summary, false).await);
                 let _ = session_tx.send(active_session.clone());
             }
             StreamOutcome::SwitchWithMessage(summary, message) => {
-                active_session = Some(attach_shared(&client, &events, summary).await);
+                active_session = Some(attach_shared(&client, &events, summary, true).await);
                 pending = Some(message);
                 let _ = session_tx.send(active_session.clone());
             }
@@ -971,10 +975,14 @@ async fn attach_shared(
     client: &Arc<RemoteClient>,
     events: &Sender<ClientEvent>,
     summary: Box<norte_code_wire::SessionSummary>,
+    preserve_transcript: bool,
 ) -> SessionKey {
     let session = SessionKey::new(summary.session_id.clone());
     let _ = events
-        .send(ClientEvent::Attached { session: *summary })
+        .send(ClientEvent::Attached {
+            session: *summary,
+            preserve_transcript,
+        })
         .await;
     if let Ok(sessions) = client.list_sessions().await {
         let _ = events.send(ClientEvent::Sessions(sessions)).await;
@@ -1020,6 +1028,47 @@ struct PendingMessage {
     parts: Vec<UserInputPart>,
     attachments: Vec<PreparedAttachment>,
     queue_mode: String,
+    reasoning: Option<norte_code_wire::Reasoning>,
+}
+
+async fn send_pending_message(
+    api: &Arc<RestClient>,
+    events: &Sender<ClientEvent>,
+    session: &SessionKey,
+    message: PendingMessage,
+) {
+    if let Some(reasoning) = message.reasoning
+        && let Err(error) = api
+            .set_reasoning(
+                session.as_str(),
+                norte_code_wire::ReasoningScope::Session,
+                reasoning,
+            )
+            .await
+    {
+        let _ = events
+            .send(ClientEvent::SendFailed {
+                reason: ClientError::set_reasoning(error),
+            })
+            .await;
+    }
+    let mut parts = message.parts;
+    for attachment in message.attachments {
+        let kind = attachment.kind.part_kind();
+        let mime = attachment.mime.to_string();
+        if let Some(receipt) = upload_attachment(api, events, session, attachment, false).await {
+            parts.push(UserInputPart::upload(kind, receipt.upload_id, mime));
+        }
+    }
+    send_prompt(
+        api,
+        events,
+        session,
+        message.text,
+        parts,
+        message.queue_mode,
+    )
+    .await;
 }
 
 /// Owns the session's event stream; driven by both the stream and commands.
@@ -1052,31 +1101,16 @@ async fn stream_loop(
                     let _ = events.send(ClientEvent::Reconnected).await;
                 }
                 if !primed {
-                    // The host only honours these once the stream is attached.
-                    Box::pin(fetch_history(api, session.as_str(), events)).await;
+                    // A new session has no history; keep its optimistic first
+                    // message visible while the stream is being initialized.
+                    if pending.is_none() {
+                        Box::pin(fetch_history(api, session.as_str(), events)).await;
+                    }
                     Box::pin(fetch_views(api, session.as_str(), events)).await;
                     primed = true;
                 }
                 if let Some(message) = pending.take() {
-                    let mut parts = message.parts;
-                    for attachment in message.attachments {
-                        let kind = attachment.kind.part_kind();
-                        let mime = attachment.mime.to_string();
-                        if let Some(receipt) =
-                            upload_attachment(api, events, session, attachment, false).await
-                        {
-                            parts.push(UserInputPart::upload(kind, receipt.upload_id, mime));
-                        }
-                    }
-                    send_prompt(
-                        api,
-                        events,
-                        session,
-                        message.text,
-                        parts,
-                        message.queue_mode,
-                    )
-                    .await;
+                    send_pending_message(api, events, session, message).await;
                 }
                 let opened_at = std::time::Instant::now();
                 match Box::pin(drive_stream(
@@ -1258,6 +1292,7 @@ async fn apply_command(
             attachments,
             queue_mode,
             new_session_model,
+            new_session_reasoning,
         } => {
             if let Some(session) = session {
                 for attachment in attachments {
@@ -1290,6 +1325,7 @@ async fn apply_command(
                                 parts,
                                 attachments,
                                 queue_mode,
+                                reasoning: new_session_reasoning,
                             },
                         ));
                     }

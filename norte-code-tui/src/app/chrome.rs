@@ -49,12 +49,19 @@ pub(in crate::app) fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) 
         if rail.title != model.attached_title {
             rail.set_title(model.attached_title.clone());
         }
-        let model_id = model.active_model.as_ref().map(|model| model.id.as_str());
+        let selection = model.effective_model_selection();
+        let model_id = selection.map(|(_, model)| model);
         if rail.model.as_deref() != model_id {
             rail.model = model_id.map(str::to_owned);
         }
-        if rail.provider.as_deref() != model.active_provider.as_deref() {
-            rail.provider.clone_from(&model.active_provider);
+        let provider = selection.map(|(provider, _)| provider);
+        if rail.provider.as_deref() != provider {
+            rail.provider = provider.map(str::to_owned);
+        }
+        let thinking = model.thinking_mode();
+        let queue_mode = model.preferences.send_mode.label();
+        if rail.thinking != thinking || rail.queue_mode != queue_mode {
+            rail.set_modes(thinking, queue_mode.to_owned());
         }
         let context = model.effective_context();
         if rail.context() != context {

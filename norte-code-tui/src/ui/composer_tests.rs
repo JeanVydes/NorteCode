@@ -259,3 +259,37 @@ fn clipboard_file_is_prepared_as_a_file_attachment() {
         .take_actions();
     assert!(matches!(actions.as_slice(), [ComposerAction::Attach(_)]));
 }
+
+#[test]
+fn hovering_a_pasted_image_draws_pixels_and_releases_the_kitty_placement_on_leave() {
+    use crate::attachment::{AttachmentKind, AttachmentSource, MimeType, PreparedAttachment};
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(12, 8, image::Rgb([11, 22, 33]))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("png");
+    let mut composer = Composer::new(&Theme::default(), Arc::new(FakeClipboard::default()));
+    composer.insert_pending(PreparedAttachment {
+        cursor: 0,
+        kind: AttachmentKind::Image,
+        mime: MimeType::png(),
+        source: AttachmentSource::Image(bytes.into_inner()),
+    });
+    let screen = Rect::new(0, 0, 80, 30);
+    let area = Rect::new(0, 22, 80, 6);
+    let mut buf = Buffer::empty(screen);
+    composer.hover(4, 23);
+    composer.paint_chips(area, &mut buf, &Theme::default());
+    let placement = composer.take_native_preview().expect("native preview");
+    assert!(buf.content.iter().any(|cell| cell.symbol() == "▀"));
+    let mut kitty = crate::ui::chip_preview::KittyPlacement::default();
+    let mut output = Vec::new();
+    kitty.sync(Some(placement), &mut output).expect("display");
+    assert!(String::from_utf8_lossy(&output).contains("a=T,f=100"));
+    composer.hover(0, 0);
+    composer.paint_chips(area, &mut buf, &Theme::default());
+    output.clear();
+    kitty
+        .sync(composer.take_native_preview(), &mut output)
+        .expect("dismiss");
+    assert!(String::from_utf8_lossy(&output).contains("a=d,d=I"));
+}

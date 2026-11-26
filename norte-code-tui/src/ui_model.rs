@@ -3,7 +3,6 @@
 //! The view reads this; only the client layer mutates it. Everything here
 //! is plain data, free of any notion of terminal or layout.
 
-use crate::attachment::PreparedAttachment;
 use crate::context::ContextUsage;
 use crate::diff::DiffMode;
 use crate::theme::{ThemeCatalog, ThemeChoice, ThemeKind};
@@ -70,6 +69,7 @@ impl ReasoningLevel {
     }
 
     /// Read the label the selector reports.
+    #[cfg(test)]
     pub(crate) fn from_label(label: &str) -> Option<Self> {
         match label {
             "auto" => Some(Self::Auto),
@@ -89,22 +89,9 @@ impl ReasoningLevel {
             Self::High => Self::Auto,
         }
     }
-
-    /// Every level, in selector order.
-    pub(crate) const ALL: [Self; 4] = [Self::Auto, Self::Low, Self::Medium, Self::High];
-
-    /// The index of this level in [`Self::ALL`].
-    pub(crate) const fn index(self) -> usize {
-        match self {
-            Self::Auto => 0,
-            Self::Low => 1,
-            Self::Medium => 2,
-            Self::High => 3,
-        }
-    }
 }
 
-/// The effort level the reasoning selector offers.
+/// The default reasoning effort preference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReasoningLevel {
@@ -152,16 +139,6 @@ impl SendMode {
 
     /// Every mode, in selector order.
     pub(crate) const ALL: [Self; 4] = [Self::Steer, Self::Queue, Self::Interrupt, Self::Reject];
-
-    /// The index of this mode in [`Self::ALL`].
-    pub(crate) const fn index(self) -> usize {
-        match self {
-            Self::Steer => 0,
-            Self::Queue => 1,
-            Self::Interrupt => 2,
-            Self::Reject => 3,
-        }
-    }
 }
 
 /// What to do with a message sent while a turn is running.
@@ -260,10 +237,14 @@ pub(crate) struct UiModel {
     pub(crate) sessions: Vec<SessionSummary>,
     /// The session the interface is attached to; set on attach.
     pub(crate) active: Option<norte_code_wire::SessionKey>,
-    /// Attachments staged locally until the first message creates a session.
-    pub(crate) pending_attachments: Vec<PreparedAttachment>,
     /// Model selection to apply when this draft creates its first session.
     pub(crate) pending_new_session_model: Option<crate::client::NewSessionModel>,
+    /// Reasoning selection to apply when this draft creates its first session.
+    pub(crate) pending_new_session_reasoning: Option<norte_code_wire::Reasoning>,
+    /// The reasoning override the host reports for the attached session.
+    pub(crate) active_reasoning: Option<norte_code_wire::Reasoning>,
+    /// A session-local debug toggle; never written to the preferences file.
+    pub(crate) debug_overlay_override: Option<DebugOverlayMode>,
     /// The model catalogue of the attached server.
     pub(crate) models: Vec<norte_code_wire::ModelInfo>,
     /// The attachment's plans.
@@ -440,17 +421,75 @@ impl UiModel {
 
     /// The catalogue entry for the model the attached session is using.
     pub(crate) fn active_model_info(&self) -> Option<&norte_code_wire::ModelInfo> {
-        let agent = self.active_model.as_ref()?;
+        let (provider, model) = self.effective_model_selection()?;
         self.models
             .iter()
-            .find(|info| {
-                info.model == agent.id
-                    && self
-                        .active_provider
-                        .as_ref()
-                        .is_none_or(|provider| provider == &info.provider)
-            })
-            .or_else(|| self.models.iter().find(|info| info.model == agent.id))
+            .find(|info| info.model == model && info.provider == provider)
+            .or_else(|| self.models.iter().find(|info| info.model == model))
+    }
+
+    /// The effective reasoning label to show in the rail.
+    pub(crate) fn thinking_mode(&self) -> String {
+        let reasoning = self.active_reasoning.as_ref().or_else(|| {
+            if self.active.is_none() {
+                self.pending_new_session_reasoning.as_ref()
+            } else {
+                None
+            }
+        });
+        reasoning.map_or_else(
+            || {
+                if self.active.is_some() {
+                    "auto".to_owned()
+                } else {
+                    self.preferences.reasoning.label().to_owned()
+                }
+            },
+            |reasoning| match reasoning {
+                norte_code_wire::Reasoning::Automatic => "auto".to_owned(),
+                norte_code_wire::Reasoning::Disabled => "off".to_owned(),
+                norte_code_wire::Reasoning::Effort { effort } => effort.clone(),
+                norte_code_wire::Reasoning::Budget { tokens } => format!("budget {tokens}"),
+            },
+        )
+    }
+
+    pub(crate) fn effective_debug_overlay(&self) -> DebugOverlayMode {
+        self.debug_overlay_override
+            .unwrap_or(self.preferences.debug)
+    }
+
+    /// The provider and model for the active session or the next draft.
+    pub(crate) fn effective_model_selection(&self) -> Option<(&str, &str)> {
+        if let Some(model) = self.active_model.as_ref() {
+            let provider = self
+                .active_provider
+                .as_deref()
+                .or_else(|| {
+                    self.models
+                        .iter()
+                        .find(|info| info.model == model.id)
+                        .map(|info| info.provider.as_str())
+                })
+                .or_else(|| self.default_agent_model().map(|(provider, _)| provider))?;
+            return Some((provider, &model.id));
+        }
+        if let Some(selection) = self.pending_new_session_model.as_ref() {
+            return Some((&selection.provider, &selection.model));
+        }
+        self.default_agent_model()
+    }
+
+    fn default_agent_model(&self) -> Option<(&str, &str)> {
+        let default_agent = &self.server_info.as_ref()?.default_agent;
+        let agent = self
+            .agents
+            .iter()
+            .find(|agent| &agent.id == default_agent)?;
+        Some((
+            agent.provider.as_ref()?.id.as_str(),
+            agent.model.as_ref()?.id.as_str(),
+        ))
     }
 
     /// The environment variables the catalogue names for a provider.
@@ -502,8 +541,10 @@ impl UiModel {
             active_turn: None,
             sessions: Vec::new(),
             active: None,
-            pending_attachments: Vec::new(),
             pending_new_session_model: None,
+            pending_new_session_reasoning: None,
+            active_reasoning: None,
+            debug_overlay_override: None,
             models: Vec::new(),
             plans: Vec::new(),
             todos: Vec::new(),

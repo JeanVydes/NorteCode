@@ -67,6 +67,22 @@ pub(crate) struct Chip {
 }
 
 impl Chip {
+    pub(crate) fn pending(id: ChipId, attachment: crate::attachment::PreparedAttachment) -> Self {
+        let kind = attachment.kind;
+        Self {
+            id,
+            label: ChipLabel::uploaded(kind, 1),
+            content: ChipContent::Pending(attachment),
+            kind: ChipKind::from_attachment(kind),
+        }
+    }
+
+    pub(crate) fn pending_attachment(&self) -> Option<&crate::attachment::PreparedAttachment> {
+        match &self.content {
+            ChipContent::Pending(attachment) => Some(attachment),
+            _ => None,
+        }
+    }
     /// A chip that stands for a long paste.
     pub(crate) fn text(id: ChipId, text: OriginalText) -> Self {
         let label = ChipLabel::copied(&text);
@@ -112,14 +128,14 @@ impl Chip {
     pub(crate) fn expanded_text(&self) -> String {
         match &self.content {
             ChipContent::Text(text) => text.as_str().to_owned(),
-            ChipContent::Upload(_) => self.label.as_str().to_owned(),
+            ChipContent::Upload(_) | ChipContent::Pending(_) => self.label.as_str().to_owned(),
         }
     }
 
     /// The wire part this chip contributes, when it has one.
     pub(crate) fn wire_part(&self) -> Option<UserInputPart> {
         match &self.content {
-            ChipContent::Text(_) => None,
+            ChipContent::Text(_) | ChipContent::Pending(_) => None,
             ChipContent::Upload(artifact) => Some(artifact.part().clone()),
         }
     }

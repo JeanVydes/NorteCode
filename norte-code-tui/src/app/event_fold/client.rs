@@ -21,6 +21,7 @@ fn refresh_active_model(model: &mut UiModel, sessions: &[norte_code_wire::Sessio
     {
         model.active_model = found.model.clone();
         model.active_provider = found.provider.clone();
+        model.active_reasoning = found.reasoning.clone();
     }
 }
 
@@ -28,6 +29,7 @@ fn apply_attached(
     tree: &mut terminalui::Tree,
     model: &mut UiModel,
     session: &norte_code_wire::SessionSummary,
+    preserve_transcript: bool,
 ) -> bool {
     let title = session
         .title
@@ -40,15 +42,27 @@ fn apply_attached(
     model.attachment = SessionAttachmentState::Attached;
     model.active_model.clone_from(&session.model);
     model.active_provider.clone_from(&session.provider);
+    model.active_reasoning.clone_from(&session.reasoning);
     model.active = Some(norte_code_wire::SessionKey::new(session.session_id.clone()));
     model.pending_new_session_model = None;
+    model.pending_new_session_reasoning = None;
     model.attached_title = Some(title.clone());
     if changed_session {
-        // Never show another session's content under this label.
         if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
-            stream.clear_all();
+            if !preserve_transcript {
+                // Never show another session's content under this label.
+                stream.clear_all();
+            }
+            stream.stop_thinking();
         }
+        model.active_turn = None;
+        model.turn = TurnState::Idle;
+        model.plans.clear();
         model.todos.clear();
+        model.jobs.clear();
+        model.context = crate::context::ContextUsage::default();
+        model.question = None;
+        model.cost = None;
     }
     true
 }
@@ -108,7 +122,7 @@ pub(in crate::app) fn fold_upload_event(event: &ClientEvent, tree: &mut terminal
             receipt,
         } => {
             if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
-                composer.insert_upload(attachment.cursor, attachment.kind, receipt.clone());
+                composer.insert_upload(attachment, receipt.clone());
             }
             true
         }
@@ -215,8 +229,11 @@ pub(in crate::app) fn drain_server_events(
             count += 1;
         }
         match next_event {
-            Ok(ClientEvent::Attached { session }) => {
-                changed = apply_attached(tree, model, &session) || changed;
+            Ok(ClientEvent::Attached {
+                session,
+                preserve_transcript,
+            }) => {
+                changed = apply_attached(tree, model, &session, preserve_transcript) || changed;
             }
             Ok(ClientEvent::Ready) => {
                 model.attachment = SessionAttachmentState::Ready;
@@ -237,9 +254,10 @@ pub(in crate::app) fn drain_server_events(
             Ok(ClientEvent::DraftStarted { model: selection }) => {
                 model.active = None;
                 model.pending_new_session_model = selection;
-                model.pending_attachments.clear();
+                model.pending_new_session_reasoning = None;
                 model.active_model = None;
                 model.active_provider = None;
+                model.active_reasoning = None;
                 model.active_turn = None;
                 model.turn = TurnState::Idle;
                 model.plans.clear();
@@ -261,9 +279,10 @@ pub(in crate::app) fn drain_server_events(
                 model.sessions.clear();
                 model.active = None;
                 model.pending_new_session_model = None;
-                model.pending_attachments.clear();
+                model.pending_new_session_reasoning = None;
                 model.active_model = None;
                 model.active_provider = None;
+                model.active_reasoning = None;
                 model.active_turn = None;
                 model.turn = TurnState::Idle;
                 model.plans.clear();

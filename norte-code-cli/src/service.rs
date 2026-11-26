@@ -176,8 +176,23 @@ fn read_pidfile() -> Option<i32> {
 }
 
 fn pid_alive(pid: i32) -> bool {
-    // /proc/<pid> exists and is a directory
-    std::path::Path::new(&format!("/proc/{pid}")).is_dir()
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .is_some_and(|stat| process_state_is_alive(&stat))
+}
+
+fn process_state_is_alive(stat: &str) -> bool {
+    stat.rsplit_once(") ")
+        .and_then(|(_, details)| details.chars().next())
+        .is_some_and(|state| !matches!(state, 'Z' | 'X'))
+}
+
+fn recent_log(path: &std::path::Path, max_lines: usize) -> String {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    let lines: Vec<_> = contents.lines().rev().take(max_lines).collect();
+    lines.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
 /// Whether a process is the RAEP service daemon.
@@ -241,6 +256,7 @@ fn kill_pid(pid: i32, signal: i32) {
 ///
 /// Returns an error when the server cannot bind or start.
 pub fn serve() -> Result<(), String> {
+    init_logging();
     let lifecycle = &runtime_config().service_lifecycle;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_count(lifecycle))
@@ -250,6 +266,21 @@ pub fn serve() -> Result<(), String> {
     runtime
         .block_on(async { norte_code_raep::run_server().await })
         .map_err(|e| format!("{e}"))
+}
+
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,norte_code_agent=debug,norte_code_raep=debug"));
+    if let Err(error) = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_thread_ids(true)
+        .try_init()
+    {
+        eprintln!("warning: could not initialize service logging: {error}");
+    }
 }
 
 pub(crate) fn up() -> Result<(), String> {
@@ -279,6 +310,7 @@ pub(crate) fn up() -> Result<(), String> {
     let poll_interval = Duration::from_millis(lifecycle.startup_poll_ms);
     let mut frame_index = 0;
     let mut ready = false;
+    let mut child_exited = false;
     while start.elapsed() < timeout {
         print!(
             "\r  {} starting north-code service … {}",
@@ -290,6 +322,10 @@ pub(crate) fn up() -> Result<(), String> {
             ready = true;
             break;
         }
+        if !pid_alive(pid as i32) {
+            child_exited = true;
+            break;
+        }
         thread::sleep(poll_interval);
         frame_index += 1;
     }
@@ -298,11 +334,23 @@ pub(crate) fn up() -> Result<(), String> {
     let _ = std::io::stdout().flush();
 
     if !ready {
-        return Err(format!(
-            "server did not become ready within {}ms, check {}",
-            timeout.as_millis(),
-            log.display()
-        ));
+        if read_pidfile() == Some(pid as i32) {
+            let _ = fs::remove_file(pidfile_path());
+        }
+        let detail = recent_log(&log, 20);
+        let reason = if child_exited {
+            "server process exited before becoming ready".to_owned()
+        } else {
+            format!(
+                "server did not become ready within {}ms",
+                timeout.as_millis()
+            )
+        };
+        return Err(if detail.is_empty() {
+            format!("{reason}; check {}", log.display())
+        } else {
+            format!("{reason}; recent log from {}:\n{detail}", log.display())
+        });
     }
     println!(
         "  {} service up — {} (pid {})",
@@ -574,6 +622,12 @@ pub(crate) fn logs(args: &[String]) -> Result<(), String> {
     let follow = args
         .iter()
         .any(|a| a == "--live" || a == "-f" || a == "--follow");
+    let line_count = args
+        .windows(2)
+        .find(|pair| pair[0] == "--lines" || pair[0] == "-n")
+        .and_then(|pair| pair[1].parse::<usize>().ok())
+        .unwrap_or(200)
+        .max(1);
     output::print_heading(if follow {
         "service logs (live)"
     } else {
@@ -586,8 +640,8 @@ pub(crate) fn logs(args: &[String]) -> Result<(), String> {
     }
     let raw = fs::read_to_string(&path).map_err(|e| format!("{e}"))?;
     let lines: Vec<&str> = raw.lines().collect();
-    let tail = if lines.len() > 80 {
-        &lines[lines.len() - 80..]
+    let tail = if lines.len() > line_count {
+        &lines[lines.len() - line_count..]
     } else {
         &lines
     };

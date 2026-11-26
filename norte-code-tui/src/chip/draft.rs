@@ -125,6 +125,24 @@ impl Draft {
         self.insert_chip(index, Chip::text(id, text))
     }
 
+    pub(crate) fn insert_pending(
+        &mut self,
+        attachment: crate::attachment::PreparedAttachment,
+    ) -> usize {
+        let id = self.next_chip_id();
+        self.insert_chip(attachment.cursor, Chip::pending(id, attachment))
+    }
+
+    pub(crate) fn pending_attachments(&self) -> Vec<crate::attachment::PreparedAttachment> {
+        self.segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Chip(chip) => chip.pending_attachment().cloned(),
+                Segment::Text(_) => None,
+            })
+            .collect()
+    }
+
     /// Add an uploaded artifact as one atomic chip.
     pub(crate) fn insert_upload(
         &mut self,

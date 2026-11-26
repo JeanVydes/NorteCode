@@ -36,7 +36,7 @@ use super::{InputKind, PollOutcome};
 use key::drain_key_prompt;
 use modals::{drain_plan_review, drain_question_answer};
 use palette::drain_palette;
-use selectors::{drain_tab_request, sync_selectors};
+use selectors::drain_tab_request;
 
 pub(in crate::app) use key::{apply_key_intent, handle_key, open_key_prompt, set_model};
 pub(in crate::app) use modals::drain_plan_requests;
@@ -65,10 +65,12 @@ pub(in crate::app) fn poll_event(
             })
         }
         Event::Mouse(mouse) => {
+            if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
+                composer.hover(mouse.column, mouse.row);
+            }
             let input = terminalui::InputEvent::from(Event::Mouse(mouse));
             let _ = tree.handle_event(&input);
             drain_compact(tree, commands, model);
-            sync_selectors(tree, commands, model);
             drain_tab_request(tree, model);
             drain_models_actions(tree, commands, model);
             drain_plugins_actions(tree, commands);
@@ -87,19 +89,19 @@ pub(in crate::app) fn poll_event(
             let input = terminalui::InputEvent::from(other);
             let _ = tree.handle_event(&input);
             drain_composer_actions(tree, commands, model);
-            sync_selectors(tree, commands, model);
             ui::sync_views(tree, model);
             Ok(PollOutcome::Event(InputKind::Other))
         }
     };
-    if model.preferences != previous
-        && let Err(error) = crate::config::save_preferences(&model.preferences)
-    {
-        super::event_fold::toast(
-            tree,
-            &format!("Could not save preferences: {error}"),
-            ui::Tone::Warn,
-        );
+    if model.preferences != previous {
+        ui::refresh_views(tree, model);
+        if let Err(error) = crate::config::save_preferences(&model.preferences) {
+            super::event_fold::toast(
+                tree,
+                &format!("Could not save preferences: {error}"),
+                ui::Tone::Warn,
+            );
+        }
     }
     outcome
 }
@@ -157,7 +159,6 @@ pub(in crate::app) fn settle_input(
     if drain_config_actions(tree, model) {
         ui::refresh_views(tree, model);
     }
-    sync_selectors(tree, commands, model);
     drain_tab_request(tree, model);
     ui::sync_views(tree, model);
 }

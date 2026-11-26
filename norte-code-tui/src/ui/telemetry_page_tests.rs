@@ -493,3 +493,27 @@ fn both_line_charts_draw_the_time_axis() {
 
     assert!(painted.match_indices("09:00").count() >= 3);
 }
+
+#[test]
+fn missing_timings_still_paint_a_plot_in_the_grid() {
+    let (mut tree, _, theme) = chart_tree();
+    let area = Rect::new(0, 0, 150, 60);
+    let mut buffer = Buffer::empty(area);
+    tree.render(area, &mut buffer, &theme);
+    let plot = tree
+        .find::<TelemetryPage>("telemetry")
+        .expect("page")
+        .chart_area(7);
+    let rows = (plot.y..plot.bottom())
+        .map(|y| {
+            (plot.x..plot.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        rows.iter().any(|line| line.contains("No samples")),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|line| line.contains('└')));
+}

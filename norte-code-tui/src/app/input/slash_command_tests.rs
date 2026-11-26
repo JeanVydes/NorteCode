@@ -1,3 +1,4 @@
+use crate::ui_model::SendMode;
 use norte_code_client::PluginSummary;
 use norte_code_wire::{
     Modality, ModelInfo, PluginCommandArgumentInfo, PluginCommandInfo, Reasoning, ReasoningInfo,
@@ -50,6 +51,39 @@ fn compact_accepts_no_arguments() {
     );
     assert_eq!(
         parse("/compact now", None, &[], &[], &[]),
+        Err(SlashCommandError::InvalidArguments)
+    );
+}
+
+#[test]
+fn queue_mode_command_completes_and_validates_all_modes() {
+    assert_eq!(
+        completions("/queue ", None, &[]),
+        vec![
+            "/queue steer",
+            "/queue queue",
+            "/queue interrupt",
+            "/queue reject",
+        ]
+    );
+    assert_eq!(
+        parse("/queue interrupt", None, &[], &[], &[]),
+        Ok(SlashCommand::SetQueueMode(SendMode::Interrupt))
+    );
+    assert_eq!(
+        parse("/queue unknown", None, &[], &[], &[]),
+        Err(SlashCommandError::InvalidArguments)
+    );
+}
+
+#[test]
+fn debug_command_toggles_without_arguments() {
+    assert_eq!(
+        parse("/debug", None, &[], &[], &[]),
+        Ok(SlashCommand::ToggleDebug)
+    );
+    assert_eq!(
+        parse("/debug on", None, &[], &[], &[]),
         Err(SlashCommandError::InvalidArguments)
     );
 }

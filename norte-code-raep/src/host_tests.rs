@@ -10,6 +10,30 @@ use axum::{body::Body, http::Request};
 use tower::ServiceExt;
 
 #[test]
+fn agent_summary_keeps_configured_model_visible_without_credentials() {
+    let config = norte_code_protocol::config::Config {
+        default_provider: Some("nvidia".to_owned()),
+        default_model: Some("nvidia/model".to_owned()),
+        ..norte_code_protocol::config::Config::default()
+    };
+    let service = Service::new(
+        config,
+        Arc::new(norte_code_protocol::catalog::Catalog::default()),
+        None,
+        Arc::new(norte_code_agent::VendorModels),
+        Arc::new(norte_code_protocol::InMemoryStore::new()),
+        Arc::new(norte::InMemoryBlobStore::new()),
+        "system",
+    )
+    .expect("service");
+
+    let (provider, model) = configured_agent_model_refs(&service);
+
+    assert_eq!(provider.expect("provider").id, "nvidia");
+    assert_eq!(model.expect("model").id, "nvidia/model");
+}
+
+#[test]
 fn host_config_from_limits_applies_service_and_env_limits() {
     let limits = RaepLimitsConfig {
         replay_capacity: 321,

@@ -221,6 +221,45 @@ pub(crate) fn session_agent_summary(
     }
 }
 
+/// Reports a configured selection even when its credential is unavailable.
+/// The TUI can still show the provider/model and offer the model's reasoning
+/// settings before a session exists; opening a session will report the missing
+/// credential through the normal request error.
+pub(crate) fn configured_agent_model_refs(
+    service: &norte_code_agent::Service,
+) -> (
+    Option<norte_code_wire::AgentRef>,
+    Option<norte_code_wire::AgentRef>,
+) {
+    if let Some(spec) = service.default_spec() {
+        return (
+            Some(norte_code_wire::AgentRef {
+                id: spec.provider,
+                version: String::new(),
+            }),
+            Some(norte_code_wire::AgentRef {
+                id: spec.model,
+                version: String::new(),
+            }),
+        );
+    }
+
+    let config = service.config();
+    match (config.default_provider, config.default_model) {
+        (Some(provider), Some(model)) => (
+            Some(norte_code_wire::AgentRef {
+                id: provider,
+                version: String::new(),
+            }),
+            Some(norte_code_wire::AgentRef {
+                id: model,
+                version: String::new(),
+            }),
+        ),
+        _ => (None, None),
+    }
+}
+
 /// The wire's name for a modality, in the catalogue's spelling.
 pub(crate) fn to_wire_modality(
     modality: norte::Modality,

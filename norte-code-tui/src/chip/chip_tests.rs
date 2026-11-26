@@ -5,6 +5,21 @@ use norte_code_wire::UploadReceipt;
 use super::{ChipLabel, Draft, OriginalText};
 use crate::attachment::AttachmentKind;
 
+#[test]
+fn removing_a_pending_image_removes_its_attachment() {
+    let mut draft = Draft::default();
+    draft.insert_pending(crate::attachment::PreparedAttachment {
+        kind: AttachmentKind::Image,
+        mime: crate::attachment::MimeType::png(),
+        source: crate::attachment::AttachmentSource::Image(vec![1, 2, 3]),
+        cursor: 0,
+    });
+    assert_eq!(draft.text(), "[Image #1]");
+    assert_eq!(draft.pending_attachments().len(), 1);
+    draft.replace_range(0, draft.len(), "");
+    assert_eq!(draft.pending_attachments().len(), 0);
+}
+
 fn receipt() -> UploadReceipt {
     UploadReceipt {
         upload_id: "upl_1".to_owned(),

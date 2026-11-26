@@ -42,13 +42,14 @@ fn focusable_ids(tab: Tab) -> Vec<String> {
 }
 
 #[test]
-fn chat_shows_the_reasoning_and_tab_hint() {
+fn chat_shows_the_queue_and_tab_hint_without_a_reasoning_selector() {
     let (buf, area) = render(Tab::Chat);
     let painted = text(&buf, area);
     assert!(painted.contains("tabs"));
     let focusable = focusable_ids(Tab::Chat);
-    assert!(focusable.iter().any(|id| id == "reasoning"));
-    assert!(focusable.iter().any(|id| id == "queue"));
+    assert!(!painted.contains("reasoning"));
+    assert!(!focusable.iter().any(|id| id == "reasoning"));
+    assert!(!focusable.iter().any(|id| id == "queue"));
 }
 
 #[test]
@@ -100,7 +101,7 @@ fn syncing_the_theme_keeps_the_status_text_instances() {
 }
 
 #[test]
-fn other_tabs_hide_the_reasoning_and_tab_hint() {
+fn other_tabs_hide_the_queue_and_tab_hint() {
     for tab in [Tab::Sessions, Tab::Models, Tab::Telemetry, Tab::Settings] {
         let (buf, area) = render(tab);
         let painted = text(&buf, area);

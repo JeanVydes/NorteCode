@@ -159,6 +159,7 @@ pub(crate) struct TelemetryPage {
     #[serde(skip)]
     additional_charts: Vec<LineChart>,
     #[serde(skip)]
+    has_cost_slices: bool,
     provider_cost_chart: PieChart,
     #[serde(skip)]
     model_cost_chart: PieChart,
@@ -228,6 +229,7 @@ impl TelemetryPage {
                 LineChart::new(),
                 LineChart::new(),
             ],
+            has_cost_slices: false,
             provider_cost_chart: PieChart::new(),
             model_cost_chart: PieChart::new(),
             bucket_labels: Arc::new(Vec::new()),

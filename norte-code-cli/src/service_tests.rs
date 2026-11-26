@@ -2,7 +2,7 @@
 
 use norte_code_client::config::ServiceLifecycleConfig;
 
-use super::{cmdline_is_service, restart_local, worker_count_from};
+use super::{cmdline_is_service, process_state_is_alive, restart_local, worker_count_from};
 
 #[test]
 fn restarting_stops_the_service_before_starting_a_new_one() {
@@ -68,6 +68,13 @@ fn worker_count_ignores_invalid_overrides() {
     let config = lifecycle_with_workers(5);
     assert_eq!(worker_count_from(Some("many"), 12, &config), 5);
     assert_eq!(worker_count_from(Some("0"), 12, &config), 1);
+}
+
+#[test]
+fn exited_and_zombie_daemons_are_not_reported_as_alive() {
+    assert!(process_state_is_alive("123 (norte) S 1 2 3"));
+    assert!(!process_state_is_alive("123 (norte) Z 1 2 3"));
+    assert!(!process_state_is_alive("123 (norte) X 1 2 3"));
 }
 
 fn args(values: &[&str]) -> Vec<String> {

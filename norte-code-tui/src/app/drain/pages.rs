@@ -196,7 +196,10 @@ pub(in crate::app) fn drain_config_actions(
                 Setting::RailPosition => {
                     model.preferences.rail_position = model.preferences.rail_position.next();
                 }
-                Setting::Debug => model.preferences.debug = model.preferences.debug.next(),
+                Setting::Debug => {
+                    model.preferences.debug = model.preferences.debug.next();
+                    model.debug_overlay_override = None;
+                }
                 Setting::ShowToolOutput => {
                     model.preferences.show_tool_output = !model.preferences.show_tool_output;
                 }

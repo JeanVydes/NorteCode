@@ -330,8 +330,12 @@ impl TelemetryPage {
     }
 
     fn paint_chart_slot(&mut self, layout: ChartSlotLayout, cx: &mut Context, theme: &Theme) {
+        let empty = self.chart_empty(layout.index);
         let page = &mut self.chart_page;
         let body = paint_slot_title(page, layout.y, layout.area.width, layout.title, theme);
+        if empty {
+            paint_empty_chart(page, body, theme);
+        }
         let body_y = layout.y + 1;
         match layout.index {
             0 | 1 | 3 => {
@@ -359,6 +363,7 @@ impl TelemetryPage {
             8 => paint_cost_mix(
                 &mut self.provider_cost_chart,
                 &mut self.model_cost_chart,
+                self.has_cost_slices,
                 body,
                 page,
                 cx,
@@ -443,11 +448,9 @@ impl TelemetryPage {
                 latest: Some(line),
             };
         }
-        self.provider_cost_chart.set_slices(cost_slices(
-            self.report.as_deref(),
-            CostBreakdown::Provider,
-            theme,
-        ));
+        let slices = cost_slices(self.report.as_deref(), CostBreakdown::Provider, theme);
+        self.has_cost_slices = !slices.is_empty();
+        self.provider_cost_chart.set_slices(slices);
         self.model_cost_chart.set_slices(cost_slices(
             self.report.as_deref(),
             CostBreakdown::Model,
@@ -499,10 +502,14 @@ impl TelemetryPage {
             );
             let chart_height = height.saturating_sub(2);
             let chart_area = Rect::new(x, y.saturating_add(1), width, chart_height);
+            if self.chart_empty(index) {
+                paint_empty_chart(buf, chart_area, theme);
+            }
             if index == 8 {
                 paint_cost_mix(
                     &mut self.provider_cost_chart,
                     &mut self.model_cost_chart,
+                    self.has_cost_slices,
                     chart_area,
                     buf,
                     cx,
@@ -535,7 +542,7 @@ impl TelemetryPage {
         cx: &mut Context,
         theme: &Theme,
     ) {
-        if area.width >= 84 && area.height >= 27 {
+        if area.width >= 84 && area.height >= 28 {
             let window_width = area.width.saturating_sub(4) / 3;
             let window = self.chart_window(window_width);
             self.sync_line_window(window);
@@ -574,9 +581,38 @@ impl TelemetryPage {
     }
 }
 
+fn paint_empty_chart(buf: &mut Buffer, area: Rect, theme: &Theme) {
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+    let style = Style::default().fg(theme.border).bg(theme.background);
+    let bottom = area.y + area.height - 1;
+    for row in (area.y + 1..bottom).step_by(2) {
+        for col in (area.x + 2..area.right()).step_by(4) {
+            buf.set_string(col, row, "·", style);
+        }
+    }
+    buf.set_stringn(
+        area.x + 2,
+        area.y + area.height / 2,
+        "No samples",
+        usize::from(area.width - 2),
+        Style::default().fg(theme.muted),
+    );
+
+    for y in area.y..bottom {
+        buf.set_string(area.x, y, "│", style);
+    }
+    buf.set_string(area.x, bottom, "└", style);
+    for x in area.x + 1..area.x + area.width {
+        buf.set_string(x, bottom, "─", style);
+    }
+}
+
 fn paint_cost_mix(
     provider_chart: &mut PieChart,
     model_chart: &mut PieChart,
+    has_cost: bool,
     area: Rect,
     buf: &mut Buffer,
     cx: &mut Context,
@@ -603,6 +639,29 @@ fn paint_cost_mix(
         header_style,
     );
     let chart_area = |x, width| Rect::new(x, area.y + 1, width, area.height.saturating_sub(1));
+    if !has_cost {
+        for (left, width) in [(area.x, chart_width), (area.x + half, area.width - half)] {
+            let body = chart_area(left, width);
+            let radius = f64::from(body.height.min(width / 2)) / 2.0;
+            for y in 0..body.height {
+                for x in 0..width {
+                    let dx = f64::midpoint(f64::from(x), 0.5) - radius;
+                    let dy = f64::from(y) + 0.5 - radius;
+                    if (dx.hypot(dy) - radius + 0.5).abs() < 0.55 {
+                        buf.set_string(left + x, body.y + y, "·", header_style);
+                    }
+                }
+            }
+            buf.set_stringn(
+                left,
+                body.y + body.height / 2,
+                "No cost data",
+                usize::from(width),
+                header_style,
+            );
+        }
+        return;
+    }
     provider_chart.render(chart_area(area.x, chart_width), buf, cx, theme);
     model_chart.render(
         chart_area(area.x + half, area.width.saturating_sub(half)),
@@ -613,6 +672,14 @@ fn paint_cost_mix(
 }
 
 impl TelemetryPage {
+    fn chart_empty(&mut self, index: usize) -> bool {
+        if index == 0 {
+            return self.bucket_labels.is_empty();
+        }
+        self.chart_by_index_mut(index)
+            .is_some_and(|chart| chart.is_empty())
+    }
+
     fn chart_by_index_mut(&mut self, index: usize) -> Option<&mut LineChart> {
         match index {
             1 => self

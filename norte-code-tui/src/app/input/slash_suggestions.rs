@@ -21,6 +21,8 @@ pub(super) fn suggestions(
         open_suggestions(input, sessions)
     } else if input == "/new" || input.starts_with("/new ") {
         new_suggestions(input, models)
+    } else if input == "/queue" || input.starts_with("/queue ") {
+        queue_suggestions(input)
     } else if !input.contains(' ') {
         let mut candidates = COMMANDS
             .iter()
@@ -56,6 +58,26 @@ pub(super) fn suggestions(
     candidates
         .into_iter()
         .filter(|candidate| candidate.completion.starts_with(input))
+        .collect()
+}
+
+fn queue_suggestions(input: &str) -> Vec<super::super::ui::CommandSuggestion> {
+    let value = input
+        .strip_prefix("/queue")
+        .unwrap_or_default()
+        .trim_start();
+    crate::ui_model::SendMode::ALL
+        .into_iter()
+        .map(|mode| {
+            let completion = format!("/queue {}", mode.label());
+            suggestion(completion, mode.label().to_owned())
+        })
+        .filter(|candidate| {
+            candidate
+                .completion
+                .strip_prefix("/queue ")
+                .is_some_and(|mode| mode.starts_with(value))
+        })
         .collect()
 }
 

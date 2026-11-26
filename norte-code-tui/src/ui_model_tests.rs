@@ -1,6 +1,7 @@
 //! The context shown is the reported one, with the model window as fallback.
 
-use norte_code_wire::{AgentRef, ModelInfo};
+use norte_code_client::ServerInfo;
+use norte_code_wire::{AgentRef, AgentSummary, ModelInfo};
 
 use super::{ReasoningLevel, SendMode, UiModel};
 use crate::context::ContextUsage;
@@ -76,6 +77,22 @@ fn selector_labels_round_trip_through_the_enums() {
 }
 
 #[test]
+fn thinking_mode_uses_the_session_override_and_pending_draft_setting() {
+    let mut model = UiModel::detached();
+    model.pending_new_session_reasoning = Some(norte_code_wire::Reasoning::Budget { tokens: 4096 });
+    assert_eq!(model.thinking_mode(), "budget 4096");
+
+    model.active = Some(norte_code_wire::SessionKey::new("session-1"));
+    model.active_reasoning = Some(norte_code_wire::Reasoning::Effort {
+        effort: "xhigh".to_owned(),
+    });
+    assert_eq!(model.thinking_mode(), "xhigh");
+
+    model.active_reasoning = None;
+    assert_eq!(model.thinking_mode(), "auto");
+}
+
+#[test]
 fn an_unknown_model_leaves_the_window_unknown() {
     let mut model = UiModel::detached();
     model.active_model = Some(AgentRef {
@@ -84,4 +101,36 @@ fn an_unknown_model_leaves_the_window_unknown() {
     });
     model.models = vec![info("nvidia", "big", Some(128_000))];
     assert_eq!(model.effective_context().window, None);
+}
+
+#[test]
+fn a_sessionless_draft_uses_the_default_agent_model_and_provider() {
+    let mut model = UiModel::detached();
+    model.server_info = Some(ServerInfo {
+        default_agent: "norte-code".to_owned(),
+        ..ServerInfo::default()
+    });
+    model.agents = vec![AgentSummary {
+        id: "norte-code".to_owned(),
+        provider: Some(AgentRef {
+            id: "openrouter".to_owned(),
+            version: String::new(),
+        }),
+        model: Some(AgentRef {
+            id: "deepseek-v4".to_owned(),
+            version: String::new(),
+        }),
+        ..AgentSummary::default()
+    }];
+    model.models = vec![info("openrouter", "deepseek-v4", Some(128_000))];
+
+    assert_eq!(
+        model.effective_model_selection(),
+        Some(("openrouter", "deepseek-v4"))
+    );
+    assert_eq!(
+        model.active_model_info().map(|model| model.model.as_str()),
+        Some("deepseek-v4")
+    );
+    assert_eq!(model.effective_context().window, Some(128_000));
 }

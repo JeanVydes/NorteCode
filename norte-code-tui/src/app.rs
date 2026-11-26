@@ -234,7 +234,7 @@ fn prepare_debug(
     now: Instant,
     animating: bool,
 ) {
-    let debug = frame.model.preferences.debug.enabled();
+    let debug = frame.model.effective_debug_overlay().enabled();
     if debug {
         frame.metrics.sample_process(now);
     }
@@ -267,6 +267,13 @@ fn draw_if_needed(
             .set_style(area, Style::default().bg(theme.background));
         frame.tree.render(area, draw_frame.buffer_mut(), &theme);
     })?;
+    if let Some(graphics) = session.graphics.as_mut() {
+        let next = frame
+            .tree
+            .find_mut::<ui::Composer>("composer")
+            .and_then(ui::Composer::take_native_preview);
+        graphics.sync(next, &mut std::io::stdout())?;
+    }
     frame.metrics.frame_drawn(now, draw_started.elapsed());
     *redraw = false;
     Ok(())

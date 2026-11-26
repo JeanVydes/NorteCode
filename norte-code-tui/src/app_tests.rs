@@ -382,6 +382,260 @@ fn open_command_completes_recent_sessions_and_arrow_selection_is_scrollable() {
 }
 
 #[test]
+fn slash_commands_scroll_with_arrows_and_enter_completes_without_running_them() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    let mut tree = ui::build_tree(&model);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    let mut events = None;
+    type_text(&mut tree, "/", &mut model);
+
+    let first = tree
+        .find::<ui::CommandSuggestions>("command_suggestions")
+        .and_then(ui::CommandSuggestions::selected)
+        .expect("first command suggestion")
+        .to_owned();
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+    let selected = tree
+        .find::<ui::CommandSuggestions>("command_suggestions")
+        .and_then(ui::CommandSuggestions::selected)
+        .expect("selected command suggestion")
+        .to_owned();
+    assert_ne!(selected, first);
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut commands,
+        &mut events,
+        &mut model,
+        None,
+    );
+
+    assert_eq!(
+        tree.find::<Composer>("composer")
+            .expect("composer")
+            .expanded_text(),
+        selected
+    );
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn deleting_an_unknown_command_reopens_completion_and_arrows_select_an_argument() {
+    let mut model = UiModel::detached();
+    let mut tree = ui::build_tree(&model);
+    type_text(&mut tree, "/queuex", &mut model);
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        &mut None,
+        &mut None,
+        &mut model,
+        None,
+    );
+    let suggestions = tree
+        .find::<ui::CommandSuggestions>("command_suggestions")
+        .expect("suggestions");
+    let first = suggestions.selected().expect("queue suggestion").to_owned();
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &mut None,
+        &mut None,
+        &mut model,
+        None,
+    );
+    let selected = tree
+        .find::<ui::CommandSuggestions>("command_suggestions")
+        .and_then(ui::CommandSuggestions::selected)
+        .expect("selected suggestion")
+        .to_owned();
+    assert_ne!(first, selected);
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut None,
+        &mut None,
+        &mut model,
+        None,
+    );
+    assert_eq!(
+        tree.find::<Composer>("composer")
+            .expect("composer")
+            .expanded_text(),
+        selected
+    );
+}
+
+#[test]
+fn reasoning_before_the_first_session_uses_the_default_agents_model() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    model.server_info = Some(norte_code_client::ServerInfo {
+        default_agent: "norte-code".to_owned(),
+        ..norte_code_client::ServerInfo::default()
+    });
+    model.agents = vec![norte_code_wire::AgentSummary {
+        id: "norte-code".to_owned(),
+        provider: Some(norte_code_wire::AgentRef {
+            id: "openrouter".to_owned(),
+            version: String::new(),
+        }),
+        model: Some(norte_code_wire::AgentRef {
+            id: "deepseek-v4".to_owned(),
+            version: String::new(),
+        }),
+        ..norte_code_wire::AgentSummary::default()
+    }];
+    model.models = vec![norte_code_wire::ModelInfo {
+        provider: "openrouter".to_owned(),
+        model: "deepseek-v4".to_owned(),
+        name: "DeepSeek V4".to_owned(),
+        description: None,
+        max_context: Some(128_000),
+        max_output: None,
+        tools: true,
+        input: Vec::new(),
+        output: Vec::new(),
+        reasoning: norte_code_wire::ReasoningInfo {
+            supported: true,
+            can_disable: false,
+            efforts: vec!["low".to_owned(), "high".to_owned()],
+            supports_budget: false,
+            max_budget: None,
+        },
+        deprecated: false,
+    }];
+    let mut tree = ui::build_tree(&model);
+    type_text(&mut tree, "/reasoning high", &mut model);
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut None,
+        &mut None,
+        &mut model,
+        None,
+    );
+
+    assert_eq!(
+        model.effective_model_selection(),
+        Some(("openrouter", "deepseek-v4"))
+    );
+    assert_eq!(
+        model.pending_new_session_reasoning,
+        Some(norte_code_wire::Reasoning::Effort {
+            effort: "high".to_owned()
+        })
+    );
+    assert_eq!(
+        tree.find::<Composer>("composer")
+            .expect("composer")
+            .expanded_text(),
+        ""
+    );
+}
+
+#[test]
+fn queue_command_changes_the_local_send_mode_without_a_service() {
+    let mut model = UiModel::detached();
+    let mut tree = ui::build_tree(&model);
+    type_text(&mut tree, "/queue interrupt", &mut model);
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut None,
+        &mut None,
+        &mut model,
+        None,
+    );
+
+    assert_eq!(
+        model.preferences.send_mode,
+        crate::ui_model::SendMode::Interrupt
+    );
+    assert_eq!(
+        tree.find::<Composer>("composer")
+            .expect("composer")
+            .expanded_text(),
+        ""
+    );
+}
+
+#[test]
+fn debug_command_is_a_runtime_toggle_and_does_not_change_preferences() {
+    let mut model = UiModel::detached();
+    let configured = model.preferences.debug;
+    let mut tree = ui::build_tree(&model);
+    type_text(&mut tree, "/debug", &mut model);
+
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut None,
+        &mut None,
+        &mut model,
+        None,
+    );
+
+    assert_eq!(model.preferences.debug, configured);
+    assert_eq!(
+        model.effective_debug_overlay(),
+        crate::ui_model::DebugOverlayMode::On
+    );
+}
+
+#[test]
+fn attaching_a_new_session_keeps_the_optimistic_first_message() {
+    let mut model = UiModel::detached();
+    model.tab = Tab::Chat;
+    model.active_turn = Some(ActiveTurn {
+        id: "old-turn".to_owned(),
+    });
+    model.turn = TurnState::Streaming;
+    let mut tree = ui::build_tree(&model);
+    tree.find_mut::<ui::Transcript>("stream")
+        .expect("transcript")
+        .push(ui::Item::User {
+            text: "first message".to_owned(),
+            turn: None,
+        });
+    tree.find_mut::<ui::Transcript>("stream")
+        .expect("transcript")
+        .start_thinking();
+    let (sender, receiver) = mpsc::channel(4);
+    sender
+        .try_send(ClientEvent::Attached {
+            session: norte_code_wire::SessionSummary {
+                session_id: "new-session".to_owned(),
+                ..norte_code_wire::SessionSummary::default()
+            },
+            preserve_transcript: true,
+        })
+        .expect("attached event");
+    let mut events = Some(receiver);
+    let mut commands = None;
+
+    drain_server_events(&mut events, &mut commands, &mut tree, &mut model);
+
+    let painted = painted_text(&mut tree, &model);
+    assert!(painted.contains("first message"));
+    assert_eq!(painted.matches("thinking").count(), 1, "{painted}");
+    assert_eq!(model.turn, TurnState::Idle);
+    assert!(model.active_turn.is_none());
+}
+
+#[test]
 fn moving_the_composer_cursor_keeps_up_and_down_for_text_navigation() {
     let mut model = UiModel::detached();
     model.tab = Tab::Chat;
@@ -701,7 +955,7 @@ fn a_refused_prompt_clears_the_loading_row() {
     tree.find_mut::<ui::Transcript>("stream")
         .expect("stream")
         .start_thinking();
-    assert!(painted_text(&mut tree, &model).contains("thinking"));
+    assert!(painted_text(&mut tree, &model).matches("thinking").count() > 1);
 
     let (send, receive) = mpsc::channel(4);
     send.try_send(ClientEvent::SendFailed {
@@ -714,7 +968,8 @@ fn a_refused_prompt_clears_the_loading_row() {
     let outcome = drain_server_events(&mut events, &mut commands, &mut tree, &mut model);
 
     assert_eq!(outcome.events, 1);
-    assert!(!painted_text(&mut tree, &model).contains("thinking"));
+    let painted = painted_text(&mut tree, &model);
+    assert_eq!(painted.matches("thinking").count(), 1, "{painted}");
 }
 
 fn painted_text(tree: &mut Tree, model: &UiModel) -> String {

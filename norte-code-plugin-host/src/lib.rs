@@ -149,12 +149,17 @@ fn check_abi(library: &libloading::Library) -> Result<(), String> {
         unsafe { library.get(PLUGIN_ABI_SYMBOL) }
             .map_err(|error| format!("does not export norte_plugin_abi_version: {error}"))?;
     let theirs = unsafe { version() };
-    if theirs != PLUGIN_ABI_VERSION {
-        return Err(format!(
-            "was built against plugin interface {theirs}, host speaks {PLUGIN_ABI_VERSION}"
-        ));
+    validate_abi(theirs)
+}
+
+fn validate_abi(plugin_version: u32) -> Result<(), String> {
+    if plugin_version == PLUGIN_ABI_VERSION {
+        Ok(())
+    } else {
+        Err(format!(
+            "was built against plugin interface {plugin_version}, host speaks {PLUGIN_ABI_VERSION}"
+        ))
     }
-    Ok(())
 }
 
 fn plugin_dir() -> PathBuf {
@@ -167,3 +172,7 @@ fn plugin_dir() -> PathBuf {
         PathBuf::from(home).join(".config/norte-code/plugins")
     })
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

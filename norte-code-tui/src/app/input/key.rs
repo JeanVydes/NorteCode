@@ -165,12 +165,12 @@ pub(in crate::app) fn handle_key(
     if pass_to_tree {
         let input = terminalui::InputEvent::from(Event::Key(key));
         let outcome = tree.handle_event(&input);
-        sync_slash_suggestions(tree, model);
         if cancel_on_escape && outcome.is_ignored() && model.turn != TurnState::Idle {
             let _ = cancel_active_turn(tree, commands, model);
         }
     }
     settle_input(tree, commands, model);
+    sync_slash_suggestions(tree, model);
     false
 }
 
@@ -259,9 +259,15 @@ fn send_current_prompt(
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
 ) {
-    let (raw_prompt, parts) = tree
+    let (raw_prompt, parts, attachments) = tree
         .find::<ui::Composer>("composer")
-        .map(|composer| (composer.expanded_text(), composer.wire_parts()))
+        .map(|composer| {
+            (
+                composer.expanded_text(),
+                composer.wire_parts(),
+                composer.pending_attachments(),
+            )
+        })
         .unwrap_or_default();
     if raw_prompt.starts_with('/') && !raw_prompt.starts_with("//") {
         execute_slash_command(tree, commands.as_ref(), model, &raw_prompt, &parts);
@@ -269,7 +275,7 @@ fn send_current_prompt(
         return;
     }
     let prompt = raw_prompt.trim().to_owned();
-    if prompt.is_empty() && parts.is_empty() && model.pending_attachments.is_empty() {
+    if prompt.is_empty() && parts.is_empty() && attachments.is_empty() {
         return;
     }
     if !matches!(
@@ -291,7 +297,6 @@ fn send_current_prompt(
         );
         return;
     }
-    let attachments = std::mem::take(&mut model.pending_attachments);
     let display_prompt = if prompt.is_empty() {
         format!("sent {} attachment(s)", attachments.len().max(parts.len()))
     } else {
@@ -321,6 +326,7 @@ fn send_current_prompt(
             attachments,
             queue_mode: queue_mode.to_string(),
             new_session_model: model.pending_new_session_model.clone(),
+            new_session_reasoning: model.pending_new_session_reasoning.clone(),
         });
     }
     if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {

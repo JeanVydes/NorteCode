@@ -84,8 +84,8 @@ pub(in crate::app) fn drain_composer_actions(
                             attachment,
                         });
                     }
-                } else {
-                    model.pending_attachments.push(attachment);
+                } else if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
+                    composer.insert_pending(attachment);
                 }
             }
         }

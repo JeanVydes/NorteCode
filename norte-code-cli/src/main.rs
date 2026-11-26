@@ -60,6 +60,9 @@ enum ServiceCommand {
         /// Follow new lines.
         #[arg(short = 'f', long = "follow", alias = "live")]
         follow: bool,
+        /// Number of recent lines to show.
+        #[arg(short = 'n', long = "lines", default_value_t = 200)]
+        lines: usize,
     },
     /// Check paths, files and the service.
     Doctor,
@@ -162,12 +165,11 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             },
-            ServiceCommand::Logs { follow } => {
-                let args: Vec<String> = if follow {
-                    vec!["--follow".to_owned()]
-                } else {
-                    vec![]
-                };
+            ServiceCommand::Logs { follow, lines } => {
+                let mut args = vec!["--lines".to_owned(), lines.to_string()];
+                if follow {
+                    args.push("--follow".to_owned());
+                }
                 match service::logs(&args) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(error) => {

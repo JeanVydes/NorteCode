@@ -3,7 +3,9 @@
 use norte_code_client::PluginSummary;
 use norte_code_wire::{Reasoning, ReasoningInfo};
 
-pub(super) const COMMANDS: [CommandDefinition; 4] = [
+use crate::ui_model::SendMode;
+
+pub(super) const COMMANDS: [CommandDefinition; 6] = [
     CommandDefinition {
         name: CommandName::Compact,
         usage: "/compact",
@@ -20,6 +22,14 @@ pub(super) const COMMANDS: [CommandDefinition; 4] = [
         name: CommandName::Reasoning,
         usage: "/reasoning",
     },
+    CommandDefinition {
+        name: CommandName::Queue,
+        usage: "/queue",
+    },
+    CommandDefinition {
+        name: CommandName::Debug,
+        usage: "/debug",
+    },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +38,8 @@ pub(super) enum CommandName {
     New,
     Open,
     Reasoning,
+    Queue,
+    Debug,
 }
 
 impl CommandName {
@@ -37,6 +49,8 @@ impl CommandName {
             Self::New => "/new",
             Self::Open => "/open",
             Self::Reasoning => "/reasoning",
+            Self::Queue => "/queue",
+            Self::Debug => "/debug",
         }
     }
 
@@ -95,6 +109,8 @@ pub(super) enum SlashCommand {
     New(Option<crate::client::NewSessionModel>),
     Open(Box<norte_code_wire::SessionSummary>),
     SetReasoning(Reasoning),
+    SetQueueMode(SendMode),
+    ToggleDebug,
     Plugin {
         command: String,
         arguments: Vec<String>,
@@ -146,12 +162,22 @@ pub(super) fn parse(
     let args = parts.collect::<Vec<_>>();
     match CommandName::parse(label) {
         Some(CommandName::Compact) if args.is_empty() => Ok(SlashCommand::Compact),
-        Some(CommandName::Compact) => Err(SlashCommandError::InvalidArguments),
+        Some(CommandName::Debug) if args.is_empty() => Ok(SlashCommand::ToggleDebug),
+        Some(CommandName::Compact | CommandName::Debug) => Err(SlashCommandError::InvalidArguments),
         Some(CommandName::New) => parse_new(&args, models),
         Some(CommandName::Open) => parse_open(&args, sessions),
         Some(CommandName::Reasoning) => parse_reasoning(&args, reasoning),
+        Some(CommandName::Queue) => parse_queue_mode(&args),
         None => parse_plugin(label, args, plugins),
     }
+}
+
+fn parse_queue_mode(arguments: &[&str]) -> Result<SlashCommand, SlashCommandError> {
+    let [mode] = arguments else {
+        return Err(SlashCommandError::InvalidArguments);
+    };
+    let mode = SendMode::from_label(mode).ok_or(SlashCommandError::InvalidArguments)?;
+    Ok(SlashCommand::SetQueueMode(mode))
 }
 
 fn parse_new(
