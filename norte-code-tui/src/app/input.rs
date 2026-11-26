@@ -8,6 +8,7 @@ mod modals;
 mod navigation;
 #[path = "input/palette.rs"]
 mod palette;
+mod preferences;
 #[path = "input/selectors.rs"]
 mod selectors;
 #[path = "input/slash_actions.rs"]
@@ -28,8 +29,8 @@ use crate::ui;
 use crate::ui_model::{Tab, UiModel};
 
 use super::drain::{
-    drain_compact, drain_composer_actions, drain_config_actions, drain_message_actions,
-    drain_models_actions, drain_plugins_actions, drain_sessions_actions, drain_toasts,
+    drain_composer_actions, drain_config_actions, drain_message_actions, drain_models_actions,
+    drain_plugins_actions, drain_sessions_actions, drain_toasts,
 };
 use super::{InputKind, PollOutcome};
 
@@ -70,7 +71,6 @@ pub(in crate::app) fn poll_event(
             }
             let input = terminalui::InputEvent::from(Event::Mouse(mouse));
             let _ = tree.handle_event(&input);
-            drain_compact(tree, commands, model);
             drain_tab_request(tree, model);
             drain_models_actions(tree, commands, model);
             drain_plugins_actions(tree, commands);
@@ -133,7 +133,6 @@ pub(in crate::app) fn settle_input(
         prompt.drain();
     }
     drain_key_prompt(tree, commands.as_ref());
-    drain_compact(tree, commands, model);
     drain_plan_review(tree, commands, model);
     drain_question_answer(tree, commands, model);
     drain_models_actions(tree, commands, model);

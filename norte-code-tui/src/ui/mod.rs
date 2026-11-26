@@ -68,6 +68,7 @@ mod toast_host;
 #[path = "toast_host_tests.rs"]
 mod toast_host_tests;
 mod transcript;
+mod welcome;
 
 use norte_code_client::config::RetentionConfig;
 use terminalui::{Pane, Spacer};
@@ -295,7 +296,7 @@ fn update_sessions(tree: &mut Tree, model: &UiModel, usage: crate::session_stats
     }
 }
 
-fn update_models(tree: &mut Tree, model: &UiModel) {
+pub(crate) fn update_models(tree: &mut Tree, model: &UiModel) {
     let mut key_status = std::collections::HashMap::new();
     if let Some(catalog) = model.catalog.as_ref() {
         for provider in &catalog.providers {

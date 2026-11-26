@@ -234,7 +234,7 @@ pub(in crate::app) fn drain_models_actions(
                 provider,
                 model: model_id,
             } => {
-                set_model(commands, model, &provider, &model_id);
+                set_model(tree, commands, model, &provider, &model_id);
             }
             ui::ModelsAction::AskKeyForModel {
                 provider,

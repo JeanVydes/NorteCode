@@ -6,7 +6,6 @@
 //! session is marked and cannot be deleted from here.
 
 use std::any::Any;
-use std::fmt::Write;
 use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
@@ -90,6 +89,10 @@ pub(crate) struct SessionsPage {
     usage: crate::session_stats::SharedUsage,
     /// The selected row.
     selected: usize,
+    #[serde(skip)]
+    painted_selection: Option<usize>,
+    #[serde(skip)]
+    detail_transition: Option<terminalui::Animation>,
     /// The first visible row.
     offset: usize,
     /// What the page is doing over the list.
@@ -98,6 +101,8 @@ pub(crate) struct SessionsPage {
     /// The last drawn area.
     #[serde(skip)]
     area: Rect,
+    #[serde(skip)]
+    list_area: Rect,
     /// Requests waiting for the host.
     #[serde(skip)]
     pending: Vec<SessionsAction>,
@@ -109,6 +114,9 @@ pub(crate) struct SessionsPage {
 }
 
 impl SessionsPage {
+    pub(crate) fn animating(&self) -> bool {
+        self.detail_transition.is_some()
+    }
     /// Creates an empty sessions page.
     pub(crate) fn new() -> Self {
         Self {
@@ -116,9 +124,12 @@ impl SessionsPage {
             active: None,
             usage: crate::session_stats::SharedUsage::default(),
             selected: 0,
+            painted_selection: None,
+            detail_transition: None,
             offset: 0,
             mode: Mode::Listing,
             area: Rect::new(0, 0, 0, 0),
+            list_area: Rect::new(0, 0, 0, 0),
             pending: Vec::new(),
             submit_requested: false,
             children: vec![
@@ -201,7 +212,7 @@ impl SessionsPage {
     }
 
     fn body_rows(&self) -> usize {
-        usize::from(self.area.height.saturating_sub(3)).min(PAGE_ROWS)
+        (usize::from(self.area.height.saturating_sub(3)) / 2).min(PAGE_ROWS)
     }
 
     fn clamp_view(&mut self) {
@@ -494,12 +505,15 @@ impl SessionsPage {
                 if self.mode != Mode::Listing {
                     return Outcome::Ignored;
                 }
+                if mouse.column < self.list_area.x || mouse.column >= self.list_area.right() {
+                    return Outcome::Ignored;
+                }
                 let y = mouse.row;
                 // Leave the hint and pager rows to the components that own them.
                 if y > self.area.y
-                    && y <= self.area.y + u16::try_from(self.body_rows()).unwrap_or(0)
+                    && y <= self.area.y + u16::try_from(self.body_rows() * 2).unwrap_or(0)
                 {
-                    let index = self.offset + (y - self.area.y - 1) as usize;
+                    let index = self.offset + usize::from(y - self.area.y - 1) / 2;
                     if index < self.sessions.len() {
                         self.selected = index;
                         self.clamp_view();
@@ -524,6 +538,12 @@ impl View for SessionsPage {
 
     fn kind(&self) -> &'static str {
         "sessions_page"
+    }
+
+    fn tick(&mut self, delta: std::time::Duration, _cx: &mut Context) {
+        if let Some(animation) = &mut self.detail_transition {
+            animation.tick(delta);
+        }
     }
 
     fn children(&self) -> &[Node] {
@@ -554,6 +574,7 @@ impl View for SessionsPage {
             width: list_width,
             ..area
         };
+        self.list_area = list_area;
         let detail_area = Rect {
             x: area.x + list_width + 1,
             width: detail_width,
@@ -580,6 +601,16 @@ impl View for SessionsPage {
 
         self.sync_pager();
         self.sync_detail();
+        if self
+            .painted_selection
+            .is_some_and(|previous| previous != self.selected)
+        {
+            self.detail_transition = Some(terminalui::Animation::new(
+                std::time::Duration::from_millis(180),
+                terminalui::Easing::EaseOutCubic,
+            ));
+        }
+        self.painted_selection = Some(self.selected);
         let pager_rect = Rect {
             y: area.y + area.height.saturating_sub(1),
             width: list_width,
@@ -590,7 +621,27 @@ impl View for SessionsPage {
             child.view.render(pager_rect, buf, cx, theme);
         }
         if let Some(child) = self.children.get_mut(DETAIL_INDEX) {
-            child.view.render(detail_area, buf, cx, theme);
+            if self
+                .detail_transition
+                .as_ref()
+                .is_some_and(terminalui::Animation::is_done)
+            {
+                self.detail_transition = None;
+            }
+            if let Some(animation) = &self.detail_transition {
+                terminalui::render_with(
+                    &terminalui::Effect::FadeIn,
+                    animation.progress(),
+                    buf,
+                    detail_area,
+                    theme,
+                    |area, buf, theme| {
+                        child.view.render(area, buf, cx, theme);
+                    },
+                );
+            } else {
+                child.view.render(detail_area, buf, cx, theme);
+            }
         }
         let dialog_index = match self.mode {
             Mode::Listing => None,
@@ -669,82 +720,87 @@ impl SessionsPage {
         let rows = self.body_rows();
         let end = (self.offset + rows).min(self.sessions.len());
         for (offset, index) in (self.offset..end).enumerate() {
-            let y = area.y + 1 + u16::try_from(offset).unwrap_or(0);
+            let y = area.y + 1 + u16::try_from(offset * 2).unwrap_or(0);
             let session = &self.sessions[index];
             let selected = self.selected == index;
-            if selected {
-                buf.set_style(
-                    Rect {
-                        x: area.x,
-                        y,
-                        width: area.width,
-                        height: 1,
-                    },
-                    Style::default().bg(theme.secondary),
-                );
-            }
             let is_active = self.active.as_deref() == Some(session.session_id.as_str());
+            let background = if selected {
+                theme.secondary
+            } else {
+                theme.background
+            };
+            buf.set_style(
+                Rect::new(area.x, y, area.width, 2),
+                Style::default().bg(background),
+            );
             let marker = if is_active {
-                "▌"
+                "●"
             } else if session.pinned {
                 "◆"
             } else {
                 " "
             };
-            let marker_style = if is_active {
-                Style::default().fg(theme.accent)
-            } else {
-                Style::default().fg(theme.muted)
-            };
-            buf.set_stringn(area.x, y, marker, 2usize, marker_style);
+            buf.set_stringn(
+                area.x,
+                y,
+                marker,
+                1,
+                Style::default().fg(theme.accent).bg(background),
+            );
             let title = session
                 .title
                 .as_deref()
-                .unwrap_or(session.session_id.as_str());
-            let title_style = if selected {
-                Style::default()
-                    .fg(theme.foreground)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.foreground)
-            };
-            let clipped = terminalui::clip(title, 44);
-            buf.set_stringn(area.x + 2, y, &clipped, 44, title_style);
-            let provider = session.provider.as_deref().unwrap_or("unknown");
-            let usage = self.usage.get(&session.session_id);
-            let tokens = usage.map_or_else(
-                || "–:–".to_owned(),
-                |usage| {
-                    format!(
-                        "{}:{}",
-                        crate::context::human_count(usage.input),
-                        crate::context::human_count(usage.output)
-                    )
-                },
-            );
-            let cache = usage.map_or_else(
-                || "–".to_owned(),
-                |usage| format!("{:.0}%", usage.cache_rate()),
-            );
-            let turns = session
-                .turn_count
-                .or_else(|| usage.map(|usage| usage.turns.len() as u64));
-            let mut secondary = format!("{provider} · {tokens} · {cache} cache");
-            if let Some(turns) = turns {
-                let _ = write!(&mut secondary, " · {turns}t");
-            }
-            if is_active {
-                secondary.push_str(" · current");
-            }
-            let secondary_style = Style::default().fg(theme.muted);
-            let secondary_x = area.x + 46;
-            let secondary_budget = usize::from(area.width.saturating_sub(46 + 1));
+                .filter(|title| !title.is_empty())
+                .unwrap_or("Untitled session");
+            let title_style = Style::default()
+                .fg(theme.foreground)
+                .bg(background)
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
             buf.set_stringn(
-                secondary_x,
+                area.x + 2,
                 y,
-                &secondary,
-                secondary_budget,
-                secondary_style,
+                title,
+                usize::from(area.width.saturating_sub(3)),
+                title_style,
+            );
+            let provider = session.provider.as_deref().unwrap_or("unknown provider");
+            let model = session
+                .model
+                .as_ref()
+                .map_or("unknown model", |model| model.id.as_str());
+            let turns = session.turn_count.or_else(|| {
+                self.usage
+                    .get(&session.session_id)
+                    .map(|usage| usage.turns.len() as u64)
+            });
+            let turn_label = turns.map_or_else(
+                || "turns unknown".to_owned(),
+                |count| format!("{count} {}", if count == 1 { "turn" } else { "turns" }),
+            );
+            let updated = session
+                .updated_at
+                .or(session.last_activity_at)
+                .or(session.created_at)
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map_or_else(
+                    || "date unknown".to_owned(),
+                    |time| {
+                        time.with_timezone(&chrono::Local)
+                            .format("%b %d %H:%M")
+                            .to_string()
+                    },
+                );
+            let summary = format!("{provider} / {model} · {turn_label} · {updated}");
+            buf.set_stringn(
+                area.x + 2,
+                y + 1,
+                summary,
+                usize::from(area.width.saturating_sub(3)),
+                Style::default().fg(theme.muted).bg(background),
             );
         }
         if self.sessions.is_empty() {

@@ -5,7 +5,51 @@ use norte_code_wire::{Reasoning, ReasoningInfo};
 
 use crate::ui_model::SendMode;
 
-pub(super) const COMMANDS: [CommandDefinition; 6] = [
+pub(super) const COMMANDS: [CommandDefinition; 17] = [
+    CommandDefinition {
+        name: CommandName::ClearData,
+        usage: "/clear-data",
+    },
+    CommandDefinition {
+        name: CommandName::Theme,
+        usage: "/theme",
+    },
+    CommandDefinition {
+        name: CommandName::Diff,
+        usage: "/diff",
+    },
+    CommandDefinition {
+        name: CommandName::Rail,
+        usage: "/rail",
+    },
+    CommandDefinition {
+        name: CommandName::ToolVerbosity,
+        usage: "/tool-verbosity",
+    },
+    CommandDefinition {
+        name: CommandName::ToolGrouping,
+        usage: "/tool-grouping",
+    },
+    CommandDefinition {
+        name: CommandName::ToolOutput,
+        usage: "/tool-output-expand",
+    },
+    CommandDefinition {
+        name: CommandName::ChartDensity,
+        usage: "/charts-density",
+    },
+    CommandDefinition {
+        name: CommandName::ChartContrast,
+        usage: "/charts-contrast",
+    },
+    CommandDefinition {
+        name: CommandName::ChartDotSize,
+        usage: "/charts-dot-size",
+    },
+    CommandDefinition {
+        name: CommandName::Plans,
+        usage: "/plans",
+    },
     CommandDefinition {
         name: CommandName::Compact,
         usage: "/compact",
@@ -34,6 +78,18 @@ pub(super) const COMMANDS: [CommandDefinition; 6] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CommandName {
+    ClearData,
+    Theme,
+    Diff,
+    Rail,
+    ToolVerbosity,
+    ToolGrouping,
+    ToolOutput,
+    ChartDensity,
+    ChartContrast,
+    ChartDotSize,
+
+    Plans,
     Compact,
     New,
     Open,
@@ -45,6 +101,17 @@ pub(super) enum CommandName {
 impl CommandName {
     pub(super) const fn label(self) -> &'static str {
         match self {
+            Self::ClearData => "/clear-data",
+            Self::Theme => "/theme",
+            Self::Diff => "/diff",
+            Self::Rail => "/rail",
+            Self::ToolVerbosity => "/tool-verbosity",
+            Self::ToolGrouping => "/tool-grouping",
+            Self::ToolOutput => "/tool-output-expand",
+            Self::ChartDensity => "/charts-density",
+            Self::ChartContrast => "/charts-contrast",
+            Self::ChartDotSize => "/charts-dot-size",
+            Self::Plans => "/plans",
             Self::Compact => "/compact",
             Self::New => "/new",
             Self::Open => "/open",
@@ -105,6 +172,9 @@ impl ReasoningEffort {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SlashCommand {
+    ClearData,
+    Preference(super::preferences::PreferenceCommand),
+    Plans,
     Compact,
     New(Option<crate::client::NewSessionModel>),
     Open(Box<norte_code_wire::SessionSummary>),
@@ -160,14 +230,35 @@ pub(super) fn parse(
     let mut parts = input.split_ascii_whitespace();
     let label = parts.next().ok_or(SlashCommandError::UnknownCommand)?;
     let args = parts.collect::<Vec<_>>();
+    if let Some(result) = super::preferences::parse(label, &args) {
+        return result
+            .map(SlashCommand::Preference)
+            .map_err(|()| SlashCommandError::InvalidArguments);
+    }
     match CommandName::parse(label) {
+        Some(CommandName::ClearData) if args.is_empty() => Ok(SlashCommand::ClearData),
+        Some(CommandName::Plans) if args.is_empty() => Ok(SlashCommand::Plans),
         Some(CommandName::Compact) if args.is_empty() => Ok(SlashCommand::Compact),
         Some(CommandName::Debug) if args.is_empty() => Ok(SlashCommand::ToggleDebug),
-        Some(CommandName::Compact | CommandName::Debug) => Err(SlashCommandError::InvalidArguments),
+        Some(CommandName::Compact | CommandName::Debug | CommandName::Plans) => {
+            Err(SlashCommandError::InvalidArguments)
+        }
         Some(CommandName::New) => parse_new(&args, models),
         Some(CommandName::Open) => parse_open(&args, sessions),
         Some(CommandName::Reasoning) => parse_reasoning(&args, reasoning),
         Some(CommandName::Queue) => parse_queue_mode(&args),
+        Some(
+            CommandName::ClearData
+            | CommandName::Theme
+            | CommandName::Diff
+            | CommandName::Rail
+            | CommandName::ToolVerbosity
+            | CommandName::ToolGrouping
+            | CommandName::ToolOutput
+            | CommandName::ChartDensity
+            | CommandName::ChartContrast
+            | CommandName::ChartDotSize,
+        ) => Err(SlashCommandError::InvalidArguments),
         None => parse_plugin(label, args, plugins),
     }
 }

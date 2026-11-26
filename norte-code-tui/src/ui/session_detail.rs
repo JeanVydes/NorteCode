@@ -82,6 +82,7 @@ pub(crate) fn fields(session: &SessionSummary, usage: &SessionUsage) -> Vec<Fiel
             },
         ),
     ];
+    append_timestamps(&mut fields, session);
     if usage.errors > 0 || usage.cancelled > 0 {
         fields.push(Field::new(
             "failed",
@@ -117,4 +118,21 @@ pub(crate) fn fields(session: &SessionSummary, usage: &SessionUsage) -> Vec<Fiel
         },
     ));
     fields
+}
+
+fn append_timestamps(fields: &mut Vec<Field>, session: &SessionSummary) {
+    for (label, timestamp) in [
+        ("created", session.created_at),
+        ("updated", session.updated_at),
+        ("last activity", session.last_activity_at),
+    ] {
+        if let Some(time) = timestamp.and_then(chrono::DateTime::from_timestamp_millis) {
+            fields.push(Field::new(
+                label,
+                time.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string(),
+            ));
+        }
+    }
 }

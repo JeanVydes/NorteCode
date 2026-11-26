@@ -233,7 +233,9 @@ fn fold_delta(delta: &norte_code_wire::Delta, tree: &mut terminalui::Tree, model
             }
         }
         norte_code_wire::Delta::Reasoning { text, .. } => {
-            model.turn = TurnState::Thinking;
+            if model.turn != TurnState::Streaming {
+                model.turn = TurnState::Thinking;
+            }
             if let Some(stream) = tree.find_mut::<ui::Transcript>("stream") {
                 stream.push_reasoning_text(text);
             }

@@ -11,7 +11,7 @@ use super::{
     chrome::sync_chrome,
     drain::drain_sessions_actions,
     event_fold::{drain_server_events, fold, fold_upload_event},
-    input::{drain_plan_requests, handle_key},
+    input::handle_key,
 };
 use crate::attachment::{AttachmentKind, AttachmentSource, PreparedAttachment};
 use crate::client::{ClientEvent, UiCommand};
@@ -72,6 +72,7 @@ fn model_selection_tree() -> (UiModel, Tree) {
     let mut model = UiModel::detached();
     model.tab = Tab::Models;
     model.attachment = SessionAttachmentState::Ready;
+    model.models = vec![crate::test_support::model_info("codex", "gpt-6-luna")];
     let mut tree = ui::build_tree(&model);
     ui::sync_views(&mut tree, &model);
     tree.find_mut::<ui::ModelsPage>("models")
@@ -384,6 +385,14 @@ fn models_tab_selection_without_a_session_applies_to_the_next_message() {
         })
     );
     assert!(receiver.try_recv().is_err());
+
+    let area = ratatui::layout::Rect::new(0, 0, 100, 24);
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    tree.render(area, &mut buffer, &Theme::default());
+    assert!(
+        buffer.content().iter().any(|cell| cell.symbol() == "●"),
+        "the selected draft model must be marked before the session starts"
+    );
 
     for _ in 0..2 {
         press_app_key(&mut tree, KeyCode::BackTab, &mut commands, &mut model);
@@ -1138,20 +1147,111 @@ fn background_jobs_are_not_shown_in_the_rail() {
 }
 
 #[test]
-fn each_preview_button_opens_its_own_plan() {
+fn plans_command_opens_the_selected_plan_and_returns_to_the_list() {
     let mut model = UiModel::detached();
     for index in 0..4 {
         model.plans.push(plan(&format!("plan_{index}")));
     }
     let mut tree = rendered_tree(&model, 24);
 
-    press_button(&mut tree, "preview_3");
-    drain_plan_requests(&mut tree, &model);
+    type_text(&mut tree, "/plans", &mut model);
+    let mut commands = None;
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    for _ in 0..3 {
+        press_app_key(&mut tree, KeyCode::Down, &mut commands, &mut model);
+    }
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
 
     let overlay = tree
         .find::<ui::PlanOverlay>("plan_overlay")
         .expect("plan overlay");
     assert_eq!(overlay.plan().map(|plan| plan.id.as_str()), Some("plan_3"));
+    press_app_key(&mut tree, KeyCode::Esc, &mut commands, &mut model);
+    let overlay = tree.find::<ui::PlanOverlay>("plan_overlay").unwrap();
+    assert!(overlay.is_open());
+    assert!(overlay.plan().is_none());
+    press_app_key(&mut tree, KeyCode::Esc, &mut commands, &mut model);
+    assert!(
+        !tree
+            .find::<ui::PlanOverlay>("plan_overlay")
+            .unwrap()
+            .is_open()
+    );
+}
+
+#[test]
+fn tab_in_chat_keeps_focus_on_the_composer() {
+    let mut model = UiModel::detached();
+    let mut tree = ui::build_tree(&model);
+    ui::sync_views(&mut tree, &model);
+    let mut commands = None;
+    press_app_key(&mut tree, KeyCode::Tab, &mut commands, &mut model);
+    assert_eq!(tree.focused_id(), Some("composer"));
+}
+
+#[test]
+fn clear_data_command_requires_confirmation() {
+    let mut model = UiModel::detached();
+    let mut tree = ui::build_tree(&model);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    type_text(&mut tree, "/clear-data", &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert_eq!(model.tab, Tab::Settings);
+    assert!(receiver.try_recv().is_err());
+    press_app_key(&mut tree, KeyCode::Esc, &mut commands, &mut model);
+    assert!(receiver.try_recv().is_err());
+    model.tab = Tab::Chat;
+    ui::sync_views(&mut tree, &model);
+    tree.focus("composer");
+    type_text(&mut tree, "/clear-data", &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert!(matches!(receiver.try_recv(), Ok(UiCommand::ClearData)));
+}
+
+#[test]
+fn preference_commands_apply_in_chat_and_keep_invalid_drafts() {
+    let mut model = UiModel::detached();
+    let mut tree = ui::build_tree(&model);
+    let mut commands = None;
+    type_text(&mut tree, "/diff split", &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert_eq!(model.preferences.diff_mode, crate::diff::DiffMode::Split);
+    assert_eq!(
+        tree.find::<Composer>("composer").unwrap().expanded_text(),
+        ""
+    );
+
+    type_text(&mut tree, "/charts-density 7", &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert_eq!(model.preferences.chart_density, 4);
+    assert_eq!(
+        tree.find::<Composer>("composer").unwrap().expanded_text(),
+        "/charts-density 7"
+    );
+}
+
+#[test]
+fn control_shift_enter_adds_a_newline_without_sending() {
+    let mut model = UiModel::detached();
+    let mut tree = ui::build_tree(&model);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    type_text(&mut tree, "first", &mut model);
+    handle_key(
+        &mut tree,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        &mut commands,
+        &mut None,
+        &mut model,
+        None,
+    );
+    assert_eq!(
+        tree.find::<Composer>("composer").unwrap().expanded_text(),
+        "first\n"
+    );
+    assert!(receiver.try_recv().is_err());
 }
 
 fn tool_finished(tool: &str, is_error: bool) -> norte_code_wire::ServerEvent {
@@ -1193,8 +1293,9 @@ fn escape_closing_the_plan_preview_does_not_cancel_the_turn() {
         model.plans.push(plan(&format!("plan_{index}")));
     }
     let mut tree = rendered_tree(&model, 24);
-    press_button(&mut tree, "preview_3");
-    drain_plan_requests(&mut tree, &model);
+    tree.find_mut::<ui::PlanOverlay>("plan_overlay")
+        .unwrap()
+        .open(model.plans[3].clone());
     ui::sync_views(&mut tree, &model);
     assert!(
         tree.find::<ui::PlanOverlay>("plan_overlay")

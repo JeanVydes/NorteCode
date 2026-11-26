@@ -15,6 +15,12 @@ pub(in crate::app) fn sync_debug_overlay(
 }
 
 pub(in crate::app) fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
+    if let Some(overlay) = tree.find_mut::<ui::PlanOverlay>("plan_overlay") {
+        overlay.sync_plans(&model.plans);
+    }
+    if let Some(transcript) = tree.find_mut::<ui::Transcript>("stream") {
+        transcript.set_sessionless(model.active.is_none());
+    }
     let jobs = model
         .jobs
         .iter()
@@ -79,9 +85,5 @@ pub(in crate::app) fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) 
             .filter(|(selection, _)| model.plugin_widget_scope().as_ref() == Some(selection))
             .map_or(&[][..], |(_, views)| views.as_slice());
         rail.set_plugin_views(views);
-        let compact = model.active.is_some();
-        if rail.compact_enabled() != compact {
-            rail.set_compact_enabled(compact);
-        }
     }
 }

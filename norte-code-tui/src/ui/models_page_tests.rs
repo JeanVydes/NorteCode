@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::{buffer::Buffer, layout::Rect};
 use terminalui::{InputEvent, Outcome, Tree, node};
 
 use super::{Mode, ModelsAction, ModelsData, ModelsPage, ProviderKeyStatus};
@@ -25,6 +26,92 @@ fn page_with_keys() -> ModelsPage {
         active: None,
     });
     page
+}
+
+fn click(column: u16, row: u16) -> InputEvent {
+    InputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+#[test]
+fn clicks_activate_the_rendered_row_and_ignore_headers_and_details() {
+    let area = Rect::new(4, 3, 80, 12);
+    let mut tree = Tree::new(node("models", page_with_keys()));
+    tree.focus("models");
+    tree.render(
+        area,
+        &mut Buffer::empty(area),
+        &terminalui::Theme::default(),
+    );
+
+    for (column, row) in [(4, 3), (4, 4), (4, 5), (70, 6)] {
+        tree.handle_event(&click(column, row));
+        assert!(
+            tree.find_mut::<ModelsPage>("models")
+                .unwrap()
+                .take_pending()
+                .is_empty()
+        );
+    }
+    tree.handle_event(&click(5, 6));
+    let actions = tree
+        .find_mut::<ModelsPage>("models")
+        .unwrap()
+        .take_pending();
+    assert!(
+        matches!(&actions[..], [ModelsAction::ToggleExpand { provider }] if provider == "openrouter")
+    );
+
+    tree.handle_event(&click(5, 7));
+    let actions = tree
+        .find_mut::<ModelsPage>("models")
+        .unwrap()
+        .take_pending();
+    assert!(
+        matches!(&actions[..], [ModelsAction::ToggleExpand { provider }] if provider == "anthropic")
+    );
+}
+
+#[test]
+fn clicks_follow_the_table_scroll_offset() {
+    let mut page = ModelsPage::new();
+    page.set_data(ModelsData {
+        models: (0..12)
+            .map(|index| crate::test_support::model_info(&format!("provider{index:02}"), "model"))
+            .collect(),
+        key_status: HashMap::new(),
+        active: None,
+    });
+    let area = Rect::new(2, 2, 80, 8);
+    let mut tree = Tree::new(node("models", page));
+    tree.focus("models");
+    tree.render(
+        area,
+        &mut Buffer::empty(area),
+        &terminalui::Theme::default(),
+    );
+    tree.handle_event(&crate::test_support::input_event(
+        KeyCode::End,
+        KeyModifiers::NONE,
+    ));
+    tree.render(
+        area,
+        &mut Buffer::empty(area),
+        &terminalui::Theme::default(),
+    );
+
+    tree.handle_event(&click(3, 5));
+    let actions = tree
+        .find_mut::<ModelsPage>("models")
+        .unwrap()
+        .take_pending();
+    assert!(
+        matches!(&actions[..], [ModelsAction::AskKeyForExpand { provider }] if provider == "provider07")
+    );
 }
 
 fn ctrl_d() -> InputEvent {

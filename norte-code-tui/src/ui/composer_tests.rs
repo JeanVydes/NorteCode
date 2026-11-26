@@ -127,6 +127,24 @@ fn shift_enter_inserts_a_newline_in_the_composer() {
 }
 
 #[test]
+fn control_j_and_control_shift_enter_insert_newlines() {
+    let mut tree = composer_tree(Arc::new(FakeClipboard::default()));
+    type_text(&mut tree, "one");
+    press(&mut tree, KeyCode::Char('j'), KeyModifiers::CONTROL);
+    type_text(&mut tree, "two");
+    press(
+        &mut tree,
+        KeyCode::Enter,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    type_text(&mut tree, "three");
+    assert_eq!(
+        tree.find::<Composer>("composer").unwrap().text(),
+        "one\ntwo\nthree"
+    );
+}
+
+#[test]
 fn text_of_thirty_two_chars_stays_inline() {
     let mut tree = composer_tree(Arc::new(FakeClipboard::default()));
     let text = "a".repeat(32);

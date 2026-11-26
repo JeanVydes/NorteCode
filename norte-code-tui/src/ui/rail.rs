@@ -1,7 +1,5 @@
 //! The rail: session identity, connection state and context usage.
 //!
-//! The context section owns a gauge and a compact button as children, so
-//! the tree routes focus and clicks to them like any other view.
 
 use std::any::Any;
 
@@ -12,7 +10,6 @@ use ratatui::style::{Modifier, Style};
 use serde::{Deserialize, Serialize};
 
 use terminalui::components::badge::{Badge, BadgeVariant};
-use terminalui::components::button::{Button, ButtonVariant};
 use terminalui::components::chrome::{Chrome, Padding, draw_box};
 use terminalui::components::gauge::{Gauge, GaugeStyle};
 use terminalui::components::stat::Stat;
@@ -26,12 +23,6 @@ use crate::ui::copy::{
 use crate::ui_model::SessionAttachmentState;
 
 const RAIL_WIDTH: u16 = 26;
-const PREVIEW_PREFIX: &str = "preview_";
-
-fn preview_id(index: usize) -> String {
-    format!("{PREVIEW_PREFIX}{index}")
-}
-
 /// Where virtual rail rows land on screen.
 struct WidgetViewport {
     /// The rail's inner rectangle.
@@ -70,7 +61,6 @@ impl RailPosition {
     }
 
     /// Read the label the settings page reports.
-    #[cfg(test)]
     pub(crate) fn from_label(label: &str) -> Option<Self> {
         match label {
             "hide" => Some(Self::Hide),
@@ -94,7 +84,7 @@ impl RailPosition {
     }
 }
 
-/// The rail, with the context gauge and compact button as children.
+/// The rail, with the context gauge as a child.
 #[derive(Serialize)]
 pub(crate) struct Rail {
     /// Where the connection stands right now.
@@ -160,10 +150,7 @@ impl Rail {
             scroll: 0,
             area: Rect::new(0, 0, 0, 0),
             inner: Rect::new(0, 0, 0, 0),
-            children: vec![
-                node("context_gauge", gauge),
-                node("compact", Button::new(ButtonVariant::Outline, "compact")),
-            ],
+            children: vec![node("context_gauge", gauge)],
         }
     }
 
@@ -199,7 +186,6 @@ impl Rail {
 
     pub(crate) fn set_plans(&mut self, plans: Vec<norte_code_wire::PlanSummary>) {
         let revealed = self.plans.is_empty() && !plans.is_empty();
-        self.sync_plan_buttons(plans.len());
         self.plans = plans;
         self.reveal_plans |= revealed;
     }
@@ -224,60 +210,8 @@ impl Rail {
         }
     }
 
-    fn sync_plan_buttons(&mut self, count: usize) {
-        let expected = 2 + count;
-        self.children.truncate(expected);
-        while self.children.len() < expected {
-            let index = self.children.len() - 2;
-            self.children.push(node(
-                preview_id(index),
-                Button::new(ButtonVariant::Outline, "open"),
-            ));
-        }
-    }
-
-    /// Take a plan request from a click or a row's preview button.
     pub(crate) fn take_plan_request(&mut self) -> Option<String> {
-        let Self {
-            children,
-            plans,
-            pending_plan,
-            ..
-        } = self;
-        let clicked = pending_plan.take();
-        let previewed = children
-            .iter_mut()
-            .skip(2)
-            .enumerate()
-            .find_map(|(index, child)| {
-                child
-                    .view
-                    .as_any()
-                    .downcast_mut::<Button>()
-                    .is_some_and(Button::take_pressed)
-                    .then(|| plans.get(index).map(|plan| plan.id.clone()))
-                    .flatten()
-            });
-        previewed.or(clicked)
-    }
-
-    /// Whether the compact button is currently enabled.
-    pub(crate) fn compact_enabled(&self) -> bool {
-        self.children
-            .get(1)
-            .and_then(|node| node.view.as_any_ref().downcast_ref::<Button>())
-            .is_some_and(|button| !button.state.disabled)
-    }
-
-    /// Enable or disable the compact button from the host's state.
-    pub(crate) fn set_compact_enabled(&mut self, enabled: bool) {
-        if let Some(button) = self
-            .children
-            .get_mut(1)
-            .and_then(|node| node.view.as_any().downcast_mut::<Button>())
-        {
-            button.set_disabled(!enabled);
-        }
+        self.pending_plan.take()
     }
 
     /// Rows the whole rail would need without clipping.
@@ -368,12 +302,6 @@ impl Rail {
             width: 12,
             height: 1,
         };
-        let button_rect = Rect {
-            x: gauge_rect.x + 13,
-            y: bar_y,
-            width: 9,
-            height: 1,
-        };
         if let Some(node) = self.children.first_mut() {
             if let Some(gauge) = node.view.as_any().downcast_mut::<Gauge>() {
                 gauge.value = usage.fraction();
@@ -381,12 +309,6 @@ impl Rail {
             node.view.render(gauge_rect, buf, cx, theme);
             if let Some(gauge) = node.view.as_any().downcast_mut::<Gauge>() {
                 gauge.state.area = Self::to_screen(gauge_rect, viewport);
-            }
-        }
-        if let Some(node) = self.children.get_mut(1) {
-            node.view.render(button_rect, buf, cx, theme);
-            if let Some(button) = node.view.as_any().downcast_mut::<Button>() {
-                button.state.area = Self::to_screen(button_rect, viewport);
             }
         }
         start + 4
@@ -436,7 +358,7 @@ impl Rail {
         y: u16,
         theme: &Theme,
         viewport: &WidgetViewport,
-        cx: &mut Context,
+        _cx: &mut Context,
     ) {
         self.plan_rows.clear();
         if y + 1 >= inner.y + inner.height {
@@ -448,7 +370,7 @@ impl Rail {
             buf.set_stringn(inner.x + 1, y + 1, NONE, 4, dim);
             return;
         }
-        for (index, (row, plan)) in (y + 1..).zip(self.plans.iter()).enumerate() {
+        for (row, plan) in (y + 1..).zip(self.plans.iter()) {
             if row >= inner.y + inner.height {
                 break;
             }
@@ -457,27 +379,15 @@ impl Rail {
                 inner.x + 1,
                 row,
                 &title,
-                usize::from(inner.width.saturating_sub(8)),
+                usize::from(inner.width.saturating_sub(3)),
                 Style::default().fg(theme.accent).bg(theme.background),
             );
-            let button_rect = Rect {
-                x: inner.x + inner.width.saturating_sub(7),
-                y: row,
-                width: 6,
-                height: 1,
-            };
-            if let Some(node) = self.children.get_mut(2 + index) {
-                node.view.render(button_rect, buf, cx, theme);
-                if let Some(button) = node.view.as_any().downcast_mut::<Button>() {
-                    button.state.area = Self::to_screen(button_rect, viewport);
-                }
-            }
             self.plan_rows.push((
                 Self::to_screen(
                     Rect {
                         x: inner.x,
                         y: row,
-                        width: inner.width.saturating_sub(7),
+                        width: inner.width,
                         height: 1,
                     },
                     viewport,

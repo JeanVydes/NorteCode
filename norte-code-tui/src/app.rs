@@ -315,6 +315,17 @@ fn poll_timeout(
 fn animating(tree: &terminalui::Tree, model: &UiModel) -> bool {
     model.turn != TurnState::Idle
         || tree
+            .find::<ui::PlanOverlay>("plan_overlay")
+            .is_some_and(ui::PlanOverlay::is_open)
+        || (model.tab == crate::ui_model::Tab::Sessions
+            && tree
+                .find::<ui::SessionsPage>("sessions")
+                .is_some_and(ui::SessionsPage::animating))
+        || (model.tab == crate::ui_model::Tab::Chat
+            && tree
+                .find::<ui::Transcript>("stream")
+                .is_some_and(ui::Transcript::welcome_animating))
+        || tree
             .find::<ui::ToastHost>("toast")
             .is_some_and(ui::ToastHost::is_active)
 }

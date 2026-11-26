@@ -85,10 +85,10 @@ fn the_rail_shows_the_active_thinking_and_queue_modes() {
 }
 
 #[test]
-fn the_compact_button_takes_a_focus_slot() {
+fn the_rail_has_no_compact_button() {
     let model = UiModel::detached();
     let tree = build_tree(&model);
-    assert!(tree.focusable_ids().contains(&"compact"));
+    assert!(!tree.focusable_ids().contains(&"compact"));
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn rail_labels_round_trip_through_the_enum() {
 }
 
 #[test]
-fn hiding_the_rail_removes_its_ink_but_not_its_focus_slot() {
+fn hiding_the_rail_removes_its_ink_and_compact_focus_slot() {
     let mut model = UiModel::detached();
     model.preferences.rail_position = RailPosition::Hide;
     let theme = model.preferences.catalog.theme(&model.preferences.theme);
@@ -259,5 +259,5 @@ fn hiding_the_rail_removes_its_ink_but_not_its_focus_slot() {
     assert_eq!(tree.focused_id(), Some("composer"));
     let painted = crate::test_support::rendered_in(&mut tree, area, &theme);
     assert!(!painted.contains("CONTEXT"), "the hidden rail still drew");
-    assert!(tree.focusable_ids().contains(&"compact"));
+    assert!(!tree.focusable_ids().contains(&"compact"));
 }

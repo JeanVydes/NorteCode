@@ -74,6 +74,44 @@ fn overlay_owns_enter(tree: &terminalui::Tree) -> bool {
     question_open || prompt_open || plan_open
 }
 
+fn keep_chat_focus(
+    tree: &mut terminalui::Tree,
+    model: &UiModel,
+    key: crossterm::event::KeyEvent,
+) -> bool {
+    if model.tab == Tab::Chat
+        && !overlay_owns_enter(tree)
+        && matches!(
+            (key.modifiers, key.code),
+            (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab)
+        )
+    {
+        tree.focus("composer");
+        true
+    } else {
+        false
+    }
+}
+
+fn reconnect(
+    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
+    events: &mut Option<tokio::sync::mpsc::Receiver<ClientEvent>>,
+    model: &mut UiModel,
+    config: Option<&ClientConfig>,
+) {
+    if let SessionAttachmentState::Failed { .. } = model.attachment {
+        if let Some(cfg) = config {
+            let (commands_tx, events_rx) = start(cfg.clone());
+            *commands = Some(commands_tx);
+            *events = Some(events_rx);
+            model.attachment = SessionAttachmentState::Connecting;
+        }
+    } else if let Some(commands) = commands.as_ref() {
+        let _ = commands.try_send(UiCommand::Refresh);
+        let _ = commands.try_send(UiCommand::RefreshViews);
+    }
+}
+
 /// Handle one key press; returns `true` when the loop quits.
 pub(in crate::app) fn handle_key(
     tree: &mut terminalui::Tree,
@@ -90,7 +128,7 @@ pub(in crate::app) fn handle_key(
     if handle_palette_key(tree, key, commands, model) {
         return false;
     }
-    if handle_slash_suggestion_key(tree, key, model) {
+    if !overlay_owns_enter(tree) && handle_slash_suggestion_key(tree, key, model) {
         settle_input(tree, commands, model);
         return false;
     }
@@ -107,6 +145,11 @@ pub(in crate::app) fn handle_key(
         return false;
     }
     match (key.modifiers, key.code) {
+        (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab)
+            if keep_chat_focus(tree, model, key) =>
+        {
+            return false;
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             let copied = tree
                 .find_mut::<ui::Composer>("composer")
@@ -125,26 +168,16 @@ pub(in crate::app) fn handle_key(
             switch_tab(tree, model, model.tab.previous());
             pass_to_tree = false;
         }
-        (KeyModifiers::NONE, KeyCode::PageUp) => {
+        (KeyModifiers::NONE, KeyCode::PageUp) if !overlay_owns_enter(tree) => {
             scroll_page(tree, model.tab, -6);
             pass_to_tree = false;
         }
-        (KeyModifiers::NONE, KeyCode::PageDown) => {
+        (KeyModifiers::NONE, KeyCode::PageDown) if !overlay_owns_enter(tree) => {
             scroll_page(tree, model.tab, 6);
             pass_to_tree = false;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
-            if let SessionAttachmentState::Failed { .. } = model.attachment {
-                if let Some(cfg) = config {
-                    let (commands_us, events_rx) = start(cfg.clone());
-                    *commands = Some(commands_us);
-                    *events = Some(events_rx);
-                    model.attachment = SessionAttachmentState::Connecting;
-                }
-            } else if let Some(commands) = commands.as_ref() {
-                let _ = commands.try_send(UiCommand::Refresh);
-                let _ = commands.try_send(UiCommand::RefreshViews);
-            }
+            reconnect(commands, events, model, config);
             pass_to_tree = false;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
@@ -218,7 +251,7 @@ pub(in crate::app) fn apply_key_intent(
             provider,
             model: model_id,
         } => {
-            set_model(commands, model, &provider, &model_id);
+            set_model(tree, commands, model, &provider, &model_id);
         }
         ui::KeyIntent::Expand { provider } => {
             if let Some(page) = tree.find_mut::<ui::ModelsPage>("models") {
@@ -237,6 +270,7 @@ fn key_intent_for(provider: String, model_id: Option<String>) -> crate::ui::KeyI
 
 /// Select a model for the active session or the next sessionless draft.
 pub(in crate::app) fn set_model(
+    tree: &mut terminalui::Tree,
     commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
     provider: &str,
@@ -255,6 +289,7 @@ pub(in crate::app) fn set_model(
             provider: provider.to_owned(),
             model: model_id.to_owned(),
         });
+        ui::update_models(tree, model);
     }
 }
 

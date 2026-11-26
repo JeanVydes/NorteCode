@@ -11,12 +11,16 @@ use super::{Mode, PlanOverlay};
 
 impl PlanOverlay {
     pub(super) fn paint(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme) {
+        if self.plan.is_none() && self.plans.is_some() {
+            self.paint_list(area, buf, theme);
+            return;
+        }
         let Some(plan) = &self.plan else {
             return;
         };
         self.area = area;
         paint_scrim(buf, area, theme);
-        let inner = draw_box(buf, dialog(area), &chrome(theme), theme);
+        let inner = draw_box(buf, dialog(area), &self.animated_chrome(theme), theme);
         let title = if self.question.is_some() {
             format!(" {} ", crate::ui::copy::PLAN_REVIEW)
         } else {
@@ -33,17 +37,21 @@ impl PlanOverlay {
         };
         let layout = document::layout(inner, &plan.content, theme, &mut state);
         let review = self.question.is_some();
-        paint_header(buf, inner, theme, plan.content.lines().count(), review);
+        paint_header(buf, inner, theme, plan, review);
         document::paint(buf, inner, theme, &self.doc, &layout, self.scroll);
-        paint_buttons(
-            buf,
-            inner,
-            theme,
-            layout.footer,
-            review,
-            self.selected,
-            &mut self.buttons,
-        );
+        if review {
+            paint_buttons(
+                buf,
+                inner,
+                theme,
+                layout.footer,
+                review,
+                self.selected,
+                &mut self.buttons,
+            );
+        } else {
+            self.buttons.clear();
+        }
         paint_controls(
             buf,
             inner,
@@ -53,6 +61,82 @@ impl PlanOverlay {
             self.mode,
             &self.response,
         );
+    }
+
+    fn paint_list(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme) {
+        self.area = area;
+        paint_scrim(buf, area, theme);
+        let inner = draw_box(buf, dialog(area), &self.animated_chrome(theme), theme);
+        paint_title(buf, inner, theme, " Plans ");
+        if inner.height < 4 || inner.width < 4 {
+            return;
+        }
+        let body = Rect::new(
+            inner.x + 1,
+            inner.y + 2,
+            inner.width.saturating_sub(2),
+            inner.height.saturating_sub(4),
+        );
+        self.list_body = body;
+        let plans = self.plans.as_deref().unwrap_or_default();
+        let visible = usize::from(body.height).max(1);
+        if self.list_selected < self.list_offset {
+            self.list_offset = self.list_selected;
+        } else if self.list_selected >= self.list_offset + visible {
+            self.list_offset = self.list_selected + 1 - visible;
+        }
+        if plans.is_empty() {
+            buf.set_stringn(
+                body.x,
+                body.y,
+                "No plans in this session",
+                usize::from(body.width),
+                Style::default().fg(theme.muted),
+            );
+        }
+        for (row, plan) in plans
+            .iter()
+            .enumerate()
+            .skip(self.list_offset)
+            .take(usize::from(body.height))
+        {
+            let selected = row == self.list_selected;
+            let text = format!(
+                "{}  {}  ·  {}  ·  {}  ·  rev {}  ·  {}",
+                if selected { "›" } else { " " },
+                plan.title.as_deref().unwrap_or(&plan.id),
+                plan.id,
+                plan.status.label(),
+                plan.revision,
+                plan.model.as_deref().unwrap_or("model unknown")
+            );
+            let style = if selected {
+                Style::default().fg(theme.background).bg(theme.accent)
+            } else {
+                Style::default().fg(theme.foreground)
+            };
+            buf.set_stringn(
+                body.x,
+                body.y + u16::try_from(row - self.list_offset).unwrap_or(u16::MAX),
+                text,
+                usize::from(body.width),
+                style,
+            );
+        }
+        buf.set_stringn(
+            inner.x + 1,
+            inner.bottom() - 1,
+            "↑/↓ select  ·  Enter preview  ·  Esc close",
+            usize::from(inner.width.saturating_sub(2)),
+            Style::default().fg(theme.muted),
+        );
+    }
+
+    fn animated_chrome(&self, theme: &Theme) -> Chrome {
+        let mut animated = *theme;
+        let phase = (self.elapsed.as_secs_f64() * 1.5).sin().mul_add(0.12, 0.12);
+        animated.border = terminalui::lerp_color(theme.border, theme.accent, phase);
+        chrome(&animated)
     }
 }
 
@@ -105,16 +189,28 @@ fn paint_title(buf: &mut Buffer, inner: Rect, theme: &Theme, title: &str) {
     );
 }
 
-fn paint_header(buf: &mut Buffer, inner: Rect, theme: &Theme, lines: usize, review: bool) {
+fn paint_header(
+    buf: &mut Buffer,
+    inner: Rect,
+    theme: &Theme,
+    plan: &norte_code_wire::PlanSummary,
+    review: bool,
+) {
     let hint = if review {
         "  j/k scroll, g/G top and bottom"
     } else {
-        "  Esc closes"
+        "  ·  Esc back"
     };
     buf.set_stringn(
         inner.x + 1,
         inner.y + 1,
-        format!("{lines} lines{hint}"),
+        format!(
+            "{}  ·  {}  ·  rev {}  ·  {}{hint}",
+            plan.id,
+            plan.status.label(),
+            plan.revision,
+            plan.model.as_deref().unwrap_or("model unknown")
+        ),
         usize::from(inner.width.saturating_sub(2)),
         Style::default().fg(theme.muted),
     );
@@ -187,7 +283,7 @@ fn paint_controls(
     } else if review {
         "←/→ select, Enter confirm, a/d/f, j/k scroll".to_owned()
     } else {
-        "Esc closes".to_owned()
+        "j/k scroll  ·  g/G top or bottom  ·  Esc back".to_owned()
     };
     let color = if mode == Mode::Feedback {
         theme.foreground

@@ -162,8 +162,6 @@ pub(crate) struct ModelsPage {
     expanded: HashSet<String>,
     /// The selected row index.
     selected: usize,
-    /// The first visible row.
-    offset: usize,
     /// The last drawn area.
     #[serde(skip)]
     area: Rect,
@@ -190,7 +188,6 @@ impl ModelsPage {
             filter: Autocomplete::new(Vec::new()),
             expanded: HashSet::new(),
             selected: 0,
-            offset: 0,
             area: Rect::new(0, 0, 0, 0),
             mode: Mode::Listing,
             dialog_choice: DeleteChoice::default(),
@@ -451,21 +448,11 @@ impl ModelsPage {
     }
 
     fn clamp_view(&mut self) {
-        let rows = self.rows();
-        let body = self.body_rows();
-        if rows.len() <= body {
-            self.offset = 0;
-            return;
-        }
-        if self.selected < self.offset {
-            self.offset = self.selected;
-        } else if self.selected >= self.offset + body {
-            self.offset = self.selected + 1 - body;
-        }
+        self.selected = self.selected.min(self.last_row());
     }
 
     fn body_rows(&self) -> usize {
-        self.area.height.saturating_sub(1) as usize
+        self.area.height.saturating_sub(3) as usize
     }
 
     fn key_status(&self, provider: &str) -> bool {
@@ -891,15 +878,31 @@ impl View for ModelsPage {
                         self.selected = (self.selected + 3).min(last);
                     }
                     MouseEventKind::Down(MouseButton::Left) => {
-                        let y = mouse.row;
-                        if y > self.area.y && y < self.area.y + self.area.height {
-                            let index = self.offset + (y - self.area.y - 1) as usize;
-                            if index < self.rows().len() {
-                                self.selected = index;
-                                self.clamp_view();
-                                self.activate();
-                            }
+                        let Some(table) = self.children[TABLE_INDEX]
+                            .view
+                            .as_any_ref()
+                            .downcast_ref::<Table>()
+                        else {
+                            return Outcome::Ignored;
+                        };
+                        let area = table.state.area;
+                        let body_top = area.y.saturating_add(2);
+                        let row_width = area.width.saturating_sub(u16::from(
+                            self.rows().len() > usize::from(area.height.saturating_sub(2)),
+                        ));
+                        if mouse.column < area.x
+                            || mouse.column >= area.x.saturating_add(row_width)
+                            || mouse.row < body_top
+                            || mouse.row >= area.bottom()
+                        {
+                            return Outcome::Ignored;
                         }
+                        let index = table.state.offset + usize::from(mouse.row - body_top);
+                        if index >= self.rows().len() {
+                            return Outcome::Ignored;
+                        }
+                        self.selected = index;
+                        self.activate();
                     }
                     _ => return Outcome::Ignored,
                 }

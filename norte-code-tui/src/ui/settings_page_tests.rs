@@ -213,6 +213,31 @@ fn clear_data_requires_confirmation_and_is_listed_last() {
 }
 
 #[test]
+fn clicking_host_data_does_not_select_a_virtual_table_row() {
+    let (mut tree, _, theme) = settings_tree();
+    let area = Rect::new(0, 0, 100, 40);
+    tree.render(area, &mut Buffer::empty(area), &theme);
+    let page = tree.find::<SettingsPage>("settings").unwrap();
+    let host_y = page.area.y + page.layout().section(super::SettingsSection::Host).y + 5;
+    let event = InputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: page.area.x + 4,
+        row: host_y,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    });
+    tree.handle_event(&event);
+    assert_eq!(
+        tree.find::<super::ReadOnlyTable>("host_table")
+            .unwrap()
+            .0
+            .state
+            .selected,
+        0
+    );
+    assert!(!tree.focusable_ids().contains(&"host_table"));
+}
+
+#[test]
 fn plugin_marker_shows_check_when_enabled_and_x_when_disabled() {
     let mut model = UiModel::detached();
     model.tab = Tab::Settings;

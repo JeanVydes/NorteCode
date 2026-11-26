@@ -234,6 +234,8 @@ fn char_width(character: char) -> usize {
 pub(crate) struct Transcript {
     items: Vec<Item>,
     #[serde(skip)]
+    welcome: super::welcome::Welcome,
+    #[serde(skip)]
     retention: RetentionConfig,
     #[serde(skip)]
     first_visible: u16,
@@ -368,6 +370,18 @@ impl Default for Transcript {
 }
 
 impl Transcript {
+    pub(crate) fn set_sessionless(&mut self, sessionless: bool) {
+        let empty = self
+            .items
+            .iter()
+            .all(|item| matches!(item, Item::Notice { .. }));
+        self.welcome.set_visible(sessionless && empty);
+    }
+
+    pub(crate) fn welcome_animating(&self) -> bool {
+        self.welcome.animating()
+    }
+
     /// Creates a bottom-pinned empty stream with default retention.
     pub(crate) fn new() -> Self {
         Self::with_retention(RetentionConfig::default())
@@ -377,6 +391,7 @@ impl Transcript {
     pub(crate) fn with_retention(retention: RetentionConfig) -> Self {
         Self {
             items: Vec::new(),
+            welcome: super::welcome::Welcome::default(),
             retention,
             first_visible: u16::MAX,
             view_height: 0,
@@ -838,7 +853,24 @@ impl Transcript {
         if self.streaming.is_none() {
             self.streaming = Some(Duration::ZERO);
         }
-        if let Some(Item::Assistant { text: existing, .. }) = self.items.last_mut() {
+        let assistant = self
+            .items
+            .iter_mut()
+            .rev()
+            .find_map(|item| match item {
+                Item::Assistant { text, .. } => Some(Some(text)),
+                Item::Reasoning { .. } => None,
+                Item::Activity { entries, .. }
+                    if entries
+                        .iter()
+                        .all(|entry| matches!(entry, Item::Reasoning { .. })) =>
+                {
+                    None
+                }
+                _ => Some(None),
+            })
+            .flatten();
+        if let Some(existing) = assistant {
             existing.push_str(text);
             self.dirty = true;
             return;
@@ -851,17 +883,25 @@ impl Transcript {
 
     /// Append reasoning text to the open reasoning block.
     ///
-    /// Consecutive reasoning deltas merge into one block. Assistant text,
-    /// a tool, or a user message closes the block, so the next delta starts
-    /// a new one instead of being appended to a distant block from earlier
-    /// in the turn.
+    /// Merge reasoning across interleaved answer deltas until a tool or input.
     pub(crate) fn push_reasoning_text(&mut self, text: &str) {
-        let current = if self.tool_preferences.grouped_activity {
-            last_activity_entries_mut(&mut self.items).and_then(|entries| entries.last_mut())
-        } else {
-            self.items.last_mut()
-        };
-        if let Some(Item::Reasoning { text: existing, .. }) = current {
+        let current = self
+            .items
+            .iter_mut()
+            .rev()
+            .find_map(|item| match item {
+                Item::Reasoning { text, .. } => Some(Some(text)),
+                Item::Assistant { .. } => None,
+                Item::Activity { entries, .. } => {
+                    entries.iter_mut().next_back().map(|entry| match entry {
+                        Item::Reasoning { text, .. } => Some(text),
+                        _ => None,
+                    })
+                }
+                _ => Some(None),
+            })
+            .flatten();
+        if let Some(existing) = current {
             existing.push_str(text);
             self.dirty = true;
             return;
@@ -1983,13 +2023,6 @@ fn complete_activity(items: &mut [Item]) {
     }
 }
 
-fn last_activity_entries_mut(items: &mut [Item]) -> Option<&mut Vec<Item>> {
-    match items.last_mut()? {
-        Item::Activity { entries, .. } => Some(entries),
-        _ => None,
-    }
-}
-
 fn for_each_tool_mut(items: &mut [Item], action: &mut impl FnMut(&mut Item)) {
     for item in items {
         match item {
@@ -2190,6 +2223,7 @@ impl View for Transcript {
     }
 
     fn tick(&mut self, delta: Duration, cx: &mut Context) {
+        self.welcome.tick(delta);
         if let Some(thinking) = self.thinking {
             self.thinking = Some(thinking.saturating_add(delta));
         }
@@ -2223,6 +2257,7 @@ impl View for Transcript {
         let docs = std::mem::take(&mut self.docs);
         self.paint_items(area, content, buf, cx, &docs, theme);
         self.docs = docs;
+        self.welcome.paint(area, buf, theme);
 
         if !self.tool_preferences.grouped_activity
             && !has_running_tool(&self.items)

@@ -29,6 +29,30 @@ fn page_with(sessions: Vec<norte_code_wire::SessionSummary>) -> SessionsPage {
     page
 }
 
+#[test]
+fn both_lines_of_a_session_select_the_same_row() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    let mut tree = Tree::new(node(
+        "sessions",
+        page_with(vec![
+            session("a", Some("First")),
+            session("b", Some("Second")),
+        ]),
+    ));
+    let area = Rect::new(0, 0, 100, 18);
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    tree.render(area, &mut buffer, &Theme::default());
+    for row in [3, 4] {
+        tree.handle_event(&InputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(tree.find::<SessionsPage>("sessions").unwrap().selected, 1);
+    }
+}
+
 fn key(character: char) -> crossterm::event::KeyEvent {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
     crossterm::event::KeyEvent {

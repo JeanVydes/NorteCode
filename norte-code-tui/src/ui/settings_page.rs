@@ -23,6 +23,27 @@ const HOST_CHILD: usize = 0;
 const AGENT_CHILD: usize = 1;
 const PLUGIN_CHILD: usize = 2;
 
+#[derive(Serialize)]
+struct ReadOnlyTable(Table);
+
+impl View for ReadOnlyTable {
+    fn as_any(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
+    fn kind(&self) -> &'static str {
+        "read_only_table"
+    }
+    fn handle_event(&mut self, _event: &InputEvent, _cx: &mut Context) -> Outcome {
+        Outcome::Ignored
+    }
+    fn render(&mut self, area: Rect, buf: &mut Buffer, cx: &mut Context, theme: &Theme) {
+        self.0.render(area, buf, cx, theme);
+    }
+}
+
 /// Which list the arrow keys drive.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 enum Focus {
@@ -86,6 +107,12 @@ pub(crate) struct SettingsPage {
 }
 
 impl SettingsPage {
+    pub(crate) fn open_clear_data(&mut self) {
+        self.error = None;
+        self.focus = Focus::ClearData;
+        self.prompt = Prompt::ConfirmClearData;
+    }
+
     /// An empty page, filled by the host.
     pub(crate) fn new() -> Self {
         Self {
@@ -125,20 +152,20 @@ impl SettingsPage {
                     "host_panel",
                     Panel::line().children(vec![node(
                         "host_table",
-                        Table::new().with_header(node(
+                        ReadOnlyTable(Table::new().with_header(node(
                             "header",
                             TableRow::header(vec![
                                 node("h-field", TableCell::text("field").with_weight(3)),
                                 node("h-value", TableCell::text("value").with_weight(9)),
                             ]),
-                        )),
+                        ))),
                     )]),
                 ),
                 node(
                     "agent_panel",
                     Panel::line().children(vec![node(
                         "agent_table",
-                        Table::new().with_header(node(
+                        ReadOnlyTable(Table::new().with_header(node(
                             "header",
                             TableRow::header(vec![
                                 node("h-agent", TableCell::text("agent").with_weight(3)),
@@ -146,19 +173,19 @@ impl SettingsPage {
                                 node("h-model", TableCell::text("model").with_weight(6)),
                                 node("h-info", TableCell::text("info").with_weight(4)),
                             ]),
-                        )),
+                        ))),
                     )]),
                 ),
                 node(
                     "plugin_table",
-                    Table::new().with_header(node(
+                    ReadOnlyTable(Table::new().with_header(node(
                         "header",
                         TableRow::header(vec![
                             node("h-name", TableCell::text("plugin").with_weight(5)),
                             node("h-source", TableCell::text("origin").with_weight(5)),
                             node("h-package", TableCell::text("package").with_weight(3)),
                         ]),
-                    )),
+                    ))),
                 ),
             ],
         }
@@ -567,10 +594,10 @@ impl SettingsPage {
         if let Some(table) = self
             .children
             .get_mut(PLUGIN_CHILD)
-            .and_then(|node| node.view.as_any().downcast_mut::<Table>())
+            .and_then(|node| node.view.as_any().downcast_mut::<ReadOnlyTable>())
         {
-            table.set_rows(plugin_rows);
-            table.state.selected = self.plugin_selected;
+            table.0.set_rows(plugin_rows);
+            table.0.state.selected = self.plugin_selected;
         }
         if let Some(table) = self.children.get_mut(PLUGIN_CHILD) {
             table.view.render(
@@ -627,9 +654,9 @@ impl SettingsPage {
                 .view
                 .children_mut()
                 .first_mut()
-                .and_then(|node| node.view.as_any().downcast_mut::<Table>())
+                .and_then(|node| node.view.as_any().downcast_mut::<ReadOnlyTable>())
             {
-                table.set_rows(host_rows);
+                table.0.set_rows(host_rows);
             }
             panel.view.render(
                 Rect {
@@ -712,9 +739,9 @@ impl SettingsPage {
                 .view
                 .children_mut()
                 .first_mut()
-                .and_then(|node| node.view.as_any().downcast_mut::<Table>())
+                .and_then(|node| node.view.as_any().downcast_mut::<ReadOnlyTable>())
             {
-                table.set_rows(rows);
+                table.0.set_rows(rows);
             }
             panel.view.render(rect, page, cx, theme);
         }

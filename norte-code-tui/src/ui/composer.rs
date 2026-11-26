@@ -137,10 +137,7 @@ impl Composer {
     pub(crate) fn new(theme: &Theme, clipboard: Arc<dyn Clipboard>) -> Self {
         Self {
             preview: super::chip_preview::Preview::default(),
-            input: Input::new()
-                .multiline(true)
-                .with_placeholder(crate::ui::copy::COMPOSER_PLACEHOLDER)
-                .with_style(input_style(theme)),
+            input: Input::new().multiline(true).with_style(input_style(theme)),
             draft: Draft::default(),
             history: History::default(),
             actions: Vec::new(),
@@ -579,6 +576,19 @@ impl View for Composer {
         }
         if let InputEvent::Paste(text) = event {
             return self.paste(Some(text), cx);
+        }
+        if let InputEvent::Key(key) = event
+            && key.kind == KeyEventKind::Press
+            && key.modifiers == KeyModifiers::CONTROL
+            && key.code == KeyCode::Char('j')
+        {
+            let newline = InputEvent::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::SHIFT,
+            ));
+            let outcome = self.input.handle_event(&newline, cx);
+            self.reconcile();
+            return outcome;
         }
         if let InputEvent::Key(key) = event
             && self.handle_history_key(key)

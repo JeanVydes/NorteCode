@@ -40,8 +40,6 @@ pub(crate) const CONNECTING_DOT: &str = "● connecting…";
 pub(crate) const ATTACHED: &str = "● attached";
 pub(crate) const FAILED: &str = "✗ failed";
 
-pub(crate) const COMPOSER_PLACEHOLDER: &str = "Ask NORTE to do anything...";
-
 pub(crate) const COMMAND_GROUP_TAB: &str = "tab";
 pub(crate) const COMMAND_GROUP_VIEW: &str = "view";
 pub(crate) const COMMAND_GROUP_SESSION: &str = "session";
@@ -138,7 +136,7 @@ impl ShortcutHint {
             node("label_tabs", Text::new(TAB_HINT).with_style(label)),
             node("key_send", Kbd::new("↵").with_style(cap.clone())),
             node("label_send", Text::new(SEND).with_style(label)),
-            node("key_newline", Kbd::new("⇧↵").with_style(cap.clone())),
+            node("key_newline", Kbd::new("⇧↵ / ^J").with_style(cap.clone())),
             node("label_newline", Text::new(NEWLINE).with_style(label)),
             node("key_copy", Kbd::new("Ctrl+C").with_style(cap.clone())),
             node("label_copy", Text::new(COPY).with_style(label)),

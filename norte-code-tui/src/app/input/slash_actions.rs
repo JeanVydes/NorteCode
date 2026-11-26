@@ -76,7 +76,11 @@ pub(super) fn execute_slash_command(
             };
             commands.try_send(UiCommand::SetReasoning { session, reasoning })
         }
-        SlashCommand::SetQueueMode(_) | SlashCommand::ToggleDebug => {
+        SlashCommand::SetQueueMode(_)
+        | SlashCommand::ToggleDebug
+        | SlashCommand::Plans
+        | SlashCommand::ClearData
+        | SlashCommand::Preference(_) => {
             unreachable!("local slash commands are handled before a service command is queued")
         }
         SlashCommand::Plugin { command, arguments } => {
@@ -110,6 +114,37 @@ fn execute_local_slash_command(
     command: &SlashCommand,
     input: &str,
 ) -> bool {
+    if let SlashCommand::Preference(preference) = command {
+        let theme = model.preferences.theme.clone();
+        if super::preferences::apply(preference, &mut model.preferences).is_err() {
+            notice(tree, "unknown theme; draft kept".to_owned(), ui::Tone::Warn);
+            return true;
+        }
+        if model.preferences.theme != theme {
+            ui::sync_theme(tree, model);
+        }
+        ui::refresh_views(tree, model);
+        clear_command_draft(tree, input);
+        return true;
+    }
+    if matches!(command, SlashCommand::ClearData) {
+        if let Some(page) = tree.find_mut::<ui::SettingsPage>("settings") {
+            page.open_clear_data();
+        }
+        model.tab = Tab::Settings;
+        clear_command_draft(tree, input);
+        ui::sync_views(tree, model);
+        tree.focus("settings");
+        return true;
+    }
+    if matches!(command, SlashCommand::Plans) {
+        if let Some(overlay) = tree.find_mut::<ui::PlanOverlay>("plan_overlay") {
+            overlay.open_list(model.plans.clone());
+        }
+        clear_command_draft(tree, input);
+        ui::sync_views(tree, model);
+        return true;
+    }
     let message = match command {
         SlashCommand::SetReasoning(reasoning) if model.active.is_none() => {
             model.pending_new_session_reasoning = Some(reasoning.clone());
@@ -163,13 +198,25 @@ pub(super) fn sync_slash_suggestions(tree: &mut terminalui::Tree, model: &UiMode
             .find::<ui::Composer>("composer")
             .map(ui::Composer::expanded_text)
             .unwrap_or_default();
-        slash_command::suggestions(
+        let mut suggestions = slash_command::suggestions(
             &input,
             model.active_model_info().map(|info| &info.reasoning),
             &model.plugins,
             &model.sessions,
             &model.models,
-        )
+        );
+        if let Some((label, prefix)) = input.split_once(' ') {
+            suggestions.extend(
+                super::preferences::values(label, &model.preferences)
+                    .into_iter()
+                    .filter(|value| value.to_lowercase().starts_with(&prefix.to_lowercase()))
+                    .map(|value| ui::CommandSuggestion {
+                        completion: format!("{label} {value}"),
+                        label: value,
+                    }),
+            );
+        }
+        suggestions
     } else {
         Vec::new()
     };

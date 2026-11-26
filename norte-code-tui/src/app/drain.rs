@@ -3,8 +3,6 @@
 #[path = "drain/pages.rs"]
 mod pages;
 
-use terminalui::components::button::Button;
-
 use crate::attachment::ComposerAction;
 use crate::client::UiCommand;
 use crate::ui;
@@ -89,24 +87,5 @@ pub(in crate::app) fn drain_composer_actions(
                 }
             }
         }
-    }
-}
-
-pub(in crate::app) fn drain_compact(
-    tree: &mut terminalui::Tree,
-    commands: &mut Option<tokio::sync::mpsc::Sender<UiCommand>>,
-    model: &UiModel,
-) {
-    let Some(button) = tree.find_mut::<Button>("compact") else {
-        return;
-    };
-    if button.take_pressed()
-        && let Some(session) = model.active.as_ref()
-        && let Some(commands) = commands.as_ref()
-    {
-        let _ = commands.try_send(UiCommand::Compact {
-            session: session.clone(),
-        });
-        button.set_loading(true);
     }
 }

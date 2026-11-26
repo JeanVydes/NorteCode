@@ -25,6 +25,38 @@ fn buffer_text(buffer: &Buffer, area: Rect) -> String {
         .collect()
 }
 
+#[test]
+fn sessionless_welcome_disintegrates_when_the_first_message_arrives() {
+    let area = Rect::new(0, 0, 80, 20);
+    let theme = terminalui::Theme::default();
+    let mut tree = terminalui::Tree::new(terminalui::node("stream", Transcript::new()));
+    tree.find_mut::<Transcript>("stream")
+        .unwrap()
+        .set_sessionless(true);
+    let mut buffer = Buffer::empty(area);
+    tree.render(area, &mut buffer, &theme);
+    assert!(buffer_text(&buffer, area).contains("Send a message to create a session"));
+
+    let transcript = tree.find_mut::<Transcript>("stream").unwrap();
+    transcript.push(Item::User {
+        text: "Hello".to_owned(),
+        turn: None,
+    });
+    transcript.set_sessionless(true);
+    assert!(transcript.welcome_animating());
+    tree.tick(std::time::Duration::from_secs(1));
+    assert!(
+        !tree
+            .find::<Transcript>("stream")
+            .unwrap()
+            .welcome_animating()
+    );
+    let mut buffer = Buffer::empty(area);
+    tree.render(area, &mut buffer, &theme);
+    assert!(!buffer_text(&buffer, area).contains("Send a message to create a session"));
+    assert!(buffer_text(&buffer, area).contains("Hello"));
+}
+
 fn scrollable_transcript() -> Transcript {
     let mut transcript = Transcript::new();
     for index in 0..50 {
@@ -214,6 +246,39 @@ fn consecutive_reasoning_deltas_merge_into_one_block() {
         })
         .collect();
     assert_eq!(thoughts, vec!["I should explore the repo."]);
+}
+
+#[test]
+fn interleaved_reasoning_does_not_split_the_answer() {
+    for grouped in [false, true] {
+        let mut transcript = Transcript::new();
+        transcript.set_tool_preferences(false, grouped);
+        transcript.push_reasoning_text("first");
+        transcript.push_assistant_text("Hello", None);
+        transcript.push_reasoning_text(".");
+        transcript.push_assistant_text(" world", None);
+        let items = if grouped {
+            super::flatten_activity_items(std::mem::take(&mut transcript.items))
+        } else {
+            transcript.items
+        };
+        let thoughts: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Reasoning { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let answers: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Assistant { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thoughts, ["first."]);
+        assert_eq!(answers, ["Hello world"]);
+    }
 }
 
 #[test]
