@@ -30,6 +30,8 @@ mod header;
 #[cfg(test)]
 #[path = "header_tests.rs"]
 mod header_tests;
+mod host_agent_format;
+mod host_agent_info;
 mod host_info;
 mod host_overlay;
 mod key_prompt;

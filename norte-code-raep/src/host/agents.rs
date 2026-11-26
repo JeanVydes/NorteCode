@@ -38,6 +38,7 @@ impl NorteCodeRaepHost {
                     capabilities: agent_capabilities(spec.as_ref(), self.uploads_enabled()),
                     provider,
                     model,
+                    profile: Some(agent_profile_summary(service)),
                 })
             })
             .collect()
@@ -56,6 +57,7 @@ impl NorteCodeRaepHost {
                 capabilities: agent_capabilities(spec.as_ref(), self.uploads_enabled()),
                 provider,
                 model,
+                profile: Some(agent_profile_summary(service)),
             },
             latest_version: AgentVersion {
                 version: &self.config.server_version,

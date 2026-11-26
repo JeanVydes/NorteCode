@@ -218,6 +218,134 @@ pub(crate) fn session_agent_summary(
             id: spec.model.clone(),
             version: String::new(),
         }),
+        profile: Some(agent_profile_summary(service)),
+    }
+}
+
+/// Exposes the useful parts of one agent's configuration without returning
+/// prompts, filesystem paths, process arguments, credentials or environment
+/// values. This is shared by the agent discovery and session attach payloads.
+pub(crate) fn agent_profile_summary(
+    service: &norte_code_agent::Service,
+) -> norte_code_wire::AgentProfileSummary {
+    let config = service.config();
+    let tools = &config.tools;
+    let shell = tools.shell_limits;
+    let sandbox = &tools.confinement.sandbox;
+    let skills = &config.skills;
+
+    norte_code_wire::AgentProfileSummary {
+        description: config.description,
+        author: config.author,
+        origin_url: config.origin_url,
+        default_subagent_delegation: config.default_subagent_delegation,
+        delegates: config.delegates,
+        reasoning: reasoning_summary(&config.reasoning.default),
+        compaction: norte_code_wire::AgentCompactionSummary {
+            enabled: config.compaction.enabled,
+            threshold: config.compaction.threshold,
+            trigger: match config.compaction.trigger {
+                norte_code_protocol::config::CompactionTrigger::Idle => {
+                    norte_code_wire::AgentCompactionTrigger::Idle
+                }
+                norte_code_protocol::config::CompactionTrigger::Eager => {
+                    norte_code_wire::AgentCompactionTrigger::Eager
+                }
+            },
+            keep_recent: config.compaction.keep_recent,
+        },
+        retry: norte_code_wire::AgentRetrySummary {
+            max_attempts: config.retry.max_attempts,
+            max_delay_ms: config.retry.max_delay_ms,
+            backoff_ms: config.retry.backoff_ms,
+        },
+        delegation: norte_code_wire::AgentDelegationSummary {
+            max_depth: config.delegation.max_depth,
+            max_concurrent: config.delegation.max_concurrent,
+            max_held_messages: config.delegation.max_held_messages,
+        },
+        max_iterations: config.max_iterations,
+        tools: norte_code_wire::AgentToolSummary {
+            web_fetch: tools.web_fetch,
+            auto_turn_on_job_end: tools.auto_turn_on_job_end,
+            workspace_only: tools.confinement.workspace_only,
+            sandbox_enabled: sandbox.enabled,
+            sandbox_network: sandbox.network,
+            allow_indefinite_shell: shell.allow_indefinite,
+            shell_default_timeout_ms: shell.default_timeout_ms,
+            shell_max_timeout_ms: shell.max_timeout_ms,
+            disabled: tools.disabled.clone(),
+        },
+        approvals: norte_code_wire::AgentApprovalSummary {
+            allow: config.approvals.allow,
+            deny: config.approvals.deny,
+        },
+        budgets: norte_code_wire::AgentBudgetSummary {
+            message: config.budgets.message.as_ref().map(budget_summary),
+            session: config.budgets.session.as_ref().map(budget_summary),
+            global_daily: config.budgets.global_daily.as_ref().map(budget_summary),
+        },
+        skills: norte_code_wire::AgentSkillsSummary {
+            enabled: skills.enabled,
+            interop: skills.interop,
+            allow_scripts: skills.allow_scripts,
+            honor_allowed_tools: skills.honor_allowed_tools,
+            max_skills: skills.max_skills,
+            extra_path_count: skills.paths.len(),
+        },
+        plugins: config
+            .plugins
+            .into_iter()
+            .map(|(id, policy)| norte_code_wire::AgentPluginSummary {
+                id: id.to_string(),
+                allow_user_messages: policy.allow_user_messages,
+            })
+            .collect(),
+        mcp_servers: config
+            .mcp_servers
+            .into_iter()
+            .map(|(name, server)| norte_code_wire::AgentMcpSummary {
+                name,
+                enabled: server.enabled,
+                remote: server.is_remote(),
+                allow_count: server.allow.len(),
+                deny_count: server.deny.len(),
+            })
+            .collect(),
+        custom_system_prompt: config.system_prompt.is_some(),
+    }
+}
+
+fn reasoning_summary(value: &Value) -> norte_code_wire::AgentReasoningSummary {
+    match value {
+        Value::String(value) if matches!(value.as_str(), "auto" | "automatic") => {
+            norte_code_wire::AgentReasoningSummary::Automatic
+        }
+        Value::String(value) if matches!(value.as_str(), "off" | "disabled") => {
+            norte_code_wire::AgentReasoningSummary::Disabled
+        }
+        Value::String(value) if !value.trim().is_empty() => {
+            norte_code_wire::AgentReasoningSummary::Effort(value.clone())
+        }
+        Value::Object(object) => object
+            .get("budget")
+            .and_then(Value::as_u64)
+            .and_then(|budget| u32::try_from(budget).ok())
+            .map_or(
+                norte_code_wire::AgentReasoningSummary::Custom,
+                norte_code_wire::AgentReasoningSummary::Budget,
+            ),
+        _ => norte_code_wire::AgentReasoningSummary::Custom,
+    }
+}
+
+fn budget_summary(
+    budget: &norte_code_protocol::config::BudgetConfig,
+) -> norte_code_wire::AgentBudget {
+    norte_code_wire::AgentBudget {
+        unit: budget.unit,
+        limit: budget.limit,
+        action: budget.action,
     }
 }
 

@@ -3,7 +3,7 @@
 use super::detail_panel::Field;
 use crate::ui_model::UiModel;
 
-fn human_bytes(bytes: u64) -> String {
+pub(super) fn human_bytes(bytes: u64) -> String {
     const KIB: u64 = 1_024;
     const MIB: u64 = 1_024 * KIB;
     if bytes >= MIB {
@@ -15,7 +15,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn millis(ms: u64) -> String {
+pub(super) fn millis(ms: u64) -> String {
     if ms >= 1_000 {
         format!("{} s", ms / 1_000)
     } else {
@@ -63,6 +63,7 @@ pub(crate) fn fields(model: &UiModel) -> Vec<Field> {
     if let Some(quota) = &model.quota {
         quota_fields(&mut fields, quota);
     }
+    super::host_agent_info::append(&mut fields, model);
     fields
 }
 
