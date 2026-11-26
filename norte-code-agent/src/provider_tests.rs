@@ -68,6 +68,58 @@ fn wire_headers_are_the_headers_the_wire_names() {
 }
 
 #[test]
+fn codex_responses_omits_unsupported_prompt_cache_breakpoints() {
+    let codex = ProviderId::new("codex").expect("provider id");
+    let gateway = ProviderId::new("gateway").expect("provider id");
+    let headers = BTreeMap::new();
+
+    let codex_responses = profile(
+        WireSchema::Responses,
+        None,
+        codex.clone(),
+        "https://codex.invalid/v1",
+        "token".to_owned(),
+        &headers,
+    )
+    .expect("Codex Responses profile");
+    assert!(
+        codex_responses
+            .quirks()
+            .contains(&norte::http::Quirk::NoPromptCacheBreakpoints)
+    );
+
+    let codex_chat = profile(
+        WireSchema::OpenAI,
+        None,
+        codex,
+        "https://codex.invalid/v1",
+        "token".to_owned(),
+        &headers,
+    )
+    .expect("Codex Chat profile");
+    assert!(
+        !codex_chat
+            .quirks()
+            .contains(&norte::http::Quirk::NoPromptCacheBreakpoints)
+    );
+
+    let gateway_responses = profile(
+        WireSchema::Responses,
+        None,
+        gateway,
+        "https://gateway.invalid/v1",
+        "token".to_owned(),
+        &headers,
+    )
+    .expect("gateway Responses profile");
+    assert!(
+        !gateway_responses
+            .quirks()
+            .contains(&norte::http::Quirk::NoPromptCacheBreakpoints)
+    );
+}
+
+#[test]
 fn every_wire_builds_from_its_endpoint() {
     // One path for all three: the endpoint is the provider's own, and what
     // the adapter speaks is the schema it declared.

@@ -27,7 +27,7 @@ use futures_util::StreamExt;
 use norte::{
     CallId, Capabilities, FnExecutor, Message, ModelId, ModelRef, ModelRequest, ModelStream,
     ProviderErrorKind, ProviderId, Reasoning as ReasoningCapability, ReasoningEffort,
-    ReasoningRequest, SessionId, ToolContext, Usage,
+    ReasoningRequest, SessionId, ToolContext, ToolName, Usage, VendorExtensionKey,
 };
 use norte_code_protocol::InMemoryStore;
 use norte_code_protocol::config::CompactionTrigger;
@@ -1974,7 +1974,7 @@ async fn a_resume_sends_the_task_list_the_session_last_had() {
             Role::Assistant,
             vec![norte::Part::ToolCall(norte::ToolCallPart {
                 call_id: call,
-                name: "todo".to_owned(),
+                name: ToolName::new("todo").expect("tool name"),
                 arguments: serde_json::json!({
                     "todos": [
                         {"content": "first", "status": "completed"},
@@ -4681,7 +4681,7 @@ fn a_recent_suffix_never_orphans_tool_results() {
         Role::Assistant,
         vec![norte::Part::ToolCall(norte::ToolCallPart {
             call_id: call,
-            name: "read".to_owned(),
+            name: ToolName::new("read").expect("tool name"),
             arguments: serde_json::json!({}),
             continuity: None,
         })],
@@ -5225,8 +5225,11 @@ async fn vendor_extensions_reach_the_model_request() {
     )
     .await;
     let requests = seen.requests();
+    let extension_key: VendorExtensionKey = "openai.chat:provider.order"
+        .parse()
+        .expect("vendor extension key");
     assert_eq!(
-        requests[0].extensions["openai.chat:provider.order"],
+        requests[0].extensions[&extension_key],
         serde_json::json!(["deepinfra"])
     );
 }

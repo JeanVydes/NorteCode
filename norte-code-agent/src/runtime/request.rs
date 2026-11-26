@@ -130,7 +130,7 @@ impl Harness {
         let cache_boundaries = reconstructed.cache_boundaries.clone();
         let mut extensions = options.extensions.clone();
         extensions.insert(
-            SESSION_EXTENSION.to_owned(),
+            SESSION_EXTENSION.clone(),
             Value::String(session.id.to_string()),
         );
         let mut request = ModelRequest {

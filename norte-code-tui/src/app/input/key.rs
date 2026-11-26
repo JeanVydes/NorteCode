@@ -25,6 +25,19 @@ fn models_page_mut(tree: &mut terminalui::Tree) -> Option<&mut ui::ModelsPage> {
 fn switch_tab(tree: &mut terminalui::Tree, model: &mut UiModel, tab: Tab) {
     model.tab = tab;
     ui::sync_views(tree, model);
+    if tree
+        .find::<terminalui::Pane>("root")
+        .is_none_or(|root| root.visible() == 0)
+    {
+        let target = match tab {
+            Tab::Chat => "composer",
+            Tab::Sessions => "sessions",
+            Tab::Models => "models",
+            Tab::Telemetry => "telemetry",
+            Tab::Settings => "settings",
+        };
+        tree.focus(target);
+    }
 }
 
 fn toggle_delete_choice(tree: &mut terminalui::Tree, model: &UiModel) -> bool {

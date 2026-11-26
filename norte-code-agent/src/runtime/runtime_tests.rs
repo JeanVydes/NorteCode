@@ -54,7 +54,7 @@ async fn a_streaming_tool_reports_through_the_engine() {
     let prepared = PreparedCall {
         call: ToolCallPart {
             call_id: CallId::new(),
-            name: name.as_str().to_owned(),
+            name: name.clone(),
             arguments: serde_json::json!({}),
             continuity: None,
         },

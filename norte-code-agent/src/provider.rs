@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use norte::anthropic::AnthropicMessages;
 use norte::gemini::GeminiGenerate;
-use norte::http::{AuthScheme, HttpClient, TransportPolicy, VendorProfile};
+use norte::http::{AuthScheme, HttpClient, Quirk, Quirks, TransportPolicy, VendorProfile};
 use norte::openai::{OpenAiChat, OpenAiResponses};
 use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId, WireFamily};
 
@@ -265,13 +265,17 @@ fn profile(
     key: String,
     headers: &BTreeMap<String, String>,
 ) -> Result<VendorProfile, ServiceError> {
-    let profile = VendorProfile::new(
+    let quirks = profile_quirks(&provider, schema);
+    let mut profile = VendorProfile::new(
         provider,
         WireFamily::new(norte_code_protocol::catalog::map::WireSchemaExt::family(
             schema,
         ))?,
         endpoint,
     )?;
+    for quirk in quirks {
+        profile = profile.with_quirk(quirk);
+    }
     let profile = match auth.unwrap_or_else(|| AuthKind::for_schema(schema)) {
         AuthKind::Bearer => profile.with_auth(AuthScheme::bearer(key)),
         AuthKind::XApiKey => profile.with_auth(AuthScheme::header("x-api-key", key)),
@@ -284,6 +288,14 @@ fn profile(
         profile
     };
     Ok(with_headers(profile, headers))
+}
+
+fn profile_quirks(provider: &ProviderId, schema: WireSchema) -> Quirks {
+    if provider.as_str() == "codex" && schema == WireSchema::Responses {
+        [Quirk::NoPromptCacheBreakpoints].into_iter().collect()
+    } else {
+        Quirks::new()
+    }
 }
 
 /// Builds the adapter that speaks `schema` over `profile`.
