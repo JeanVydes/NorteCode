@@ -186,11 +186,21 @@ A wire:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `api` | string | — | The full base URL requests go to. |
-| `schema` | `"openai"`, `"anthropic"` or `"google"` | — | The request/answer shape the surface speaks. |
+| `schema` | `"openai"`, `"responses"`, `"anthropic"` or `"google"` | — | The request/answer shape the surface speaks. |
 | `auth` | `"bearer"`, `"x_api_key"`, `"x_goog_api_key"` or `"disabled"` | schema's own | The credential header, when it is not the one the schema implies. |
 
+Wire `quirks` is an optional array of exceptions that apply to every model on
+that endpoint. The accepted values depend on the wire.
+
+| Wire | Quirks |
+| --- | --- |
+| `openai` | `no_stream_usage`, `no_prompt_cache_key` |
+| `responses` | `no_prompt_cache_key`, `no_prompt_cache_breakpoints` |
+| `anthropic` | `no_prompt_cache_breakpoints` |
+| `google` | None |
+
 `openai` is the chat completions surface every compatible vendor speaks;
-`anthropic` is Messages; `google` is `generateContent`. The credential header
+`responses` is Responses, `anthropic` is Messages, and `google` is `generateContent`. The credential header
 follows from the schema unless a wire names one — `bearer` is
 `Authorization: Bearer`, `x_api_key` is `x-api-key`, `x_goog_api_key` is
 `x-goog-api-key`, and `disabled` sends none. A key is not written in this file.
@@ -202,7 +212,7 @@ when the key is still missing opens a masked prompt and saves what you type to
 enter a model event, a log or a child process.
 
 When a provider serves several wires, `--wire` picks one; otherwise the order is
-`openai`, then `anthropic`, then `google`.
+`openai`, then `anthropic`, `google`, then `responses`.
 
 ## `models.json`
 
@@ -245,6 +255,8 @@ id without either shadowing the other, and an id may carry slashes of its own.
 | `limit.output` | integer or `null` | `null` | The largest output, in tokens. |
 | `status` | `"deprecated"`, `"beta"` or absent | absent | Where the model is in its life. |
 | `supported_params` | array of strings | `[]` | The request fields the model accepts. |
+| `supported_params_complete` | boolean | `false` | Treats omitted generation parameters as unsupported when the list is authoritative. |
+| `quirks` | object keyed by wire schema | `{}` | Exceptions for this model, added to the selected wire's quirks. |
 | `pricing.input` | number or `null` | `null` | USD per input token, for reference only. |
 | `pricing.output` | number or `null` | `null` | USD per output token, for reference only. |
 | `pricing.cached` | number or `null` | `null` | USD per cached-input token, for reference only. |
@@ -256,10 +268,16 @@ id without either shadowing the other, and an id may carry slashes of its own.
 
 `supported_params` is a closed set, and a name it does not know is a read error
 rather than a silent "not supported": `frequency_penalty`, `include_reasoning`,
-`logit_bias`, `logprobs`, `max_tokens`, `min_p`, `presence_penalty`, `reasoning`,
-`reasoning_effort`, `repetition_penalty`, `response_format`, `seed`, `stop`,
+`logit_bias`, `logprobs`, `max_output_tokens`, `min_p`, `presence_penalty`, `reasoning`,
+`reasoning_effort`, `repetition_penalty`, `response_format`, `seed`, `stop_sequences`,
 `structured_output`, `temperature`, `tool_choice`, `tools`, `top_a`, `top_k`,
 `top_logprobs`, `top_p`, `verbosity`.
+
+The spellings `max_tokens` and `stop` are accepted on read. Leave
+`supported_params_complete` false when a source only confirms some parameters.
+For a model whose Responses endpoint rejects cache markers, declare
+`"quirks": {"responses": ["no_prompt_cache_breakpoints"]}`. The catalogue
+rejects exceptions that the selected adapter cannot apply.
 
 Pricing is kept for reference and is never a source of cost: Norte Code reports
 what the provider said a request cost and derives nothing from a list price.

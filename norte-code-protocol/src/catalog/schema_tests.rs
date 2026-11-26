@@ -1,6 +1,7 @@
 use super::*;
+use norte::SupportedParam;
 use norte_code_wire::catalog::{
-    Limit, Modalities, Modality, ModelStatus, SupportedEffort, SupportedParams, Wire, WireSchema,
+    Limit, Modalities, Modality, ModelStatus, SupportedEffort, Wire, WireSchema,
 };
 
 /// A provider that serves one `OpenAI` wire, for a test that needs a shape
@@ -11,6 +12,7 @@ fn provider(name: &str) -> Provider {
         doc: None,
         environment_keys: vec![format!("{}_API_KEY", name.to_uppercase())],
         wires: vec![Wire {
+            quirks: std::collections::BTreeSet::new(),
             api: "https://example.invalid/v1".to_owned(),
             schema: WireSchema::OpenAI,
             auth: None,
@@ -222,18 +224,21 @@ fn the_preferred_wire_is_the_openai_one() {
     let mut entry = provider("many");
     entry.wires = vec![
         Wire {
+            quirks: std::collections::BTreeSet::new(),
             api: "https://example.invalid/google".to_owned(),
             schema: WireSchema::Google,
             auth: None,
             headers: std::collections::BTreeMap::new(),
         },
         Wire {
+            quirks: std::collections::BTreeSet::new(),
             api: "https://example.invalid/anthropic".to_owned(),
             schema: WireSchema::Anthropic,
             auth: None,
             headers: std::collections::BTreeMap::new(),
         },
         Wire {
+            quirks: std::collections::BTreeSet::new(),
             api: "https://example.invalid/openai".to_owned(),
             schema: WireSchema::OpenAI,
             auth: None,
@@ -286,11 +291,11 @@ fn the_enums_read_the_names_a_file_spells() {
     .expect("models");
     let model = &models.models[0];
     assert_eq!(model.modalities.input, vec![Modality::Text, Modality::File]);
-    assert!(model.supported_params.contains(&SupportedParams::Tools));
+    assert!(model.supported_params.contains(&SupportedParam::Tools));
     assert!(
         model
             .supported_params
-            .contains(&SupportedParams::Temperature)
+            .contains(&SupportedParam::Temperature)
     );
     assert_eq!(
         model.reasoning.supported_efforts,
@@ -349,4 +354,32 @@ fn a_model_naming_a_provider_nobody_offers_is_left_out() {
     assert_eq!(skipped.len(), 1, "{skipped:?}");
     assert!(skipped[0].contains("nowhere"), "{skipped:?}");
     assert_eq!(catalog.model_count(), 2);
+}
+
+#[test]
+fn catalogue_rejects_model_quirks_for_another_wire() {
+    use norte::http::Quirk;
+
+    let providers = Providers {
+        providers: BTreeMap::from([("p".to_owned(), provider("p"))]),
+    };
+    let model = Model {
+        id: "m".to_owned(),
+        provider_id: "p".to_owned(),
+        quirks: BTreeMap::from([(WireSchema::Google, [Quirk::NoStreamUsage].into())]),
+        ..Model::default()
+    };
+    let result = Catalog::new(
+        providers,
+        Models {
+            models: vec![model],
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(CatalogError::MissingQuirkWire {
+            wire: WireSchema::Google,
+            ..
+        })
+    ));
 }

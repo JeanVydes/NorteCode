@@ -173,13 +173,18 @@ fn add_wire(
         let api = base_url
             .map(str::to_owned)
             .unwrap_or_else(|| default_base_url(schema).to_owned());
-        provider.wires.retain(|wire| wire.schema != schema);
-        provider.wires.push(Wire {
-            api,
-            schema,
-            auth,
-            headers: std::collections::BTreeMap::new(),
-        });
+        if let Some(wire) = provider.wires.iter_mut().find(|wire| wire.schema == schema) {
+            wire.api = api;
+            wire.auth = auth;
+        } else {
+            provider.wires.push(Wire {
+                api,
+                schema,
+                auth,
+                headers: std::collections::BTreeMap::new(),
+                quirks: std::collections::BTreeSet::new(),
+            });
+        }
     }
     save_catalog_files(&providers, &models).map_err(|e| format!("{e}"))?;
 
@@ -197,7 +202,7 @@ fn remove_wires(id: &str, schemas: &[String]) -> Result<(), String> {
         return Err("at least one --schema is required".to_owned());
     }
     norte_code_protocol::catalog::ensure_catalog_files().map_err(|e| format!("{e}"))?;
-    let (mut providers, models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
+    let (mut providers, mut models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
     let provider = providers
         .providers
         .get_mut(id)
@@ -214,6 +219,13 @@ fn remove_wires(id: &str, schemas: &[String]) -> Result<(), String> {
         return Err(format!(
             "no matching wires found in `{id}`; see them with `providers get-wires {id}`"
         ));
+    }
+    for model in models
+        .models
+        .iter_mut()
+        .filter(|model| model.provider_id == id)
+    {
+        model.quirks.retain(|schema, _| !targets.contains(schema));
     }
     save_catalog_files(&providers, &models).map_err(|e| format!("{e}"))?;
 

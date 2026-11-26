@@ -217,6 +217,7 @@ fn spec(model: &str) -> ModelSpec {
     let catalog = catalog();
     let entry = catalog.find("test", model).expect("model");
     ModelSpec {
+        quirks: std::collections::BTreeSet::new(),
         provider: "test".to_owned(),
         model: model.to_owned(),
         endpoint: "https://example.invalid/v1".to_owned(),

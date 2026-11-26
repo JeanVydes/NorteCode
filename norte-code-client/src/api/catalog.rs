@@ -73,8 +73,13 @@ impl RestClient {
         &self,
         model: norte_code_wire::catalog::Model,
     ) -> Result<(), ApiError> {
-        self.command_ok(None, ClientRequestKind::CatalogUpsertModel { model })
-            .await
+        self.command_ok(
+            None,
+            ClientRequestKind::CatalogUpsertModel {
+                model: Box::new(model),
+            },
+        )
+        .await
     }
 
     /// Removes one model from `models.json`.

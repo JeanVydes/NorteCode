@@ -131,6 +131,7 @@ impl Service {
             // build below will surface the error.
             self.default_spec_for(&self.lock_config(), &catalog, &provider, &model)
                 .unwrap_or_else(|_| ProviderModelSpec {
+                    quirks: std::collections::BTreeSet::new(),
                     provider: provider.clone(),
                     model: model.clone(),
                     endpoint: String::new(),

@@ -1,4 +1,5 @@
 use super::*;
+use norte::SupportedParam;
 use norte_code_wire::catalog::{Limit, Modalities, Reasoning as Declared};
 
 fn model() -> Model {
@@ -15,7 +16,7 @@ fn model() -> Model {
             input: vec![DeclaredModality::Text, DeclaredModality::Image],
             output: vec![DeclaredModality::Text],
         },
-        supported_params: vec![SupportedParams::Tools, SupportedParams::Temperature],
+        supported_params: vec![SupportedParam::Tools, SupportedParam::Temperature],
         ..Model::default()
     }
 }
@@ -72,11 +73,11 @@ fn structured_output_follows_the_parameter_list() {
     );
     sample
         .supported_params
-        .push(SupportedParams::StructuredOutput);
+        .push(SupportedParam::StructuredOutput);
     assert!(
         capabilities(&sample, WireSchema::OpenAI)
             .structured_output
-            .contains(&StructuredOutputMode::JsonObject)
+            .contains(&StructuredOutputMode::JsonSchema)
     );
 }
 
@@ -144,8 +145,8 @@ fn a_model_that_does_not_reason_declares_nothing() {
 #[test]
 fn a_parameter_that_is_a_feature_becomes_one() {
     let mut sample = model();
-    sample.supported_params.push(SupportedParams::ToolChoice);
-    sample.supported_params.push(SupportedParams::Logprobs);
+    sample.supported_params.push(SupportedParam::ToolChoice);
+    sample.supported_params.push(SupportedParam::Logprobs);
     let declared = capabilities(&sample, WireSchema::OpenAI);
     assert!(declared.features.contains(&Feature::ForcedToolChoice));
     assert!(declared.features.contains(&Feature::Logprobs));
@@ -158,33 +159,55 @@ fn every_documented_parameter_is_accepted() {
     // that do and that the rest are read without a panic.
     let mut sample = model();
     sample.supported_params = vec![
-        SupportedParams::FrequencyPenalty,
-        SupportedParams::IncludeReasoning,
-        SupportedParams::Logprobs,
-        SupportedParams::MaxTokens,
-        SupportedParams::MinP,
-        SupportedParams::PresencePenalty,
-        SupportedParams::Reasoning,
-        SupportedParams::ReasoningEffort,
-        SupportedParams::ResponseFormat,
-        SupportedParams::Seed,
-        SupportedParams::Stop,
-        SupportedParams::StructuredOutput,
-        SupportedParams::Temperature,
-        SupportedParams::ToolChoice,
-        SupportedParams::Tools,
-        SupportedParams::TopP,
-        SupportedParams::TopLogprobs,
-        SupportedParams::TopK,
-        SupportedParams::Verbosity,
+        SupportedParam::FrequencyPenalty,
+        SupportedParam::IncludeReasoning,
+        SupportedParam::Logprobs,
+        SupportedParam::MaxOutputTokens,
+        SupportedParam::MinP,
+        SupportedParam::PresencePenalty,
+        SupportedParam::Reasoning,
+        SupportedParam::ReasoningEffort,
+        SupportedParam::ResponseFormat,
+        SupportedParam::Seed,
+        SupportedParam::StopSequences,
+        SupportedParam::StructuredOutput,
+        SupportedParam::Temperature,
+        SupportedParam::ToolChoice,
+        SupportedParam::Tools,
+        SupportedParam::TopP,
+        SupportedParam::TopLogprobs,
+        SupportedParam::TopK,
+        SupportedParam::Verbosity,
     ];
     let declared = capabilities(&sample, WireSchema::OpenAI);
     assert!(declared.tool_kinds.contains(&ToolKind::Function));
     assert!(
         declared
             .structured_output
-            .contains(&StructuredOutputMode::JsonObject)
+            .contains(&StructuredOutputMode::JsonSchema)
     );
     assert!(declared.features.contains(&Feature::ForcedToolChoice));
     assert!(declared.features.contains(&Feature::Logprobs));
+}
+
+#[test]
+fn catalogue_completeness_controls_missing_parameter_support() {
+    use norte::ParameterSupport;
+
+    let mut entry = model();
+    let caps = capabilities(&entry, WireSchema::OpenAI);
+    assert_eq!(
+        caps.generation.support(SupportedParam::Temperature),
+        ParameterSupport::Supported
+    );
+    assert_eq!(
+        caps.generation.support(SupportedParam::Seed),
+        ParameterSupport::Unknown
+    );
+    entry.supported_params_complete = true;
+    let caps = capabilities(&entry, WireSchema::OpenAI);
+    assert_eq!(
+        caps.generation.support(SupportedParam::Seed),
+        ParameterSupport::Unsupported
+    );
 }

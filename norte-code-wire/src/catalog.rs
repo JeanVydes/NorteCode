@@ -11,7 +11,9 @@
 
 use std::collections::BTreeMap;
 
+use norte_types::{Quirks, SupportedParam};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::BTreeSet;
 
 /// Reads a list, dropping null elements and tolerating a null list.
 ///
@@ -89,6 +91,9 @@ pub struct Wire {
     /// Messages surface reached with `Authorization: Bearer` — names one here,
     /// because the schema says how the body is shaped and not who is paying.
     pub auth: Option<AuthKind>,
+    /// Deviations common to this wire endpoint.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub quirks: Quirks,
     /// Extra static headers this wire sends on every request, such as a
     /// Workspace or Account id the vendor requires.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -150,7 +155,7 @@ impl AuthKind {
 /// `OpenAI` is the chat completions surface, the one every compatible vendor
 /// speaks. `Responses` is the `OpenAI` Responses API — the same vendor over the
 /// wire Codex and `@ai-sdk/openai` speak.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum WireSchema {
     /// `OpenAI` chat completions, and every compatible vendor.
     ///
@@ -259,10 +264,12 @@ pub struct Model {
     pub status: Option<ModelStatus>,
     /// The request fields the model accepts.
     ///
-    /// It replaces a boolean per field: a list says what is accepted and grows
-    /// without a new field each time a provider invents one, and a reader that
-    /// asks for what it needs does not have to know every name in it.
-    pub supported_params: Vec<SupportedParams>,
+    /// A partial list confirms its entries and leaves other parameters unknown.
+    pub supported_params: Vec<SupportedParam>,
+    /// Whether the parameter list is complete.
+    pub supported_params_complete: bool,
+    /// Wire-specific deviations for this provider's model.
+    pub quirks: BTreeMap<WireSchema, Quirks>,
     /// What the provider charges, when it publishes it.
     ///
     /// It is kept for reference and is never a source of cost: Norte Code
@@ -327,62 +334,6 @@ pub struct Reasoning {
     /// that takes a budget into one that reasons never.
     #[serde(alias = "supports_budget")]
     pub budget_supported: bool,
-}
-
-/// Every request field a provider may accept.
-///
-/// It is a closed set and it is deliberately not exhaustive of the ecosystem:
-/// it holds the fields this host can set, and a name a reader does not know is
-/// not in the list. That is the point of an enum over a list of strings — a
-/// typo in `models.json` is caught where the file is read instead of silently
-/// meaning "not supported".
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SupportedParams {
-    /// `frequency_penalty`.
-    FrequencyPenalty,
-    /// The reasoning text is asked for and returned.
-    IncludeReasoning,
-    /// Token-level log probabilities.
-    Logprobs,
-    /// `max_tokens` and its per-vendor spellings.
-    MaxTokens,
-    /// `min_p`.
-    MinP,
-    /// `presence_penalty`.
-    PresencePenalty,
-    /// A reasoning block, as the dialect spells it.
-    Reasoning,
-    /// A reasoning effort.
-    ReasoningEffort,
-    /// `response_format`.
-    ResponseFormat,
-    /// `seed`.
-    Seed,
-    /// `stop`.
-    Stop,
-    /// A JSON schema the provider enforces.
-    StructuredOutput,
-    /// `temperature`.
-    Temperature,
-    /// `tool_choice`.
-    ToolChoice,
-    /// `tools`.
-    Tools,
-    /// `top_p`.
-    TopP,
-    /// `top_logprobs`.
-    TopLogprobs,
-    /// `top_k`.
-    TopK,
-    /// `top_a`.
-    TopA,
-    /// `logit_bias`.
-    LogitBias,
-    /// `repetition_penalty`.
-    RepetitionPenalty,
-    /// `verbosity`.
-    Verbosity,
 }
 
 /// Input and output modalities.

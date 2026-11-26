@@ -417,7 +417,7 @@ impl Service {
             Kind::CatalogRemoveProvider { provider_id } => {
                 self.remove_provider(request_id, &provider_id)
             }
-            Kind::CatalogUpsertModel { model } => self.upsert_model(request_id, model),
+            Kind::CatalogUpsertModel { model } => self.upsert_model(request_id, *model),
             Kind::CatalogRemoveModel {
                 provider_id,
                 model_id,

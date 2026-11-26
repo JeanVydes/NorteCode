@@ -3,9 +3,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use norte::http::{Quirk, Quirks};
+
 use norte_code_wire::catalog::{
     MAX_CATALOG_BYTES, MAX_CONTEXT, MAX_OUTPUT, Model, ModelEntry, Models, Provider, Providers,
+    WireSchema,
 };
+
+use super::map::WireSchemaExt;
 
 /// Which catalogue file a write error concerns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +133,24 @@ pub enum CatalogError {
         provider: String,
         /// The duplicate schema name.
         schema: String,
+    },
+    /// A declaration names a quirk the selected wire cannot apply.
+    #[error("{entry} declares quirk {quirk:?}, which does not apply to the {wire} wire")]
+    UnsupportedQuirk {
+        /// The provider or model that declared the quirk.
+        entry: String,
+        /// The selected wire.
+        wire: WireSchema,
+        /// The quirk that has no implementation on the wire.
+        quirk: Quirk,
+    },
+    /// A model declares quirks for a wire its provider does not serve.
+    #[error("model {model} declares quirks for the {wire} wire, which its provider does not serve")]
+    MissingQuirkWire {
+        /// The provider and model identity.
+        model: String,
+        /// The wire named in the model declaration.
+        wire: WireSchema,
     },
     /// A provider wire endpoint is not a safe HTTP base URL.
     #[error("provider `{provider}` has an invalid API endpoint `{api}`: {reason}")]
@@ -308,11 +331,15 @@ impl Catalog {
                 ));
                 continue;
             }
-            if !self.providers.contains_key(&model.provider_id) {
+            let Some(provider) = self.providers.get(&model.provider_id) else {
                 skipped.push(format!(
                     "model {}: no provider named `{}`",
                     model.id, model.provider_id
                 ));
+                continue;
+            };
+            if let Err(error) = validate_model_quirks(&model, provider) {
+                skipped.push(error.to_string());
                 continue;
             }
             let key = model.key();
@@ -364,13 +391,14 @@ impl Catalog {
                     id: model.provider_id.clone(),
                 });
             }
-            if !self.providers.contains_key(&model.provider_id) {
-                return Err(CatalogError::UnknownProvider {
+            let provider = self.providers.get(&model.provider_id).ok_or_else(|| {
+                CatalogError::UnknownProvider {
                     model: model.id.clone(),
                     provider: model.provider_id.clone(),
                     path: PathBuf::from("providers.json"),
-                });
-            }
+                }
+            })?;
+            validate_model_quirks(model, provider)?;
             if model.name.trim().is_empty() {
                 model.name.clone_from(&model.id);
             }
@@ -488,6 +516,37 @@ impl Catalog {
     }
 }
 
+fn validate_model_quirks(model: &Model, provider: &Provider) -> Result<(), CatalogError> {
+    for (&schema, quirks) in &model.quirks {
+        if provider.wire(schema).is_none() {
+            return Err(CatalogError::MissingQuirkWire {
+                model: model.key(),
+                wire: schema,
+            });
+        }
+        validate_quirks(schema, quirks, || format!("model {}", model.key()))?;
+    }
+    Ok(())
+}
+
+fn validate_quirks(
+    wire: WireSchema,
+    quirks: &Quirks,
+    entry: impl FnOnce() -> String,
+) -> Result<(), CatalogError> {
+    if let Some(&quirk) = quirks
+        .iter()
+        .find(|quirk| !wire.supported_quirks().contains(quirk))
+    {
+        return Err(CatalogError::UnsupportedQuirk {
+            entry: entry(),
+            wire,
+            quirk,
+        });
+    }
+    Ok(())
+}
+
 fn validate_provider(id: &str, provider: &Provider) -> Result<(), CatalogError> {
     if id.trim().is_empty() || id.trim() != id || id.contains('/') {
         return Err(CatalogError::InvalidProviderId { id: id.to_owned() });
@@ -501,6 +560,7 @@ fn validate_provider(id: &str, provider: &Provider) -> Result<(), CatalogError> 
             });
         }
         schemas.push(wire.schema);
+        validate_quirks(wire.schema, &wire.quirks, || format!("provider {id}"))?;
         let url =
             reqwest::Url::parse(&wire.api).map_err(|_| CatalogError::InvalidWireEndpoint {
                 provider: id.to_owned(),

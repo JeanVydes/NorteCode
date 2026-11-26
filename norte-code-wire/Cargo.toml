@@ -12,6 +12,7 @@ authors.workspace = true
 # and the terminal client can share exactly what the server speaks. Anything
 # that needs a socket, a database or a clock belongs in a crate that uses them.
 [dependencies]
+norte-types = { workspace = true }
 base64 = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }

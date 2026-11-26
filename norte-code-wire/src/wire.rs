@@ -454,7 +454,7 @@ pub enum ClientRequestKind {
     /// Add or replace a model in `models.json`, keyed by `provider_id` + `id`.
     CatalogUpsertModel {
         /// The entry to write.
-        model: crate::catalog::Model,
+        model: Box<crate::catalog::Model>,
     },
     /// Remove one model from `models.json`.
     CatalogRemoveModel {

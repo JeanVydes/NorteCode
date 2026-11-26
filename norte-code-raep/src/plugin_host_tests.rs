@@ -2,6 +2,7 @@ use super::*;
 
 fn service() -> Arc<Service> {
     let spec = norte_code_agent::ModelSpec {
+        quirks: std::collections::BTreeSet::new(),
         provider: "test".to_owned(),
         model: "scripted".to_owned(),
         endpoint: "https://example.invalid/v1".to_owned(),

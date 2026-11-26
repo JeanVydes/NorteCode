@@ -624,6 +624,9 @@ struct Digesting<'a> {
 #[async_trait::async_trait]
 impl Continuation for Digesting<'_> {
     async fn call(&self, _context: &LayerContext, request: ModelRequest) -> Result<ModelStream> {
+        self.model
+            .capabilities()
+            .check_request(self.model.reference(), &request)?;
         *self.digest.lock().unwrap_or_else(PoisonError::into_inner) = Some(digest_of(&request));
         self.model.stream(request).await
     }

@@ -9,6 +9,7 @@ fn provider(name: &str, schemas: &[WireSchema]) -> CatalogProvider {
         wires: schemas
             .iter()
             .map(|schema| CatalogWire {
+                quirks: std::collections::BTreeSet::new(),
                 api: format!("https://{name}.invalid/v1"),
                 schema: *schema,
                 auth: None,
@@ -37,6 +38,7 @@ fn wire_headers_are_the_headers_the_wire_names() {
     // Headers come from the wire, not from a built-in vendor table: what the
     // provider declares is what goes on the request, and nothing else.
     let mut wire = CatalogWire {
+        quirks: std::collections::BTreeSet::new(),
         api: "https://example.invalid/v1".to_owned(),
         schema: WireSchema::OpenAI,
         auth: None,
@@ -68,55 +70,42 @@ fn wire_headers_are_the_headers_the_wire_names() {
 }
 
 #[test]
-fn codex_responses_omits_unsupported_prompt_cache_breakpoints() {
-    let codex = ProviderId::new("codex").expect("provider id");
-    let gateway = ProviderId::new("gateway").expect("provider id");
-    let headers = BTreeMap::new();
+fn model_and_endpoint_quirks_are_merged_only_for_the_selected_wire() {
+    use norte::http::Quirk::{NoPromptCacheBreakpoints, NoPromptCacheKey, NoStreamUsage};
 
-    let codex_responses = profile(
-        WireSchema::Responses,
-        None,
-        codex.clone(),
-        "https://codex.invalid/v1",
-        "token".to_owned(),
-        &headers,
+    let mut provider = provider("gateway", &[WireSchema::OpenAI, WireSchema::Responses]);
+    provider.wires[0].quirks.insert(NoStreamUsage);
+    provider.wires[1].quirks.insert(NoPromptCacheKey);
+    let mut model = model("m", "gateway");
+    model
+        .quirks
+        .insert(WireSchema::Responses, [NoPromptCacheBreakpoints].into());
+    let chat = ModelSpec::from_entry(
+        &Config::default(),
+        &provider,
+        &model,
+        Some(WireSchema::OpenAI),
     )
-    .expect("Codex Responses profile");
-    assert!(
-        codex_responses
-            .quirks()
-            .contains(&norte::http::Quirk::NoPromptCacheBreakpoints)
-    );
-
-    let codex_chat = profile(
-        WireSchema::OpenAI,
-        None,
-        codex,
-        "https://codex.invalid/v1",
-        "token".to_owned(),
-        &headers,
+    .expect("chat");
+    assert_eq!(chat.quirks, [NoStreamUsage].into());
+    let responses = ModelSpec::from_entry(
+        &Config::default(),
+        &provider,
+        &model,
+        Some(WireSchema::Responses),
     )
-    .expect("Codex Chat profile");
-    assert!(
-        !codex_chat
-            .quirks()
-            .contains(&norte::http::Quirk::NoPromptCacheBreakpoints)
+    .expect("responses");
+    assert_eq!(
+        responses.quirks,
+        [NoPromptCacheBreakpoints, NoPromptCacheKey].into()
     );
-
-    let gateway_responses = profile(
-        WireSchema::Responses,
-        None,
-        gateway,
-        "https://gateway.invalid/v1",
-        "token".to_owned(),
-        &headers,
+    let profile = profile(
+        &responses,
+        ProviderId::new("gateway").expect("provider"),
+        "key".to_owned(),
     )
-    .expect("gateway Responses profile");
-    assert!(
-        !gateway_responses
-            .quirks()
-            .contains(&norte::http::Quirk::NoPromptCacheBreakpoints)
-    );
+    .expect("profile");
+    assert_eq!(profile.quirks(), &responses.quirks);
 }
 
 #[test]

@@ -785,6 +785,7 @@ async fn scripted_plugin_host(
 /// The spec a scripted host session runs with.
 fn scripted_spec() -> norte_code_agent::ModelSpec {
     norte_code_agent::ModelSpec {
+        quirks: std::collections::BTreeSet::new(),
         provider: "test".to_owned(),
         model: "scripted".to_owned(),
         endpoint: "https://example.invalid/v1".to_owned(),

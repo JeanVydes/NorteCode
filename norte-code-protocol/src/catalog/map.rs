@@ -11,13 +11,11 @@
 use std::collections::BTreeSet;
 
 use norte::{
-    CacheMode, Capabilities, Feature, Modality, Reasoning, ReasoningEffort, StreamingGranularity,
-    StructuredOutputMode, ToolKind,
+    CacheMode, Capabilities, Feature, GenerationSupport, Modality, Reasoning, ReasoningEffort,
+    StreamingGranularity, StructuredOutputMode, SupportedParam, ToolKind,
 };
 
-use norte_code_wire::catalog::{
-    Modality as DeclaredModality, Model, SupportedEffort, SupportedParams, WireSchema,
-};
+use norte_code_wire::catalog::{Modality as DeclaredModality, Model, SupportedEffort, WireSchema};
 
 /// The Norte wire family and cache mode a catalogue schema implies.
 ///
@@ -33,6 +31,9 @@ pub trait WireSchemaExt {
     #[must_use]
     fn family(self) -> &'static str;
 
+    /// The quirks the selected Norte adapter implements.
+    fn supported_quirks(self) -> &'static [norte::http::Quirk];
+
     /// How the wire's provider caches prompt prefixes.
     ///
     /// Anthropic's cache is explicit — the request marks the blocks it wants
@@ -47,6 +48,15 @@ impl WireSchemaExt for WireSchema {
             Self::Anthropic => norte::anthropic::WIRE_MESSAGES,
             Self::Google => norte::gemini::WIRE_GENERATE,
             Self::Responses => norte::openai::WIRE_RESPONSES,
+        }
+    }
+
+    fn supported_quirks(self) -> &'static [norte::http::Quirk] {
+        match self {
+            Self::OpenAI => norte::OpenAiChat::SUPPORTED_QUIRKS,
+            Self::Responses => norte::OpenAiResponses::SUPPORTED_QUIRKS,
+            Self::Anthropic => norte::AnthropicMessages::SUPPORTED_QUIRKS,
+            Self::Google => norte::GeminiGenerate::SUPPORTED_QUIRKS,
         }
     }
 
@@ -67,7 +77,11 @@ pub fn capabilities(model: &Model, schema: WireSchema) -> Capabilities {
     let mut builder = Capabilities::builder()
         .streaming(StreamingGranularity::Delta)
         .cache(schema.cache_mode())
-        .reasoning(reasoning(model));
+        .reasoning(reasoning(model))
+        .generation(GenerationSupport {
+            supported: model.supported_params.iter().copied().collect(),
+            complete: model.supported_params_complete,
+        });
 
     // An empty input list means the file said nothing, and an entry that says
     // nothing is not an entry that refuses everything: a model that accepted no
@@ -104,15 +118,18 @@ pub fn capabilities(model: &Model, schema: WireSchema) -> Capabilities {
     for feature in features(model) {
         builder = builder.feature(feature);
     }
-    if model.supported_params.contains(&SupportedParams::Tools) {
+    if model.supported_params.contains(&SupportedParam::Tools) {
         builder = builder.tool_kind(ToolKind::Function);
     }
-    // Which mode is not declared: the catalogue says whether a schema is
-    // enforced, and the conservative reading of "structured output" is a JSON
-    // object shaped by the prompt rather than enforced by the provider.
     if model
         .supported_params
-        .contains(&SupportedParams::StructuredOutput)
+        .contains(&SupportedParam::StructuredOutput)
+    {
+        builder = builder.structured_output(StructuredOutputMode::JsonSchema);
+    }
+    if model
+        .supported_params
+        .contains(&SupportedParam::ResponseFormat)
     {
         builder = builder.structured_output(StructuredOutputMode::JsonObject);
     }
@@ -126,19 +143,14 @@ pub fn capabilities(model: &Model, schema: WireSchema) -> Capabilities {
     builder.build()
 }
 
-/// The independent on/off capabilities a model's parameter list implies.
-///
-/// Norte's [`Feature`] set is the closed list for this, so a parameter that is
-/// a feature is mapped here and one that is a request field is not:
-/// `temperature` and `seed` are things a request may carry, which is not a
-/// question Norte's capability type asks.
+/// Maps catalogue flags that represent independent model capabilities.
 fn features(model: &Model) -> Vec<Feature> {
     let mut features = Vec::new();
-    let has = |param: SupportedParams| model.supported_params.contains(&param);
-    if has(SupportedParams::ToolChoice) {
+    let has = |param: SupportedParam| model.supported_params.contains(&param);
+    if has(SupportedParam::ToolChoice) {
         features.push(Feature::ForcedToolChoice);
     }
-    if has(SupportedParams::Logprobs) || has(SupportedParams::TopLogprobs) {
+    if has(SupportedParam::Logprobs) || has(SupportedParam::TopLogprobs) {
         features.push(Feature::Logprobs);
     }
     features

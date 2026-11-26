@@ -40,6 +40,7 @@ fn start_events_are_output_but_usage_is_not() {
 async fn an_exhausted_stream_records_an_ok_row() {
     let telemetry = Arc::new(Telemetry::default());
     let spec = ModelSpec {
+        quirks: std::collections::BTreeSet::new(),
         provider: "test".to_owned(),
         model: "test".to_owned(),
         endpoint: "https://example.invalid/v1".to_owned(),
@@ -113,6 +114,7 @@ impl Continuation for Events {
 async fn records_first_output_and_first_visible_text_separately() {
     let telemetry = Arc::new(Telemetry::default());
     let spec = ModelSpec {
+        quirks: std::collections::BTreeSet::new(),
         provider: "test".to_owned(),
         model: "test".to_owned(),
         endpoint: "https://example.invalid/v1".to_owned(),
@@ -177,6 +179,7 @@ async fn cancelled_row(
 ) -> (norte_code_protocol::sqlite::RequestRecord, norte::SessionId) {
     let telemetry = Arc::new(Telemetry::default());
     let spec = ModelSpec {
+        quirks: std::collections::BTreeSet::new(),
         provider: "test".to_owned(),
         model: "test".to_owned(),
         endpoint: "https://example.invalid/v1".to_owned(),

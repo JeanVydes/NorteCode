@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use norte::anthropic::AnthropicMessages;
 use norte::gemini::GeminiGenerate;
-use norte::http::{AuthScheme, HttpClient, Quirk, Quirks, TransportPolicy, VendorProfile};
+use norte::http::{AuthScheme, HttpClient, Quirks, TransportPolicy, VendorProfile};
 use norte::openai::{OpenAiChat, OpenAiResponses};
 use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId, WireFamily};
 
@@ -61,6 +61,8 @@ pub struct ModelSpec {
     pub auth: Option<AuthKind>,
     /// The capability declaration the catalogue entry and config produce.
     pub capabilities: Capabilities,
+    /// Endpoint and model wire deviations applied by the adapter.
+    pub quirks: Quirks,
     /// The headers sent with every request to this provider.
     pub headers: BTreeMap<String, String>,
     /// The transport policy this provider's adapter follows.
@@ -95,6 +97,12 @@ impl ModelSpec {
             schema: wire.schema,
             auth: wire.auth,
             capabilities: norte_code_protocol::catalog::capabilities(model, wire.schema),
+            quirks: wire
+                .quirks
+                .iter()
+                .chain(model.quirks.get(&wire.schema).into_iter().flatten())
+                .copied()
+                .collect(),
             headers: wire.headers.clone(),
             http: config.provider_http,
         })
@@ -214,14 +222,7 @@ impl ModelFactory for VendorModels {
         // implies. There is no branch for a vendor this build has heard of,
         // because knowing the vendor is not what makes the request work: the
         // wire is.
-        let profile = profile(
-            spec.schema,
-            spec.auth,
-            provider,
-            &spec.endpoint,
-            key,
-            &spec.headers,
-        )?;
+        let profile = profile(spec, provider, key)?;
         let client = HttpClient::with_policy(TransportPolicy {
             max_retries: spec.http.connect_max_retries,
             base: Duration::from_millis(500),
@@ -258,25 +259,20 @@ fn with_headers(profile: VendorProfile, headers: &BTreeMap<String, String>) -> V
 /// the only place that may say so: the configuration cannot, and a value it
 /// could set would only make the request wrong.
 fn profile(
-    schema: WireSchema,
-    auth: Option<AuthKind>,
+    spec: &ModelSpec,
     provider: ProviderId,
-    endpoint: &str,
     key: String,
-    headers: &BTreeMap<String, String>,
 ) -> Result<VendorProfile, ServiceError> {
-    let quirks = profile_quirks(&provider, schema);
+    let schema = spec.schema;
     let mut profile = VendorProfile::new(
         provider,
         WireFamily::new(norte_code_protocol::catalog::map::WireSchemaExt::family(
             schema,
         ))?,
-        endpoint,
+        &spec.endpoint,
     )?;
-    for quirk in quirks {
-        profile = profile.with_quirk(quirk);
-    }
-    let profile = match auth.unwrap_or_else(|| AuthKind::for_schema(schema)) {
+    profile.quirks.clone_from(&spec.quirks);
+    let profile = match spec.auth.unwrap_or_else(|| AuthKind::for_schema(schema)) {
         AuthKind::Bearer => profile.with_auth(AuthScheme::bearer(key)),
         AuthKind::XApiKey => profile.with_auth(AuthScheme::header("x-api-key", key)),
         AuthKind::XGoogApiKey => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
@@ -287,15 +283,7 @@ fn profile(
     } else {
         profile
     };
-    Ok(with_headers(profile, headers))
-}
-
-fn profile_quirks(provider: &ProviderId, schema: WireSchema) -> Quirks {
-    if provider.as_str() == "codex" && schema == WireSchema::Responses {
-        [Quirk::NoPromptCacheBreakpoints].into_iter().collect()
-    } else {
-        Quirks::new()
-    }
+    Ok(with_headers(profile, &spec.headers))
 }
 
 /// Builds the adapter that speaks `schema` over `profile`.
