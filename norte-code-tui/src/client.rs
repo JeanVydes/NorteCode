@@ -284,7 +284,7 @@ pub(crate) enum UiCommand {
 }
 
 /// A plugin operation the host can do for us.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum PluginOp {
     /// Install a plugin from a git repository, optionally one package of it.
     Install {
@@ -292,6 +292,18 @@ pub(crate) enum PluginOp {
         url: String,
         /// One workspace package to install instead of the whole workspace.
         package: Option<String>,
+    },
+    /// Install every plugin package from a workspace.
+    InstallAll {
+        /// The repository URL.
+        url: String,
+    },
+    /// Install selected workspace packages sequentially.
+    InstallMany {
+        /// The repository URL.
+        url: String,
+        /// Workspace packages to install.
+        packages: Vec<String>,
     },
     /// Update one plugin, or every plugin with a recorded source.
     Update {
@@ -450,19 +462,44 @@ async fn delete_session(
 
 /// Run one plugin operation and re-list the plugins afterwards.
 async fn run_plugin_op(api: &Arc<RestClient>, op: PluginOp, events: &Sender<ClientEvent>) {
+    if let PluginOp::InstallMany { url, packages } = &op {
+        for package in packages {
+            let outcome = api.install_plugin(url, Some(package), false).await;
+            report_plugin_outcome(outcome, events).await;
+        }
+        if let Ok(plugins) = api.plugins().await {
+            let _ = events.send(ClientEvent::Plugins(plugins)).await;
+        }
+        return;
+    }
     let outcome = match &op {
         PluginOp::Install { url, package } => {
             api.install_plugin(url, package.as_deref(), false).await
         }
+        PluginOp::InstallAll { url } => api.install_plugin(url, None, true).await,
         PluginOp::Update { name } => api.update_plugin(name.as_deref()).await,
         PluginOp::Remove { name } => api.remove_plugin(name).await,
         PluginOp::SetEnabled { name, enabled } => api.set_plugin_enabled(name, *enabled).await,
+        PluginOp::InstallMany { .. } => unreachable!("multiple packages are handled above"),
     };
+    report_plugin_outcome(outcome, events).await;
+    if let Ok(plugins) = api.plugins().await {
+        let _ = events.send(ClientEvent::Plugins(plugins)).await;
+    }
+}
+
+async fn report_plugin_outcome(
+    outcome: Result<norte_code_client::PluginChange, norte_code_client::ApiError>,
+    events: &Sender<ClientEvent>,
+) {
     match outcome {
         Ok(change) => {
             let _ = events
                 .send(ClientEvent::Notice {
-                    text: format!("plugin {} · {}", change.name, change.operation),
+                    text: format!(
+                        "plugin {} · {} · restart the service to load changes",
+                        change.name, change.operation
+                    ),
                 })
                 .await;
         }
@@ -473,9 +510,6 @@ async fn run_plugin_op(api: &Arc<RestClient>, op: PluginOp, events: &Sender<Clie
                 })
                 .await;
         }
-    }
-    if let Ok(plugins) = api.plugins().await {
-        let _ = events.send(ClientEvent::Plugins(plugins)).await;
     }
 }
 

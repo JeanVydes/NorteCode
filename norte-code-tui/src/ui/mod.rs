@@ -29,6 +29,7 @@ mod header;
 #[path = "header_tests.rs"]
 mod header_tests;
 mod host_info;
+mod host_overlay;
 mod key_prompt;
 mod key_prompt_action;
 #[cfg(test)]
@@ -80,6 +81,7 @@ pub(crate) use composer::Composer;
 pub(crate) use config_page::{ConfigAction, ConfigData, Setting};
 pub(crate) use debug_overlay::{DebugOverlay, OverlayClock};
 pub(crate) use header::Header;
+pub(crate) use host_overlay::HostOverlay;
 
 pub(crate) use key_prompt::{KeyIntent, KeyPrompt, KeyPromptAction};
 pub(crate) use key_status::invalidate_key;
@@ -184,6 +186,7 @@ pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionCon
             node("key_prompt", key_prompt::KeyPrompt::new()),
             node("question_prompt", question_prompt::QuestionPrompt::new()),
             node("plan_overlay", plan_overlay::PlanOverlay::default()),
+            node("host_overlay", host_overlay::HostOverlay::default()),
         ]),
     );
 
@@ -252,8 +255,13 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     let plan_open = tree
         .find::<plan_overlay::PlanOverlay>("plan_overlay")
         .is_some_and(plan_overlay::PlanOverlay::is_open);
+    let host_open = tree
+        .find::<host_overlay::HostOverlay>("host_overlay")
+        .is_some_and(host_overlay::HostOverlay::is_open);
     let visible = if plan_open {
         3
+    } else if host_open {
+        4
     } else if question_open {
         2
     } else {
@@ -277,6 +285,7 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     }
     if overlay_changed {
         let focus = match visible {
+            4 => "host_overlay",
             3 => "plan_overlay",
             2 => "question_prompt",
             1 => tree

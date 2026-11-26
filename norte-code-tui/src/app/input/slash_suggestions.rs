@@ -17,7 +17,19 @@ pub(super) fn suggestions(
     if input.starts_with("//") || !input.starts_with('/') {
         return Vec::new();
     }
-    let candidates = if input == "/open" || input.starts_with("/open ") {
+    let candidates = if input == "/plugin" || input.starts_with("/plugin ") {
+        super::plugin_command::suggestions(
+            if input == "/plugin" {
+                "/plugin "
+            } else {
+                input
+            },
+            plugins,
+        )
+        .into_iter()
+        .map(|value| suggestion(value.clone(), value))
+        .collect()
+    } else if input == "/open" || input.starts_with("/open ") {
         open_suggestions(input, sessions)
     } else if input == "/new" || input.starts_with("/new ") {
         new_suggestions(input, models)

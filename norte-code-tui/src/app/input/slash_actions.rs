@@ -46,7 +46,7 @@ pub(super) fn execute_slash_command(
         );
         return;
     }
-    if execute_local_slash_command(tree, model, &command, input) {
+    if execute_local_slash_command(tree, commands, model, &command, input) {
         return;
     }
     let Some(commands) = commands else {
@@ -57,11 +57,13 @@ pub(super) fn execute_slash_command(
         );
         return;
     };
+    let plugin_operation = matches!(&command, SlashCommand::ManagePlugin(_));
     let reasoning_update = match &command {
         SlashCommand::SetReasoning(reasoning) => Some(reasoning.clone()),
         _ => None,
     };
     let queued = match command {
+        SlashCommand::ManagePlugin(op) => commands.try_send(UiCommand::Plugin(op)),
         SlashCommand::New(model) => commands.try_send(UiCommand::NewDraft { model }),
         SlashCommand::Open(session) => commands.try_send(UiCommand::OpenSession { session }),
         SlashCommand::Compact => {
@@ -79,6 +81,7 @@ pub(super) fn execute_slash_command(
         SlashCommand::SetQueueMode(_)
         | SlashCommand::ToggleDebug
         | SlashCommand::Plans
+        | SlashCommand::Host
         | SlashCommand::ClearData
         | SlashCommand::Preference(_) => {
             unreachable!("local slash commands are handled before a service command is queued")
@@ -106,14 +109,33 @@ pub(super) fn execute_slash_command(
         model.active_reasoning = reasoning_update;
     }
     clear_command_draft(tree, input);
+    if plugin_operation {
+        notice(
+            tree,
+            "plugin operation started".to_owned(),
+            ui::Tone::Neutral,
+        );
+    }
 }
 
 fn execute_local_slash_command(
     tree: &mut terminalui::Tree,
+    commands: Option<&tokio::sync::mpsc::Sender<UiCommand>>,
     model: &mut UiModel,
     command: &SlashCommand,
     input: &str,
 ) -> bool {
+    if matches!(command, SlashCommand::Host) {
+        if let Some(overlay) = tree.find_mut::<ui::HostOverlay>("host_overlay") {
+            overlay.open(model);
+        }
+        if let Some(commands) = commands {
+            let _ = commands.try_send(UiCommand::RefreshViews);
+        }
+        clear_command_draft(tree, input);
+        ui::sync_views(tree, model);
+        return true;
+    }
     if let SlashCommand::Preference(preference) = command {
         let theme = model.preferences.theme.clone();
         if super::preferences::apply(preference, &mut model.preferences).is_err() {

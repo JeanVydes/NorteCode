@@ -1190,6 +1190,54 @@ fn tab_in_chat_keeps_focus_on_the_composer() {
 }
 
 #[test]
+fn host_command_shows_information_and_escape_returns_to_chat() {
+    let mut model = UiModel::detached();
+    model.service_url = "http://127.0.0.1:8787".to_owned();
+    let mut tree = ui::build_tree(&model);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    type_text(&mut tree, "/host", &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert!(
+        tree.find::<ui::HostOverlay>("host_overlay")
+            .unwrap()
+            .is_open()
+    );
+    assert!(matches!(receiver.try_recv(), Ok(UiCommand::RefreshViews)));
+    let area = ratatui::layout::Rect::new(0, 0, 100, 24);
+    let text = crate::test_support::rendered_in(&mut tree, area, &Theme::default());
+    assert!(
+        text.contains("HOST") && text.contains("127.0.0.1:8787"),
+        "{text}"
+    );
+    press_app_key(&mut tree, KeyCode::Esc, &mut commands, &mut model);
+    assert!(
+        !tree
+            .find::<ui::HostOverlay>("host_overlay")
+            .unwrap()
+            .is_open()
+    );
+    assert_eq!(tree.focused_id(), Some("composer"));
+}
+
+#[test]
+fn plugin_install_command_queues_all_requested_packages() {
+    let mut model = UiModel::detached();
+    let mut tree = ui::build_tree(&model);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut commands = Some(sender);
+    type_text(
+        &mut tree,
+        "/plugin install https://example.test/repo one,two",
+        &mut model,
+    );
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert!(
+        matches!(receiver.try_recv(), Ok(UiCommand::Plugin(crate::client::PluginOp::InstallMany { url, packages })) if url == "https://example.test/repo" && packages == ["one", "two"])
+    );
+}
+
+#[test]
 fn clear_data_command_requires_confirmation() {
     let mut model = UiModel::detached();
     let mut tree = ui::build_tree(&model);

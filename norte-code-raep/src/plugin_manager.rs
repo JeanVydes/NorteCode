@@ -239,8 +239,7 @@ pub fn install_plugin(
 ///
 /// # Errors
 ///
-/// Returns an error when the workspace has no plugin package, or when every
-/// package failed to install.
+/// Returns an error describing any failed packages and successful installations.
 pub fn install_all_plugins(
     url: &str,
     on_progress: &dyn Fn(usize, usize, &str),
@@ -254,7 +253,7 @@ pub fn install_all_plugins(
     let _ = std::fs::remove_dir_all(&tmp_dir);
     let results = installed?;
     let mut stems = Vec::new();
-    let mut first_error = None;
+    let mut errors = Vec::new();
     for (package, result) in results {
         match result {
             Ok(stem) => {
@@ -262,14 +261,20 @@ pub fn install_all_plugins(
                 stems.push(stem);
             }
             Err(error) => {
-                first_error.get_or_insert(format!("{package}: {error}"));
+                errors.push(format!("{package}: {error}"));
             }
         }
     }
-    if stems.is_empty() {
-        return Err(
-            first_error.unwrap_or_else(|| "no plugin package could be installed".to_owned())
-        );
+    if !errors.is_empty() {
+        let installed = if stems.is_empty() {
+            "none".to_owned()
+        } else {
+            stems.join(", ")
+        };
+        return Err(format!(
+            "installed: {installed}; failed: {}",
+            errors.join("; ")
+        ));
     }
     Ok(stems)
 }

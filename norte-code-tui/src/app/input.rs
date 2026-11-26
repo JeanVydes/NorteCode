@@ -8,6 +8,7 @@ mod modals;
 mod navigation;
 #[path = "input/palette.rs"]
 mod palette;
+mod plugin_command;
 mod preferences;
 #[path = "input/selectors.rs"]
 mod selectors;

@@ -125,7 +125,7 @@ impl RestClient {
         let payload = serde_json::to_value(payload)
             .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
         let frame = Envelope::new(kind, payload, now_millis()?);
-        self.post_frame_at(Endpoint::Commands, &frame).await
+        self.post_frame_at(Endpoint::Commands, &frame, None).await
     }
 
     /// Sends a fully built frame to a session's command endpoint.
@@ -138,7 +138,7 @@ impl RestClient {
         session: &str,
         frame: &Envelope<Value>,
     ) -> Result<CommandResponse, ApiError> {
-        self.post_frame_at(Endpoint::SessionCommands { id: session }, frame)
+        self.post_frame_at(Endpoint::SessionCommands { id: session }, frame, None)
             .await
     }
 
@@ -146,10 +146,13 @@ impl RestClient {
         &self,
         endpoint: Endpoint<'_>,
         frame: &Envelope<Value>,
+        timeout: Option<std::time::Duration>,
     ) -> Result<CommandResponse, ApiError> {
         let body = serde_json::to_value(frame)
             .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
-        let response = self.send(&endpoint, Some(body)).await?;
+        let response = self
+            .send_with_timeout(&endpoint, Some(body), timeout)
+            .await?;
         decode(response).await
     }
 
@@ -163,6 +166,11 @@ impl RestClient {
         session: Option<&str>,
         kind: ClientRequestKind,
     ) -> Result<CommandResponse, ApiError> {
+        let timeout = matches!(
+            &kind,
+            ClientRequestKind::InstallPlugin { .. } | ClientRequestKind::UpdatePlugins { .. }
+        )
+        .then_some(std::time::Duration::from_secs(1800));
         let request = ClientRequest {
             request_id: u64::try_from(now_millis()?)
                 .map_err(|error| ApiError::InvalidResponse(error.to_string()))?,
@@ -182,7 +190,7 @@ impl RestClient {
             None => Endpoint::Commands,
         };
         let response = self
-            .post_frame_at(endpoint, &frame)
+            .post_frame_at(endpoint, &frame, timeout)
             .await
             .map_err(|error| match error {
                 ApiError::InvalidResponse(message) => ApiError::InvalidResponse(message),
@@ -238,7 +246,19 @@ impl RestClient {
         endpoint: &Endpoint<'_>,
         body: Option<Value>,
     ) -> Result<reqwest::Response, ApiError> {
+        self.send_with_timeout(endpoint, body, None).await
+    }
+
+    async fn send_with_timeout(
+        &self,
+        endpoint: &Endpoint<'_>,
+        body: Option<Value>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<reqwest::Response, ApiError> {
         let mut request = self.http.request(endpoint.method(), self.url(endpoint));
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
         let body = match (body, endpoint.body()?) {
             (Some(body), _) | (None, Some(body)) => Some(body),
             (None, None) => None,

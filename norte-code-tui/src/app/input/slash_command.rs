@@ -5,7 +5,15 @@ use norte_code_wire::{Reasoning, ReasoningInfo};
 
 use crate::ui_model::SendMode;
 
-pub(super) const COMMANDS: [CommandDefinition; 17] = [
+pub(super) const COMMANDS: [CommandDefinition; 19] = [
+    CommandDefinition {
+        name: CommandName::PluginManager,
+        usage: "/plugin",
+    },
+    CommandDefinition {
+        name: CommandName::Host,
+        usage: "/host",
+    },
     CommandDefinition {
         name: CommandName::ClearData,
         usage: "/clear-data",
@@ -78,6 +86,8 @@ pub(super) const COMMANDS: [CommandDefinition; 17] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CommandName {
+    PluginManager,
+    Host,
     ClearData,
     Theme,
     Diff,
@@ -101,6 +111,8 @@ pub(super) enum CommandName {
 impl CommandName {
     pub(super) const fn label(self) -> &'static str {
         match self {
+            Self::PluginManager => "/plugin",
+            Self::Host => "/host",
             Self::ClearData => "/clear-data",
             Self::Theme => "/theme",
             Self::Diff => "/diff",
@@ -172,6 +184,8 @@ impl ReasoningEffort {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SlashCommand {
+    ManagePlugin(crate::client::PluginOp),
+    Host,
     ClearData,
     Preference(super::preferences::PreferenceCommand),
     Plans,
@@ -236,6 +250,10 @@ pub(super) fn parse(
             .map_err(|()| SlashCommandError::InvalidArguments);
     }
     match CommandName::parse(label) {
+        Some(CommandName::PluginManager) => super::plugin_command::parse(&args)
+            .map(SlashCommand::ManagePlugin)
+            .map_err(|()| SlashCommandError::InvalidArguments),
+        Some(CommandName::Host) if args.is_empty() => Ok(SlashCommand::Host),
         Some(CommandName::ClearData) if args.is_empty() => Ok(SlashCommand::ClearData),
         Some(CommandName::Plans) if args.is_empty() => Ok(SlashCommand::Plans),
         Some(CommandName::Compact) if args.is_empty() => Ok(SlashCommand::Compact),
@@ -248,7 +266,8 @@ pub(super) fn parse(
         Some(CommandName::Reasoning) => parse_reasoning(&args, reasoning),
         Some(CommandName::Queue) => parse_queue_mode(&args),
         Some(
-            CommandName::ClearData
+            CommandName::Host
+            | CommandName::ClearData
             | CommandName::Theme
             | CommandName::Diff
             | CommandName::Rail

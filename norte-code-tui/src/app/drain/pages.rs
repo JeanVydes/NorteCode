@@ -121,6 +121,23 @@ pub(in crate::app) fn drain_plugins_actions(
                     format!("plugin install started · {url}"),
                 );
             }
+            ui::PluginsAction::InstallMany { url, packages } => {
+                let summary = format!("plugin install started · {} packages", packages.len());
+                send_plugin_op(
+                    tree,
+                    commands.as_ref(),
+                    crate::client::PluginOp::InstallMany { url, packages },
+                    summary,
+                );
+            }
+            ui::PluginsAction::InstallAll { url } => {
+                send_plugin_op(
+                    tree,
+                    commands.as_ref(),
+                    crate::client::PluginOp::InstallAll { url },
+                    "plugin installation started".to_owned(),
+                );
+            }
             ui::PluginsAction::Update { name } => {
                 let summary = match &name {
                     Some(name) => format!("plugin update started · {name}"),

@@ -71,7 +71,10 @@ fn overlay_owns_enter(tree: &terminalui::Tree) -> bool {
     let plan_open = tree
         .find::<ui::PlanOverlay>("plan_overlay")
         .is_some_and(ui::PlanOverlay::is_open);
-    question_open || prompt_open || plan_open
+    let host_open = tree
+        .find::<ui::HostOverlay>("host_overlay")
+        .is_some_and(ui::HostOverlay::is_open);
+    question_open || prompt_open || plan_open || host_open
 }
 
 fn keep_chat_focus(

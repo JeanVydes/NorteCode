@@ -27,8 +27,17 @@ fn epoch(value: u64) -> String {
     if value == 0 {
         return "–".to_owned();
     }
-    // RFC 3339 needs a time library; a compact epoch is honest and dependency free.
-    format!("{value}")
+    i64::try_from(value)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(
+            || value.to_string(),
+            |time| {
+                time.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            },
+        )
 }
 
 /// Everything the client knows about the server it is attached to.
@@ -67,19 +76,9 @@ fn server_fields(fields: &mut Vec<Field>, info: &norte_code_client::ServerInfo) 
     }
     fields.push(Field::new("default agent", &info.default_agent));
     if !info.capabilities.is_empty() {
-        let shown = info
-            .capabilities
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>();
-        let rest = info.capabilities.len().saturating_sub(3);
-        let value = if rest == 0 {
-            shown.join(", ")
-        } else {
-            format!("{}, +{rest} more", shown.join(", "))
-        };
-        fields.push(Field::new("capabilities", value));
+        for capability in &info.capabilities {
+            fields.push(Field::new("capability", capability));
+        }
     }
     if !info.extensions.is_empty() {
         fields.push(Field::new("extensions", info.extensions.join(", ")));

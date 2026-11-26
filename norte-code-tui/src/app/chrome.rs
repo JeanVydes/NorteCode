@@ -15,6 +15,9 @@ pub(in crate::app) fn sync_debug_overlay(
 }
 
 pub(in crate::app) fn sync_chrome(tree: &mut terminalui::Tree, model: &UiModel) {
+    if let Some(host) = tree.find_mut::<ui::HostOverlay>("host_overlay") {
+        host.sync(model);
+    }
     if let Some(overlay) = tree.find_mut::<ui::PlanOverlay>("plan_overlay") {
         overlay.sync_plans(&model.plans);
     }
