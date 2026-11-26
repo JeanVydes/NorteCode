@@ -151,7 +151,7 @@ fn main() -> ExitCode {
                 service::status();
                 ExitCode::SUCCESS
             }
-            ServiceCommand::Catalog => match service::catalog() {
+            ServiceCommand::Catalog => match providers::run(None) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{} {}", output::red("✗"), error);

@@ -48,7 +48,6 @@ fn worker_count(config: &ServiceLifecycleConfig) -> usize {
 mod tests;
 
 use crate::output;
-use norte_code_protocol::catalog::catalog_dir;
 
 /// Where the service keeps its pid file and log: `XDG_STATE_HOME`, then `HOME`.
 fn state_dir() -> PathBuf {
@@ -471,82 +470,6 @@ fn http_get(url: &str) -> Option<String> {
     text.split_once("\r\n\r\n")
         .map(|(_, body)| body.to_owned())
         .or_else(|| text.split_once("\n\n").map(|(_, body)| body.to_owned()))
-}
-
-pub(crate) fn catalog() -> Result<(), String> {
-    output::print_heading("catalogue");
-    let dir = catalog_dir().map_err(|e| format!("{e}"))?;
-    let providers_path = dir.join("providers.json");
-    let models_path = dir.join("models.json");
-    output::print_kv("providers file", &providers_path.display().to_string());
-    output::print_kv("models file", &models_path.display().to_string());
-    println!();
-
-    if !providers_path.exists() {
-        println!("  {} no providers.json yet", output::muted("○"));
-    } else {
-        let raw = fs::read_to_string(&providers_path).map_err(|e| format!("{e}"))?;
-        let providers: norte_code_wire::catalog::Providers = serde_json::from_str(&raw)
-            .map_err(|e| format!("could not parse providers.json: {e}"))?;
-        if providers.providers.is_empty() {
-            println!("  {} no providers configured", output::muted("○"));
-        } else {
-            for (id, provider) in &providers.providers {
-                println!(
-                    "  {} {}",
-                    output::accent(id),
-                    output::muted(&format!("— {}", provider.name))
-                );
-                for wire in &provider.wires {
-                    println!(
-                        "       {}  {}",
-                        output::dim(&wire.schema.to_string()),
-                        output::muted(&wire.api)
-                    );
-                }
-            }
-        }
-    }
-
-    println!();
-    if !models_path.exists() {
-        println!("  {} no models.json yet", output::muted("○"));
-    } else {
-        let raw = fs::read_to_string(&models_path).map_err(|e| format!("{e}"))?;
-        let models: norte_code_wire::catalog::Models =
-            serde_json::from_str(&raw).map_err(|e| format!("could not parse models.json: {e}"))?;
-        if models.models.is_empty() {
-            println!("  {} no models configured", output::muted("○"));
-        } else {
-            // group by provider
-            let mut by_provider: std::collections::BTreeMap<
-                &str,
-                Vec<&norte_code_wire::catalog::Model>,
-            > = std::collections::BTreeMap::new();
-            for model in &models.models {
-                by_provider
-                    .entry(&model.provider_id)
-                    .or_default()
-                    .push(model);
-            }
-            for (provider, list) in &by_provider {
-                println!(
-                    "  {}  {}",
-                    output::accent(provider),
-                    output::muted(&format!("({} models)", list.len()))
-                );
-                for model in list {
-                    let label = if model.name.is_empty() {
-                        &model.id
-                    } else {
-                        &model.name
-                    };
-                    println!("       {}  {}", output::muted("·"), label);
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn config() -> Result<(), String> {
