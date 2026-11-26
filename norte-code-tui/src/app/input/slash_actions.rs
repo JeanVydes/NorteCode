@@ -162,13 +162,10 @@ fn execute_local_slash_command(
         return true;
     }
     if matches!(command, SlashCommand::ClearData) {
-        if let Some(page) = tree.find_mut::<ui::SettingsPage>("settings") {
-            page.open_clear_data();
+        if let Some(overlay) = tree.find_mut::<ui::ClearDataOverlay>("clear_data_overlay") {
+            overlay.open();
         }
-        model.tab = Tab::Settings;
         clear_command_draft(tree, input);
-        ui::sync_views(tree, model);
-        tree.focus("settings");
         return true;
     }
     if matches!(command, SlashCommand::Plans) {

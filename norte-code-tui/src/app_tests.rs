@@ -1245,17 +1245,54 @@ fn clear_data_command_requires_confirmation() {
     let mut commands = Some(sender);
     type_text(&mut tree, "/clear-data", &mut model);
     press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
-    assert_eq!(model.tab, Tab::Settings);
+    assert_eq!(model.tab, Tab::Chat);
+    assert!(
+        tree.find::<ui::ClearDataOverlay>("clear_data_overlay")
+            .unwrap()
+            .is_open()
+    );
     assert!(receiver.try_recv().is_err());
-    press_app_key(&mut tree, KeyCode::Esc, &mut commands, &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
     assert!(receiver.try_recv().is_err());
-    model.tab = Tab::Chat;
-    ui::sync_views(&mut tree, &model);
-    tree.focus("composer");
+    assert!(
+        !tree
+            .find::<ui::ClearDataOverlay>("clear_data_overlay")
+            .unwrap()
+            .is_open()
+    );
     type_text(&mut tree, "/clear-data", &mut model);
     press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    press_app_key(&mut tree, KeyCode::Esc, &mut commands, &mut model);
+    assert!(receiver.try_recv().is_err());
+    assert!(
+        !tree
+            .find::<ui::ClearDataOverlay>("clear_data_overlay")
+            .unwrap()
+            .is_open()
+    );
+    type_text(&mut tree, "/clear-data", &mut model);
     press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    press_app_key(&mut tree, KeyCode::Right, &mut commands, &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert_eq!(model.tab, Tab::Chat);
     assert!(matches!(receiver.try_recv(), Ok(UiCommand::ClearData)));
+}
+
+#[test]
+fn clear_data_confirmation_stays_open_when_service_is_disconnected() {
+    let mut model = UiModel::detached();
+    let mut tree = ui::build_tree(&model);
+    let mut commands = None;
+    type_text(&mut tree, "/clear-data", &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    press_app_key(&mut tree, KeyCode::Right, &mut commands, &mut model);
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
+    assert!(
+        tree.find::<ui::ClearDataOverlay>("clear_data_overlay")
+            .unwrap()
+            .is_open()
+    );
+    assert_eq!(model.tab, Tab::Chat);
 }
 
 #[test]

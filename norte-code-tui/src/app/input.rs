@@ -66,6 +66,13 @@ pub(in crate::app) fn poll_event(
                 PollOutcome::Event(InputKind::Key)
             })
         }
+        Event::Mouse(mouse) if clear_overlay_open(tree) => {
+            let action = tree
+                .find_mut::<ui::ClearDataOverlay>("clear_data_overlay")
+                .and_then(|overlay| overlay.mouse(mouse));
+            handle_clear_action(tree, commands.as_ref(), action);
+            Ok(PollOutcome::Event(InputKind::Mouse))
+        }
         Event::Mouse(mouse) => {
             if let Some(composer) = tree.find_mut::<ui::Composer>("composer") {
                 composer.hover(mouse.column, mouse.row);
@@ -85,6 +92,10 @@ pub(in crate::app) fn poll_event(
             drain_sessions_actions(tree, commands, model);
             ui::sync_views(tree, model);
             Ok(PollOutcome::Event(InputKind::Mouse))
+        }
+        other if clear_overlay_open(tree) => {
+            let _ = other;
+            Ok(PollOutcome::Event(InputKind::Other))
         }
         other => {
             let input = terminalui::InputEvent::from(other);
@@ -161,4 +172,51 @@ pub(in crate::app) fn settle_input(
     }
     drain_tab_request(tree, model);
     ui::sync_views(tree, model);
+}
+
+fn clear_overlay_open(tree: &terminalui::Tree) -> bool {
+    tree.find::<ui::ClearDataOverlay>("clear_data_overlay")
+        .is_some_and(ui::ClearDataOverlay::is_open)
+}
+
+fn handle_clear_action(
+    tree: &mut terminalui::Tree,
+    commands: Option<&tokio::sync::mpsc::Sender<UiCommand>>,
+    action: Option<ui::ClearAction>,
+) {
+    let Some(action) = action else {
+        return;
+    };
+    let error = match action {
+        ui::ClearAction::Cancel => None,
+        ui::ClearAction::Confirm => match commands {
+            Some(commands) => commands
+                .try_send(UiCommand::ClearData)
+                .err()
+                .map(|error| format!("Could not start: {error}")),
+            None => Some("Service disconnected; nothing was cleared".to_owned()),
+        },
+    };
+    if let Some(overlay) = tree.find_mut::<ui::ClearDataOverlay>("clear_data_overlay") {
+        if let Some(error) = error {
+            overlay.fail(error);
+        } else {
+            overlay.close();
+        }
+    }
+}
+
+fn handle_clear_key(
+    tree: &mut terminalui::Tree,
+    commands: Option<&tokio::sync::mpsc::Sender<UiCommand>>,
+    key: crossterm::event::KeyEvent,
+) -> bool {
+    if !clear_overlay_open(tree) {
+        return false;
+    }
+    let action = tree
+        .find_mut::<ui::ClearDataOverlay>("clear_data_overlay")
+        .and_then(|overlay| overlay.key(key));
+    handle_clear_action(tree, commands, action);
+    true
 }

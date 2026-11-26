@@ -128,6 +128,9 @@ pub(in crate::app) fn handle_key(
     if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
         return true;
     }
+    if super::handle_clear_key(tree, commands.as_ref(), key) {
+        return false;
+    }
     if handle_palette_key(tree, key, commands, model) {
         return false;
     }

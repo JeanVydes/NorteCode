@@ -107,12 +107,6 @@ pub(crate) struct SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) fn open_clear_data(&mut self) {
-        self.error = None;
-        self.focus = Focus::ClearData;
-        self.prompt = Prompt::ConfirmClearData;
-    }
-
     /// An empty page, filled by the host.
     pub(crate) fn new() -> Self {
         Self {

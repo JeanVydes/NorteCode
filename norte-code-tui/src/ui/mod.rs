@@ -8,6 +8,7 @@ mod chart_renderer;
 mod chart_renderer_tests;
 mod chat_layout;
 pub(crate) mod chip_preview;
+mod clear_data_overlay;
 mod command_dock;
 mod command_palette;
 #[cfg(test)]
@@ -76,6 +77,7 @@ use norte_code_client::config::RetentionConfig;
 use terminalui::{Pane, Spacer};
 
 pub(crate) use chat_layout::ChatLayout;
+pub(crate) use clear_data_overlay::{ClearAction, ClearDataOverlay};
 pub(crate) use command_dock::CommandDock;
 pub(crate) use command_palette::{CommandPalette, PaletteAction};
 pub(crate) use command_suggestions::{CommandSuggestion, CommandSuggestions};
@@ -227,6 +229,13 @@ pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionCon
         ),
     );
 
+    let screen = node(
+        "modal_layer",
+        overlay_frame::OverlayFrame::new(
+            screen,
+            node("clear_data_overlay", ClearDataOverlay::default()),
+        ),
+    );
     let mut tree = Tree::new(screen);
     if let Some(rail) = tree.find_mut::<Rail>("rail") {
         rail.set_context(model.effective_context());

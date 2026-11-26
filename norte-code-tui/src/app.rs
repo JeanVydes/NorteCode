@@ -314,6 +314,9 @@ fn poll_timeout(
 /// Whether anything on screen moves on its own.
 fn animating(tree: &terminalui::Tree, model: &UiModel) -> bool {
     model.turn != TurnState::Idle
+        || tree
+            .find::<ui::ClearDataOverlay>("clear_data_overlay")
+            .is_some_and(ui::ClearDataOverlay::is_open)
         || (model.tab == crate::ui_model::Tab::Chat
             && tree
                 .find::<ui::CommandDock>("command_dock")
