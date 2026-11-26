@@ -50,6 +50,47 @@ fn type_text(tree: &mut Tree, text: &str, model: &mut UiModel) {
     }
 }
 
+fn press_app_key(
+    tree: &mut Tree,
+    key: KeyCode,
+    commands: &mut Option<mpsc::Sender<UiCommand>>,
+    model: &mut UiModel,
+) {
+    handle_key(
+        tree,
+        KeyEvent::new(key, KeyModifiers::NONE),
+        commands,
+        &mut None,
+        model,
+        None,
+    );
+}
+
+fn model_selection_tree() -> (UiModel, Tree) {
+    use std::collections::HashMap;
+
+    let mut model = UiModel::detached();
+    model.tab = Tab::Models;
+    model.attachment = SessionAttachmentState::Ready;
+    let mut tree = ui::build_tree(&model);
+    ui::sync_views(&mut tree, &model);
+    tree.find_mut::<ui::ModelsPage>("models")
+        .expect("models page")
+        .set_data(ui::ModelsData {
+            models: vec![crate::test_support::model_info("codex", "gpt-6-luna")],
+            key_status: HashMap::from([(
+                "codex".to_owned(),
+                crate::test_support::provider_key_status(
+                    norte_code_wire::ProviderKeySource::File,
+                    &[],
+                ),
+            )]),
+            active: None,
+        });
+    assert!(tree.focus("models"));
+    (model, tree)
+}
+
 fn escape() -> KeyEvent {
     KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
 }
@@ -328,41 +369,11 @@ fn new_command_defers_the_selected_model_until_first_message() {
 
 #[test]
 fn models_tab_selection_without_a_session_applies_to_the_next_message() {
-    use std::collections::HashMap;
-
-    let mut model = UiModel::detached();
-    model.tab = Tab::Models;
-    model.attachment = SessionAttachmentState::Ready;
-    let selected = crate::test_support::model_info("codex", "gpt-6-luna");
-    let mut tree = ui::build_tree(&model);
-    ui::sync_views(&mut tree, &model);
-    tree.find_mut::<ui::ModelsPage>("models")
-        .expect("models page")
-        .set_data(ui::ModelsData {
-            models: vec![selected],
-            key_status: HashMap::from([(
-                "codex".to_owned(),
-                crate::test_support::provider_key_status(
-                    norte_code_wire::ProviderKeySource::File,
-                    &[],
-                ),
-            )]),
-            active: None,
-        });
-    assert!(tree.focus("models"));
-
+    let (mut model, mut tree) = model_selection_tree();
     let (sender, mut receiver) = mpsc::channel(4);
     let mut commands = Some(sender);
-    let mut events = None;
     for key in [KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
-        handle_key(
-            &mut tree,
-            KeyEvent::new(key, KeyModifiers::NONE),
-            &mut commands,
-            &mut events,
-            &mut model,
-            None,
-        );
+        press_app_key(&mut tree, key, &mut commands, &mut model);
     }
 
     assert_eq!(
@@ -375,14 +386,7 @@ fn models_tab_selection_without_a_session_applies_to_the_next_message() {
     assert!(receiver.try_recv().is_err());
 
     for _ in 0..2 {
-        handle_key(
-            &mut tree,
-            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
-            &mut commands,
-            &mut events,
-            &mut model,
-            None,
-        );
+        press_app_key(&mut tree, KeyCode::BackTab, &mut commands, &mut model);
     }
     assert_eq!(tree.focused_id(), Some("composer"));
     type_text(&mut tree, "hello", &mut model);
@@ -392,14 +396,7 @@ fn models_tab_selection_without_a_session_applies_to_the_next_message() {
             .expanded_text(),
         "hello"
     );
-    handle_key(
-        &mut tree,
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut commands,
-        &mut events,
-        &mut model,
-        None,
-    );
+    press_app_key(&mut tree, KeyCode::Enter, &mut commands, &mut model);
 
     let command = receiver.try_recv();
     match command {
