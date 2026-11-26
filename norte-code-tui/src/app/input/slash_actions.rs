@@ -34,11 +34,7 @@ pub(super) fn execute_slash_command(
             return;
         }
     };
-    if !parts.is_empty()
-        || tree
-            .find::<ui::Composer>("composer")
-            .is_some_and(|composer| !composer.pending_attachments().is_empty())
-    {
+    if command_has_attachments(tree, parts) {
         notice(
             tree,
             "slash commands cannot include attachments; draft kept".into(),
@@ -58,6 +54,7 @@ pub(super) fn execute_slash_command(
         return;
     };
     let plugin_operation = matches!(&command, SlashCommand::ManagePlugin(_));
+    let compact_operation = matches!(&command, SlashCommand::Compact);
     let reasoning_update = match &command {
         SlashCommand::SetReasoning(reasoning) => Some(reasoning.clone()),
         _ => None,
@@ -109,6 +106,9 @@ pub(super) fn execute_slash_command(
         model.active_reasoning = reasoning_update;
     }
     clear_command_draft(tree, input);
+    if compact_operation {
+        dock(tree, "Compacting context…", true);
+    }
     if plugin_operation {
         notice(
             tree,
@@ -116,6 +116,16 @@ pub(super) fn execute_slash_command(
             ui::Tone::Neutral,
         );
     }
+}
+
+fn command_has_attachments(
+    tree: &terminalui::Tree,
+    parts: &[norte_code_wire::UserInputPart],
+) -> bool {
+    !parts.is_empty()
+        || tree
+            .find::<ui::Composer>("composer")
+            .is_some_and(|composer| !composer.pending_attachments().is_empty())
 }
 
 fn execute_local_slash_command(
@@ -146,6 +156,8 @@ fn execute_local_slash_command(
             ui::sync_theme(tree, model);
         }
         ui::refresh_views(tree, model);
+        let label = preference_feedback(preference, model);
+        dock(tree, label, false);
         clear_command_draft(tree, input);
         return true;
     }
@@ -187,9 +199,66 @@ fn execute_local_slash_command(
     let Some(message) = message else {
         return false;
     };
-    notice(tree, message, ui::Tone::Neutral);
+    if matches!(command, SlashCommand::SetQueueMode(_)) {
+        dock(tree, message.clone(), false);
+    } else {
+        notice(tree, message, ui::Tone::Neutral);
+    }
     clear_command_draft(tree, input);
     true
+}
+
+fn preference_feedback(
+    preference: &super::preferences::PreferenceCommand,
+    model: &UiModel,
+) -> String {
+    match preference {
+        super::preferences::PreferenceCommand::Theme(_) => format!(
+            "Theme: {}",
+            crate::theme::theme_name(&model.preferences.theme)
+        ),
+        super::preferences::PreferenceCommand::Diff(_) => {
+            format!("Diff: {}", model.preferences.diff_mode.label())
+        }
+        super::preferences::PreferenceCommand::Rail(_) => {
+            format!("Rail: {}", model.preferences.rail_position.label())
+        }
+        super::preferences::PreferenceCommand::ToolGrouping(_) => format!(
+            "Tool grouping: {}",
+            if model.preferences.tool_verbosity {
+                "on"
+            } else {
+                "off"
+            }
+        ),
+        super::preferences::PreferenceCommand::ToolOutput(_) => format!(
+            "Tool output expanded: {}",
+            if model.preferences.show_tool_output {
+                "on"
+            } else {
+                "off"
+            }
+        ),
+        super::preferences::PreferenceCommand::ChartDensity(_) => {
+            format!("Chart density: {}", model.preferences.chart_density)
+        }
+        super::preferences::PreferenceCommand::ChartContrast(_) => format!(
+            "Chart contrast: {}",
+            f32::from(model.preferences.chart_contrast) / 4.0
+        ),
+        super::preferences::PreferenceCommand::ChartDotSize(_) => format!(
+            "Chart dot size: {}",
+            ["small", "medium", "large"]
+                .get(usize::from(model.preferences.chart_dot_size))
+                .unwrap_or(&"unknown")
+        ),
+    }
+}
+
+fn dock(tree: &mut terminalui::Tree, message: impl Into<String>, progress: bool) {
+    if let Some(dock) = tree.find_mut::<ui::CommandDock>("command_dock") {
+        dock.show(message, progress);
+    }
 }
 
 fn clear_command_draft(tree: &mut terminalui::Tree, input: &str) {

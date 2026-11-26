@@ -120,6 +120,15 @@ pub(in crate::app) fn fold_compaction_finished(
     tree: &mut terminalui::Tree,
 ) {
     let (text, tone) = compact_notice::finished(compacted, summary, error);
+    if let Some(dock) = tree.find_mut::<ui::CommandDock>("command_dock") {
+        dock.finish_progress(if error.is_some() {
+            "Compaction failed"
+        } else if compacted {
+            "Context compacted"
+        } else {
+            "Nothing to compact"
+        });
+    }
     toast(tree, &text, tone);
     notice(tree, text, tone);
     set_compact_loading(tree, false);

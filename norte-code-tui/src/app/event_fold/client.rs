@@ -286,6 +286,11 @@ pub(in crate::app) fn drain_server_events(
                 changed = true;
             }
             Ok(ClientEvent::DataCleared) => {
+                model.tab = crate::ui_model::Tab::Chat;
+                tree.focus("composer");
+                if let Some(dock) = tree.find_mut::<ui::CommandDock>("command_dock") {
+                    dock.show("Session data cleared", false);
+                }
                 model.sessions.clear();
                 model.active = None;
                 model.pending_new_session_model = None;
@@ -344,6 +349,11 @@ pub(in crate::app) fn drain_server_events(
                 }
             }
             Ok(ClientEvent::SendFailed { reason }) => {
+                if matches!(reason, crate::client_error::ClientError::Compact(_))
+                    && let Some(dock) = tree.find_mut::<ui::CommandDock>("command_dock")
+                {
+                    dock.finish_progress("Compaction failed");
+                }
                 fold_send_failure(tree, model, &reason);
                 changed = true;
             }

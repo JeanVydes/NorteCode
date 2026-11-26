@@ -8,6 +8,7 @@ mod chart_renderer;
 mod chart_renderer_tests;
 mod chat_layout;
 pub(crate) mod chip_preview;
+mod command_dock;
 mod command_palette;
 #[cfg(test)]
 #[path = "command_palette_tests.rs"]
@@ -75,6 +76,7 @@ use norte_code_client::config::RetentionConfig;
 use terminalui::{Pane, Spacer};
 
 pub(crate) use chat_layout::ChatLayout;
+pub(crate) use command_dock::CommandDock;
 pub(crate) use command_palette::{CommandPalette, PaletteAction};
 pub(crate) use command_suggestions::{CommandSuggestion, CommandSuggestions};
 pub(crate) use composer::Composer;
@@ -211,7 +213,13 @@ pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionCon
                                     ),
                                 ),
                             ),
-                            node("command_suggestions", CommandSuggestions::default()),
+                            node(
+                                "dock_layer",
+                                overlay_frame::OverlayFrame::new(
+                                    node("command_dock", CommandDock::default()),
+                                    node("command_suggestions", CommandSuggestions::default()),
+                                ),
+                            ),
                         ),
                     ),
                 ),
@@ -267,6 +275,9 @@ pub(crate) fn sync_views(tree: &mut Tree, model: &crate::ui_model::UiModel) {
     } else {
         usize::from(prompt_open)
     };
+    if let Some(dock) = tree.find_mut::<CommandDock>("command_dock") {
+        dock.set_chat_visible(chat && visible == 0);
+    }
     let overlay_changed = tree
         .find::<Pane>("root")
         .is_none_or(|root| root.visible() != visible);
