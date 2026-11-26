@@ -10,11 +10,20 @@ the command line and open the interface:
 
 ```sh
 cargo install --git https://github.com/JeanVydes/NorteCode --branch dev norte-code-cli --force
+
+# Optional: install all six catalogue plugins from the Norte Code catalogue.
+# This includes OpenRouter, models.dev, Codex, OpenAI, Gemini, and Anthropic.
+norte service plugins add https://github.com/JeanVydes/catalog-plugin
+
+# Start the terminal interface.
 norte
 ```
 
 The binary is named `norte` and installs into `~/.cargo/bin`. `--force` replaces
 an existing installation. This command follows the `dev` branch.
+The optional plugin command installs every plugin package in the repository
+because no `--package` is specified. Only install plugins from sources you
+trust.
 
 ## Use Norte Code
 
