@@ -50,6 +50,7 @@ mod modal_pane;
 mod models_page;
 mod node_lookup;
 mod overlay_frame;
+mod overlay_motion;
 mod plan_overlay;
 mod plugin_list_overlay;
 mod plugin_rail_view;
@@ -195,7 +196,7 @@ pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionCon
 
     let screen = node(
         "screen",
-        overlay_frame::OverlayFrame::new(
+        overlay_frame::OverlayFrame::animated(
             root,
             node(
                 "toast_layer",
@@ -230,7 +231,7 @@ pub(crate) fn build_tree_with_retention(model: &UiModel, retention: RetentionCon
 
     let screen = node(
         "modal_layer",
-        overlay_frame::OverlayFrame::new(
+        overlay_frame::OverlayFrame::animated(
             screen,
             node("clear_data_overlay", ClearDataOverlay::default()),
         ),

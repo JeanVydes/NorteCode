@@ -17,6 +17,9 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
+const ENABLE_MOUSE_MOTION: &[u8] = b"\x1b[?1003h";
+const DISABLE_MOUSE_MOTION: &[u8] = b"\x1b[?1003l";
+
 pub(crate) struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     active: bool,
@@ -109,10 +112,12 @@ fn enter_screen(output: &mut impl Write) -> io::Result<()> {
         ),
         EnableMouseCapture,
         crossterm::event::EnableBracketedPaste
-    )
+    )?;
+    output.write_all(ENABLE_MOUSE_MOTION)
 }
 
 fn leave_screen(output: &mut impl Write) -> io::Result<()> {
+    output.write_all(DISABLE_MOUSE_MOTION)?;
     execute!(
         output,
         crossterm::style::ResetColor,

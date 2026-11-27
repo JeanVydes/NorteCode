@@ -105,22 +105,16 @@ impl UsageCalendar {
 fn levels(tokens: &[u64]) -> Vec<u8> {
     let mut active: Vec<u64> = tokens.iter().copied().filter(|value| *value > 0).collect();
     active.sort_unstable();
-    let quartile = |percent: usize| -> u64 {
-        if active.is_empty() {
-            return 0;
-        }
-        let index = active.len().saturating_mul(percent).saturating_sub(1) / 100;
-        active[index.min(active.len() - 1)]
-    };
-    let cutoffs = [quartile(25), quartile(50), quartile(75)];
     tokens
         .iter()
         .map(|value| match *value {
             0 => 0,
-            value if value <= cutoffs[0] => 1,
-            value if value <= cutoffs[1] => 2,
-            value if value <= cutoffs[2] => 3,
-            _ => 4,
+            value => {
+                let rank = active.partition_point(|candidate| *candidate <= value);
+                u8::try_from(rank.saturating_mul(4).div_ceil(active.len()))
+                    .unwrap_or(4)
+                    .clamp(1, 4)
+            }
         })
         .collect()
 }

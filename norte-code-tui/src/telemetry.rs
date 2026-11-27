@@ -25,6 +25,16 @@ pub(crate) fn short_label(key: &str, interval: ChartInterval) -> String {
     }
 }
 
+/// Full bucket timestamp shown when a chart point is hovered.
+pub(crate) fn tooltip_label(key: &str, interval: ChartInterval) -> String {
+    let value = match interval {
+        ChartInterval::Minute => key.get(..16).unwrap_or(key).to_owned(),
+        ChartInterval::Hour => format!("{}:00", key.get(..13).unwrap_or(key)),
+        ChartInterval::Day => key.get(..10).unwrap_or(key).to_owned(),
+    };
+    value.replace('T', " ")
+}
+
 impl ChartInterval {
     /// The label shown in the chart caption.
     pub(crate) const fn label(self) -> &'static str {

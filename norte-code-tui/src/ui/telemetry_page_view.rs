@@ -123,6 +123,7 @@ impl TelemetryPage {
         match self.view {
             TelemetryView::Charts => {
                 let heatmap_height = HEATMAP_ROWS.min(area.height);
+                let chart_gap = u16::from(heatmap_height > 0 && area.height > heatmap_height);
                 self.paint_heatmap(
                     Rect {
                         height: heatmap_height,
@@ -133,8 +134,8 @@ impl TelemetryPage {
                 );
                 self.paint_charts(
                     Rect {
-                        y: area.y + heatmap_height,
-                        height: area.height.saturating_sub(heatmap_height),
+                        y: area.y + heatmap_height + chart_gap,
+                        height: area.height.saturating_sub(heatmap_height + chart_gap),
                         ..area
                     },
                     buf,

@@ -268,19 +268,7 @@ impl TelemetryPage {
         };
         let mut caption = page;
         if self.view == TelemetryView::Charts {
-            let size = match self.chart_tuning.dotsize {
-                terminalui::components::presentation::DotSize::Medium => "medium",
-                terminalui::components::presentation::DotSize::Large => "large",
-                _ => "small",
-            };
-            let _ = write!(
-                caption,
-                " · {} · density {} · contrast {:.2} · {}",
-                self.chart_glyphs.label(),
-                self.chart_tuning.density,
-                self.chart_tuning.contrast,
-                size
-            );
+            let _ = write!(caption, " · {}", self.chart_glyphs.label());
         }
         if let Some(summary) = summary {
             let _ = write!(

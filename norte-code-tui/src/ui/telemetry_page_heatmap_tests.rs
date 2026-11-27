@@ -84,7 +84,7 @@ fn the_busiest_day_uses_the_primary_color() {
 
     assert_eq!(page(&tree).heatmap_weeks(), CALENDAR_WEEKS);
     let (x, y) = busiest_cell(page(&tree).heatmap_area());
-    assert_eq!(buf[(x, y)].bg, theme.primary);
+    assert_eq!(buf[(x, y)].fg, theme.primary);
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn unused_days_use_the_secondary_surface() {
     tree.render(area, &mut buf, &theme);
 
     let heatmap = page(&tree).heatmap_area();
-    assert_eq!(buf[(heatmap.x + 3, heatmap.y + 1)].bg, theme.secondary);
+    assert_eq!(buf[(heatmap.x + 3, heatmap.y + 1)].symbol(), "·");
 }
 
 #[test]
@@ -130,5 +130,5 @@ fn narrow_terminals_keep_only_the_recent_weeks() {
     let x = heatmap.x + 3 + u16::try_from(weeks - 1).unwrap_or(0);
     let today = Utc::now().date_naive();
     let y = heatmap.y + 1 + u16::try_from(today.weekday().num_days_from_sunday()).unwrap_or(0);
-    assert_eq!(buf[(x, y)].bg, theme.primary);
+    assert_eq!(buf[(x, y)].fg, theme.primary);
 }

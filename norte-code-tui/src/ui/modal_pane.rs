@@ -1,4 +1,6 @@
 //! Keeps the current page visible beneath the active modal.
+use std::time::Duration;
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -8,16 +10,21 @@ use serde::Serialize;
 use std::any::Any;
 use terminalui::{Context, InputEvent, Node, Outcome, Theme, View};
 
+use super::overlay_motion::OverlayMotion;
+
 #[derive(Serialize)]
 pub(crate) struct ModalPane {
     children: Vec<Node>,
     visible: usize,
+    #[serde(skip)]
+    motion: OverlayMotion,
 }
 impl ModalPane {
     pub(crate) fn new(children: Vec<Node>) -> Self {
         let mut pane = Self {
             children,
             visible: 0,
+            motion: OverlayMotion::default(),
         };
         pane.set_visible(0);
         pane
@@ -66,8 +73,22 @@ impl View for ModalPane {
                 background.view.render(area, buf, &mut background_cx, theme);
             }
         }
-        if let Some(child) = self.children.get_mut(self.visible) {
-            child.view.render(area, buf, cx, theme);
+        if self.visible == 0 {
+            if let Some(child) = self.children.first_mut() {
+                child.view.render(area, buf, cx, theme);
+            }
+            self.motion.paint(area, buf, false, 0, theme, |_| {});
+        } else if let Some(child) = self.children.get_mut(self.visible) {
+            self.motion
+                .paint(area, buf, true, self.visible, theme, |layer| {
+                    child.view.render(area, layer, cx, theme);
+                });
+        }
+    }
+    fn tick(&mut self, delta: Duration, cx: &mut Context) {
+        self.motion.tick(delta);
+        for child in &mut self.children {
+            child.view.tick(delta, cx);
         }
     }
     fn handle_event(&mut self, _: &InputEvent, _: &mut Context) -> Outcome {

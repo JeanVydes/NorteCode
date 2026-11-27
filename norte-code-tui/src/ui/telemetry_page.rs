@@ -84,8 +84,15 @@ enum ChartGlyphs {
     #[default]
     Braille,
     Halftone,
+    Ascii,
+    DenseAscii,
+    Numbers,
+    Binary,
+    Letters,
     Blocks,
+    Squares,
     Lines,
+    Dither,
 }
 
 impl ChartGlyphs {
@@ -93,8 +100,15 @@ impl ChartGlyphs {
         match self {
             Self::Braille => RenderStyle::Braille,
             Self::Halftone => RenderStyle::Halftone,
+            Self::Ascii => RenderStyle::Ascii,
+            Self::DenseAscii => RenderStyle::DenseAscii,
+            Self::Numbers => RenderStyle::Numbers,
+            Self::Binary => RenderStyle::Binary,
+            Self::Letters => RenderStyle::Letters,
             Self::Blocks => RenderStyle::Blocks,
+            Self::Squares => RenderStyle::Squares,
             Self::Lines => RenderStyle::Lines,
+            Self::Dither => RenderStyle::Dither,
         }
     }
 
@@ -102,17 +116,31 @@ impl ChartGlyphs {
         match self {
             Self::Braille => "braille",
             Self::Halftone => "dots",
+            Self::Ascii => "ASCII",
+            Self::DenseAscii => "dense ASCII",
+            Self::Numbers => "numbers",
+            Self::Binary => "binary",
+            Self::Letters => "letters",
             Self::Blocks => "blocks",
+            Self::Squares => "squares",
             Self::Lines => "lines",
+            Self::Dither => "dither",
         }
     }
 
     const fn next(self) -> Self {
         match self {
             Self::Braille => Self::Halftone,
-            Self::Halftone => Self::Blocks,
-            Self::Blocks => Self::Lines,
-            Self::Lines => Self::Braille,
+            Self::Halftone => Self::Ascii,
+            Self::Ascii => Self::DenseAscii,
+            Self::DenseAscii => Self::Numbers,
+            Self::Numbers => Self::Binary,
+            Self::Binary => Self::Letters,
+            Self::Letters => Self::Blocks,
+            Self::Blocks => Self::Squares,
+            Self::Squares => Self::Lines,
+            Self::Lines => Self::Dither,
+            Self::Dither => Self::Braille,
         }
     }
 }
@@ -159,7 +187,6 @@ pub(crate) struct TelemetryPage {
     #[serde(skip)]
     additional_charts: Vec<LineChart>,
     #[serde(skip)]
-    has_cost_slices: bool,
     provider_cost_chart: PieChart,
     #[serde(skip)]
     model_cost_chart: PieChart,
@@ -229,7 +256,6 @@ impl TelemetryPage {
                 LineChart::new(),
                 LineChart::new(),
             ],
-            has_cost_slices: false,
             provider_cost_chart: PieChart::new(),
             model_cost_chart: PieChart::new(),
             bucket_labels: Arc::new(Vec::new()),

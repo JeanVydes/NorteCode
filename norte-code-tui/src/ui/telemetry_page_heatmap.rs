@@ -95,7 +95,14 @@ impl TelemetryPage {
                     continue;
                 }
                 let level = self.usage_calendar.level(source, usize::from(weekday));
-                cell.set_symbol(" ").set_bg(level_color(theme, level));
+                let symbol = match level {
+                    1 => "▪",
+                    2 => "■",
+                    3..=4 => "●",
+                    _ => "·",
+                };
+                cell.set_symbol(symbol)
+                    .set_style(Style::default().fg(level_color(theme, level)));
             }
         }
     }
@@ -119,9 +126,15 @@ impl TelemetryPage {
             let x = legend_x
                 .saturating_add(5)
                 .saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+            let symbol = match level {
+                1 => "▪",
+                2 => "■",
+                3..=4 => "●",
+                _ => "·",
+            };
             buf[(x, area.y)]
-                .set_symbol(" ")
-                .set_bg(level_color(theme, *level));
+                .set_symbol(symbol)
+                .set_fg(level_color(theme, *level));
         }
         buf.set_stringn(legend_x + 11, area.y, "more", 4, muted);
     }
@@ -129,10 +142,10 @@ impl TelemetryPage {
 
 fn level_color(theme: &Theme, level: u8) -> Color {
     match level {
-        0 => theme.secondary,
-        1 => blend(theme.background, theme.primary, 32),
-        2 => blend(theme.background, theme.primary, 55),
-        3 => blend(theme.background, theme.primary, 78),
+        0 => theme.border,
+        1 => blend(theme.background, theme.primary, 44),
+        2 => blend(theme.background, theme.primary, 66),
+        3 => blend(theme.background, theme.primary, 84),
         _ => theme.primary,
     }
 }
