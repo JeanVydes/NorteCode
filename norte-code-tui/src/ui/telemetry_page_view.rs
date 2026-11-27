@@ -191,6 +191,45 @@ impl TelemetryPage {
             TelemetryView::Sessions | TelemetryView::Requests => None,
         }
     }
+
+    fn handle_chart_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Outcome> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if self.view != TelemetryView::Charts {
+            return None;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::PageUp => {
+                self.scroll_chart_view(if key.code == KeyCode::Up { -3 } else { -6 });
+            }
+            KeyCode::Down | KeyCode::PageDown => {
+                self.scroll_chart_view(if key.code == KeyCode::Down { 3 } else { 6 });
+            }
+            KeyCode::Char('[') => self.cycle_interval(true),
+            KeyCode::Char(']') => self.cycle_interval(false),
+            KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE => {
+                self.cycle_chart_density();
+            }
+            KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
+                self.cycle_chart_contrast();
+            }
+            KeyCode::Char('v') if key.modifiers == KeyModifiers::NONE => {
+                self.cycle_chart_dot_size();
+            }
+            KeyCode::Char('g') if key.modifiers == KeyModifiers::NONE => self.cycle_chart_glyphs(),
+            KeyCode::Char('+' | '=')
+                if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
+            {
+                self.zoom_chart_window(1.25);
+            }
+            KeyCode::Char('-' | '_')
+                if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
+            {
+                self.zoom_chart_window(0.8);
+            }
+            _ => return None,
+        }
+        Some(Outcome::Consumed)
+    }
 }
 
 impl View for TelemetryPage {
@@ -277,12 +316,15 @@ impl View for TelemetryPage {
         }
     }
 
-    fn handle_event(&mut self, event: &InputEvent, _cx: &mut Context) -> Outcome {
+    fn handle_event(&mut self, event: &InputEvent, cx: &mut Context) -> Outcome {
         use crossterm::event::KeyCode;
         if let InputEvent::Mouse(mouse) = event
             && let Some(outcome) = self.handle_mouse(*mouse)
         {
             return outcome;
+        }
+        if self.handle_chart_hover(event, cx) == Outcome::Consumed {
+            return Outcome::Consumed;
         }
         if let InputEvent::Key(key) = event
             && key.kind == crossterm::event::KeyEventKind::Press
@@ -292,57 +334,16 @@ impl View for TelemetryPage {
             {
                 return outcome;
             }
+            if let Some(outcome) = self.handle_chart_key(*key) {
+                return outcome;
+            }
             match key.code {
-                KeyCode::Up | KeyCode::PageUp if self.view == TelemetryView::Charts => {
-                    self.scroll_chart_view(if key.code == KeyCode::Up { -3 } else { -6 });
-                    return Outcome::Consumed;
-                }
-                KeyCode::Down | KeyCode::PageDown if self.view == TelemetryView::Charts => {
-                    self.scroll_chart_view(if key.code == KeyCode::Down { 3 } else { 6 });
-                    return Outcome::Consumed;
-                }
                 KeyCode::Char('[') => {
                     self.cycle_interval(true);
                     return Outcome::Consumed;
                 }
                 KeyCode::Char(']') => {
                     self.cycle_interval(false);
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('d') if key.modifiers == crossterm::event::KeyModifiers::NONE => {
-                    self.cycle_chart_density();
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('c') if key.modifiers == crossterm::event::KeyModifiers::NONE => {
-                    self.cycle_chart_contrast();
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('v') if key.modifiers == crossterm::event::KeyModifiers::NONE => {
-                    self.cycle_chart_dot_size();
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('g') if key.modifiers == crossterm::event::KeyModifiers::NONE => {
-                    self.cycle_chart_glyphs();
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('+' | '=')
-                    if matches!(
-                        key.modifiers,
-                        crossterm::event::KeyModifiers::NONE
-                            | crossterm::event::KeyModifiers::SHIFT
-                    ) =>
-                {
-                    self.zoom_chart_window(1.25);
-                    return Outcome::Consumed;
-                }
-                KeyCode::Char('-' | '_')
-                    if matches!(
-                        key.modifiers,
-                        crossterm::event::KeyModifiers::NONE
-                            | crossterm::event::KeyModifiers::SHIFT
-                    ) =>
-                {
-                    self.zoom_chart_window(0.8);
                     return Outcome::Consumed;
                 }
                 KeyCode::Char('j') | KeyCode::Down

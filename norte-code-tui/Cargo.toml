@@ -18,7 +18,7 @@ name = "norte-code-tui"
 path = "src/main.rs"
 
 [dependencies]
-terminalui = { git = "https://github.com/JeanVydes/terminalui.git", rev = "b7b55a60231ed4a1fd8be5121fcd1000cc4ab4ea" }
+terminalui = { git = "https://github.com/JeanVydes/terminalui.git", rev = "8f913a7" }
 # Wayland's data-control backend is required to read native Wayland apps.
 arboard = { version = "3", features = ["image-data", "wayland-data-control"] }
 base64.workspace = true

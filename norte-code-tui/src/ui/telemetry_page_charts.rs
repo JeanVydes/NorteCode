@@ -31,6 +31,34 @@ struct ChartSlotLayout {
 }
 
 impl TelemetryPage {
+    pub(super) fn handle_chart_hover(
+        &mut self,
+        event: &terminalui::InputEvent,
+        cx: &mut Context,
+    ) -> terminalui::Outcome {
+        if self.view != TelemetryView::Charts
+            || !matches!(
+                event,
+                terminalui::InputEvent::Mouse(mouse)
+                    if mouse.kind == crossterm::event::MouseEventKind::Moved
+            )
+        {
+            return terminalui::Outcome::Ignored;
+        }
+        let mut consumed = false;
+        for chart in &mut self.additional_charts {
+            consumed |= chart.handle_event(event, cx) == terminalui::Outcome::Consumed;
+        }
+        consumed |=
+            self.provider_cost_chart.handle_event(event, cx) == terminalui::Outcome::Consumed;
+        consumed |= self.model_cost_chart.handle_event(event, cx) == terminalui::Outcome::Consumed;
+        if consumed {
+            terminalui::Outcome::Consumed
+        } else {
+            terminalui::Outcome::Ignored
+        }
+    }
+
     pub(crate) fn set_chart_preferences(
         &mut self,
         density: u8,
@@ -364,6 +392,10 @@ impl TelemetryPage {
         let page = &mut self.chart_page;
         let body = paint_slot_title(page, layout.y, layout.area.width, layout.title, theme);
         let body_y = layout.y + 1;
+        let pointer_origin = (
+            i32::from(layout.area.x),
+            i32::from(layout.area.y) - i32::from(layout.offset),
+        );
         match layout.index {
             0 | 1 | 3 => {
                 let child_index = match layout.index {
@@ -372,6 +404,11 @@ impl TelemetryPage {
                     _ => 2,
                 };
                 if let Some(child) = self.children.get_mut(child_index) {
+                    if let Some(chart) = child.view.as_any().downcast_mut::<CandleChart>() {
+                        chart.set_pointer_origin(pointer_origin.0, pointer_origin.1);
+                    } else if let Some(chart) = child.view.as_any().downcast_mut::<LineChart>() {
+                        chart.set_pointer_origin(pointer_origin.0, pointer_origin.1);
+                    }
                     child.view.render(body, page, cx, theme);
                 }
             }
@@ -384,6 +421,7 @@ impl TelemetryPage {
                     _ => 4,
                 };
                 if let Some(chart) = self.additional_charts.get_mut(chart_index) {
+                    chart.set_pointer_origin(pointer_origin.0, pointer_origin.1);
                     chart.render(body, page, cx, theme);
                 }
             }
@@ -391,6 +429,7 @@ impl TelemetryPage {
                 &mut self.provider_cost_chart,
                 &mut self.model_cost_chart,
                 body,
+                pointer_origin,
                 page,
                 cx,
                 theme,
@@ -532,16 +571,25 @@ impl TelemetryPage {
                     &mut self.provider_cost_chart,
                     &mut self.model_cost_chart,
                     chart_area,
+                    (0, 0),
                     buf,
                     cx,
                     theme,
                 );
             } else if index == 0 {
                 if let Some(child) = self.children.first_mut() {
+                    if let Some(chart) = child.view.as_any().downcast_mut::<CandleChart>() {
+                        chart.set_pointer_origin(0, 0);
+                    }
                     child.view.render(chart_area, buf, cx, theme);
                 }
             } else if let Some(chart) = self.chart_by_index_mut(index) {
+                chart.set_pointer_origin(0, 0);
                 chart.render(chart_area, buf, cx, theme);
+            }
+            if index == 8 {
+                self.provider_cost_chart.set_pointer_origin(0, 0);
+                self.model_cost_chart.set_pointer_origin(0, 0);
             }
             self.chart_areas.push(chart_area);
             if index > 0 && index < 8 {
@@ -620,6 +668,7 @@ fn paint_cost_mix(
     provider_chart: &mut PieChart,
     model_chart: &mut PieChart,
     area: Rect,
+    pointer_origin: (i32, i32),
     buf: &mut Buffer,
     cx: &mut Context,
     theme: &Theme,
@@ -645,6 +694,8 @@ fn paint_cost_mix(
         header_style,
     );
     let chart_area = |x, width| Rect::new(x, area.y + 1, width, area.height.saturating_sub(1));
+    provider_chart.set_pointer_origin(pointer_origin.0, pointer_origin.1);
+    model_chart.set_pointer_origin(pointer_origin.0, pointer_origin.1);
     provider_chart.render(chart_area(area.x, chart_width), buf, cx, theme);
     model_chart.render(
         chart_area(area.x + half, area.width.saturating_sub(half)),
