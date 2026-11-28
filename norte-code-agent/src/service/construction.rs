@@ -211,12 +211,14 @@ impl Service {
             .iter()
             .map(|skill| skill.name.clone())
             .collect();
-        let system_prompt =
-            compose_system_prompt(&system_prompt.into(), project.as_ref(), &skill_index);
-        let subagent_base = config
+        let default_system_prompt = system_prompt.into();
+        let system_prompt_base = config
             .system_prompt
             .as_deref()
-            .unwrap_or(DEFAULT_SUBAGENT_SYSTEM_PROMPT);
+            .unwrap_or(&default_system_prompt);
+        let system_prompt =
+            compose_system_prompt(system_prompt_base, project.as_ref(), &skill_index);
+        let subagent_base = DEFAULT_SUBAGENT_SYSTEM_PROMPT;
         let subagent_system_prompt =
             compose_system_prompt(subagent_base, project.as_ref(), &skill_index);
         let questions = Arc::new(
