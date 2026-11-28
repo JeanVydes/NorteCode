@@ -178,6 +178,9 @@ pub(crate) struct TelemetryPage {
     transition: Option<terminalui::Animation>,
     #[serde(skip)]
     chart_grid: bool,
+    /// Visible chart viewport, used to route wheel input between page and history scrolling.
+    #[serde(skip)]
+    chart_viewport: Rect,
     /// Screen areas of the three chart bodies, for wheel hit-testing.
     #[serde(skip)]
     chart_areas: Vec<Rect>,
@@ -247,6 +250,7 @@ impl TelemetryPage {
             chart_scroll: ChartScroll::default(),
             transition: None,
             chart_grid: false,
+            chart_viewport: Rect::default(),
             chart_areas: Vec::new(),
             chart_data: Series::default(),
             additional_charts: vec![

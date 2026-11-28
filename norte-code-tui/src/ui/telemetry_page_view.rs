@@ -163,6 +163,20 @@ impl TelemetryPage {
                 ) {
                     return None;
                 }
+                if !self.chart_grid
+                    && mouse.column >= self.chart_viewport.x
+                    && mouse.column < self.chart_viewport.right()
+                    && mouse.row >= self.chart_viewport.y
+                    && mouse.row < self.chart_viewport.bottom()
+                {
+                    let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                        -3
+                    } else {
+                        3
+                    };
+                    self.chart_scroll.scroll(delta, CHART_ROWS);
+                    return Some(Outcome::Consumed);
+                }
                 let chart = self.chart_areas.iter().position(|area| {
                     mouse.column >= area.x
                         && mouse.column < area.x.saturating_add(area.width)
@@ -259,8 +273,11 @@ impl View for TelemetryPage {
         buf.set_style(area, Style::default().bg(theme.background));
         let caption = self.caption();
         let hint = match self.view {
-            TelemetryView::Charts => {
+            TelemetryView::Charts if self.chart_grid => {
                 "Tab view · wheel/↑↓ history · [ ] interval · d density · c contrast · v size · g glyphs"
+            }
+            TelemetryView::Charts => {
+                "Tab view · wheel/↑↓ charts · [ ] interval · d density · c contrast · v size · g glyphs"
             }
             TelemetryView::Leaderboards => "Tab view · 1-8 metric · ←→ type · j/k rows",
             TelemetryView::Sessions => "Tab view · j/k sessions · [ ] interval",

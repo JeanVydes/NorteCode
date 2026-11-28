@@ -535,6 +535,7 @@ impl TelemetryPage {
             return;
         }
         self.chart_grid = true;
+        self.chart_viewport = area;
         self.chart_scroll.set_viewport(area.height, area.height);
         self.chart_areas.clear();
         buf.set_style(area, Style::default().bg(theme.background));
@@ -620,6 +621,7 @@ impl TelemetryPage {
             return;
         }
         self.chart_grid = false;
+        self.chart_viewport = area;
         self.chart_scroll.set_viewport(area.height, CHART_ROWS);
         let offset = self.chart_scroll.offset();
         self.chart_areas.clear();
